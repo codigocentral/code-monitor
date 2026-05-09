@@ -1,0 +1,54 @@
+# Rust/Cargo build artifacts
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment, local configuration, and secrets
+.env
+*.local
+config.toml
+client-config.toml
+certs/
+keys/
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Private operational repositories or local deployment material
+ops-private/
+clientes-private/
+
+# Debug files
+*.pdb
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*.profraw
+check_*.rs
+check_*.exe
+
+# Generated files
+*.log
+
+# OS generated files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Backup files
+*.bak
+*.tmp
+*.temp
+
+# Local Codex/Claude settings
+.claude/

@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  # Code Monitor Server
+  monitor-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: code-monitor-server
+    ports:
+      - "50051:50051"
+      - "8080:8080"
+    volumes:
+      - ./config.toml:/etc/code-monitor/config.toml:ro
+      - ./certs:/etc/code-monitor/certs:ro
+      - monitor-data:/var/lib/code-monitor
+    environment:
+      - RUST_LOG=info
+      - CONFIG_PATH=/etc/code-monitor/config.toml
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "monitor-server", "--version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - code-monitor-network
+
+  # Optional: Client in container (for testing)
+  monitor-client:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    container_name: code-monitor-client
+    depends_on:
+      - monitor-server
+    environment:
+      - RUST_LOG=info
+    networks:
+      - code-monitor-network
+    profiles:
+      - client
+
+volumes:
+  monitor-data:
+    driver: local
+
+networks:
+  code-monitor-network:
+    driver: bridge

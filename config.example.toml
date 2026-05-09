@@ -1,0 +1,13 @@
+update_interval_seconds = 5
+max_clients = 100
+enable_authentication = true
+log_level = "info"
+
+# Optional. If omitted, the server generates or loads its runtime token locally.
+# access_token = "replace-with-generated-token"
+
+# Optional TLS configuration.
+# [tls]
+# cert_path = "/etc/code-monitor/server.crt"
+# key_path = "/etc/code-monitor/server.key"
+# ca_path = "/etc/code-monitor/ca.crt"

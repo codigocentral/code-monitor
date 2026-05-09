@@ -1,0 +1,16 @@
+update_interval_seconds = 5
+auto_reconnect = true
+reconnect_delay_seconds = 5
+
+[[servers]]
+id = "00000000-0000-0000-0000-000000000000"
+name = "Example Server"
+address = "192.0.2.10"
+port = 50051
+access_token = "replace-with-server-token"
+
+# Optional TLS configuration.
+# [servers.tls]
+# ca_cert_path = "/path/to/ca.crt"
+# client_cert_path = "/path/to/client.crt"
+# client_key_path = "/path/to/client.key"

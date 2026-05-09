@@ -1,0 +1,53 @@
+# Build stage
+FROM rust:1.75 AS builder
+
+WORKDIR /app
+
+# Install protoc
+RUN apt-get update && apt-get install -y protobuf-compiler && rm -rf /var/lib/apt/lists/*
+
+# Copy workspace files
+COPY Cargo.toml Cargo.lock ./
+COPY shared/Cargo.toml shared/Cargo.lock ./shared/
+COPY server/Cargo.toml ./server/
+COPY client/Cargo.toml ./client/
+
+# Copy source code
+COPY shared/src ./shared/src
+COPY server/src ./server/src
+COPY shared/build.rs ./shared/
+
+# Build the server
+RUN cargo build --release --bin monitor-server
+
+# Runtime stage
+FROM debian:bookworm-slim
+
+# Install runtime dependencies
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN groupadd -r codemonitor && useradd -r -g codemonitor codemonitor
+
+# Copy binary
+COPY --from=builder /app/target/release/monitor-server /usr/local/bin/monitor-server
+
+# Create data directory
+RUN mkdir -p /var/lib/code-monitor && chown codemonitor:codemonitor /var/lib/code-monitor
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD monitor-server --version || exit 1
+
+# Switch to non-root user
+USER codemonitor
+
+# Expose ports
+EXPOSE 50051 8080
+
+# Default command
+CMD ["monitor-server"]

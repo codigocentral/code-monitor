@@ -1,0 +1,36 @@
+# Build stage
+FROM rust:1.75 AS builder
+
+WORKDIR /app
+
+# Install protoc
+RUN apt-get update && apt-get install -y protobuf-compiler && rm -rf /var/lib/apt/lists/*
+
+# Copy workspace files
+COPY Cargo.toml Cargo.lock ./
+COPY shared/Cargo.toml shared/Cargo.lock ./shared/
+COPY server/Cargo.toml ./server/
+COPY client/Cargo.toml ./client/
+
+# Copy source code
+COPY shared/src ./shared/src
+COPY client/src ./client/src
+COPY shared/build.rs ./shared/
+
+# Build the client
+RUN cargo build --release --bin monitor-client
+
+# Runtime stage
+FROM debian:bookworm-slim
+
+# Install runtime dependencies
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy binary
+COPY --from=builder /app/target/release/monitor-client /usr/local/bin/monitor-client
+
+# Default command (shows help)
+CMD ["monitor-client", "--help"]

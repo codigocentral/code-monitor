@@ -1,0 +1,266 @@
+syntax = "proto3";
+
+package monitoring;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+
+// System monitoring service
+service MonitorService {
+    // Get current system information
+    rpc GetSystemInfo(google.protobuf.Empty) returns (SystemInfoResponse);
+    
+    // Get running processes
+    rpc GetProcesses(ProcessesRequest) returns (ProcessesResponse);
+    
+    // Get service information
+    rpc GetServices(google.protobuf.Empty) returns (ServicesResponse);
+    
+    // Get network information
+    rpc GetNetworkInfo(google.protobuf.Empty) returns (NetworkInfoResponse);
+    
+    // Get Docker containers
+    rpc GetContainers(ContainersRequest) returns (ContainersResponse);
+    
+    // Get Postgres cluster info
+    rpc GetPostgresInfo(google.protobuf.Empty) returns (PostgresInfoResponse);
+    
+    // Get MariaDB cluster info
+    rpc GetMariaDBInfo(google.protobuf.Empty) returns (MariaDBInfoResponse);
+    
+    // Get systemd units info
+    rpc GetSystemdInfo(google.protobuf.Empty) returns (SystemdInfoResponse);
+    
+    // Stream system updates
+    rpc StreamSystemUpdates(UpdatesRequest) returns (stream SystemUpdate);
+    
+}
+
+// System information response
+message SystemInfoResponse {
+    string hostname = 1;
+    string os = 2;
+    string kernel_version = 3;
+    uint64 uptime_seconds = 4;
+    uint32 cpu_count = 5;
+    double cpu_usage_percent = 6;
+    uint64 memory_total_bytes = 7;
+    uint64 memory_used_bytes = 8;
+    uint64 memory_available_bytes = 9;
+    repeated DiskInfo disk_info = 10;
+    google.protobuf.Timestamp timestamp = 11;
+}
+
+// Disk information
+message DiskInfo {
+    string device = 1;
+    string mount_point = 2;
+    string filesystem_type = 3;
+    uint64 total_bytes = 4;
+    uint64 used_bytes = 5;
+    uint64 available_bytes = 6;
+    double usage_percent = 7;
+}
+
+// Processes request
+message ProcessesRequest {
+    uint32 limit = 1;
+    string filter = 2;
+}
+
+// Processes response
+message ProcessesResponse {
+    repeated ProcessInfo processes = 1;
+    google.protobuf.Timestamp timestamp = 2;
+}
+
+// Process information
+message ProcessInfo {
+    uint32 pid = 1;
+    string name = 2;
+    string user = 3;
+    double cpu_usage_percent = 4;
+    uint64 memory_usage_bytes = 5;
+    string command_line = 6;
+    google.protobuf.Timestamp start_time = 7;
+    string status = 8;
+}
+
+// Services response
+message ServicesResponse {
+    repeated ServiceInfo services = 1;
+    google.protobuf.Timestamp timestamp = 2;
+}
+
+// Service information
+message ServiceInfo {
+    string name = 1;
+    string status = 2;
+    uint32 pid = 3;
+    double cpu_usage_percent = 4;
+    uint64 memory_usage_bytes = 5;
+    string user = 6;
+    uint64 uptime_seconds = 7;
+}
+
+// Network information response
+message NetworkInfoResponse {
+    repeated NetworkInfo interfaces = 1;
+    google.protobuf.Timestamp timestamp = 2;
+}
+
+// Network information
+message NetworkInfo {
+    string interface = 1;
+    string ip_address = 2;
+    string mac_address = 3;
+    bool is_up = 4;
+    uint64 bytes_sent = 5;
+    uint64 bytes_received = 6;
+    uint64 packets_sent = 7;
+    uint64 packets_received = 8;
+}
+
+// Updates request
+message UpdatesRequest {
+    uint64 update_interval_seconds = 1;
+}
+
+// Container information
+message ContainerInfo {
+    string id = 1;
+    string name = 2;
+    string image = 3;
+    string status = 4;
+    string state = 5;
+    string health = 6;
+    double cpu_percent = 7;
+    uint64 memory_usage_bytes = 8;
+    uint64 memory_limit_bytes = 9;
+    double memory_percent = 10;
+    uint32 restart_count = 11;
+    uint64 network_rx_bytes = 12;
+    uint64 network_tx_bytes = 13;
+    repeated string networks = 14;
+}
+
+// Containers request
+message ContainersRequest {
+    string filter = 1;
+}
+
+// Containers response
+message ContainersResponse {
+    repeated ContainerInfo containers = 1;
+    google.protobuf.Timestamp timestamp = 2;
+}
+
+// Postgres database info
+message PostgresDatabaseInfo {
+    string name = 1;
+    uint64 size_bytes = 2;
+    uint32 num_backends = 3;
+    double cache_hit_ratio = 4;
+}
+
+// Connection state count
+message ConnectionStateCount {
+    string state = 1;
+    uint32 count = 2;
+}
+
+// Top query info
+message TopQuery {
+    string query = 1;
+    uint64 calls = 2;
+    double total_exec_time_ms = 3;
+    double mean_exec_time_ms = 4;
+}
+
+// Postgres cluster info
+message PostgresClusterInfo {
+    string name = 1;
+    string host = 2;
+    uint32 port = 3;
+    repeated PostgresDatabaseInfo databases = 4;
+    uint32 connections_total = 5;
+    repeated ConnectionStateCount connections_by_state = 6;
+    double cache_hit_ratio = 7;
+    repeated TopQuery top_queries = 8;
+    google.protobuf.Timestamp timestamp = 9;
+}
+
+// Postgres info response
+message PostgresInfoResponse {
+    repeated PostgresClusterInfo clusters = 1;
+    google.protobuf.Timestamp timestamp = 2;
+}
+
+// MariaDB schema info
+message MariaDBSchemaInfo {
+    string name = 1;
+    uint64 size_bytes = 2;
+    uint32 table_count = 3;
+}
+
+// MariaDB process info
+message MariaDBProcessInfo {
+    uint64 id = 1;
+    string user = 2;
+    string host = 3;
+    string db = 4;
+    string command = 5;
+    uint32 time_seconds = 6;
+    string state = 7;
+    string info = 8;
+}
+
+// MariaDB cluster info
+message MariaDBClusterInfo {
+    string name = 1;
+    string host = 2;
+    uint32 port = 3;
+    repeated MariaDBSchemaInfo schemas = 4;
+    uint32 connections_active = 5;
+    uint32 connections_total = 6;
+    string innodb_status = 7;
+    repeated MariaDBProcessInfo processes = 8;
+    google.protobuf.Timestamp timestamp = 9;
+}
+
+// MariaDB info response
+message MariaDBInfoResponse {
+    repeated MariaDBClusterInfo clusters = 1;
+    google.protobuf.Timestamp timestamp = 2;
+}
+
+// Systemd unit info
+message SystemdUnitInfo {
+    string name = 1;
+    string status = 2;
+    bool is_active = 3;
+    uint32 pid = 4;
+    uint64 memory_current_bytes = 5;
+    google.protobuf.Timestamp started_at = 6;
+}
+
+// Systemd info response
+message SystemdInfoResponse {
+    repeated SystemdUnitInfo units = 1;
+    google.protobuf.Timestamp timestamp = 2;
+}
+
+// System update (for streaming)
+message SystemUpdate {
+    oneof update_type {
+        SystemInfoResponse system_info = 1;
+        ProcessInfo process_update = 2;
+        ServiceInfo service_update = 3;
+        NetworkInfo network_update = 4;
+        ContainerInfo container_update = 5;
+        PostgresClusterInfo postgres_update = 6;
+        MariaDBClusterInfo mariadb_update = 7;
+        SystemdUnitInfo systemd_update = 8;
+    }
+    google.protobuf.Timestamp timestamp = 9;
+}
