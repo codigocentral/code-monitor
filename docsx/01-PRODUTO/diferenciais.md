@@ -77,7 +77,7 @@
 
 ```bash
 # Code Monitor - Instalação
-curl -sSL https://get.codemonitor.io | bash
+curl -sSL https://github.com/codigocentral/code-monitor/releases/latest/download/install.sh | sudo bash
 # ou
 wget https://releases.codemonitor.io/latest/linux/monitor-server
 chmod +x monitor-server

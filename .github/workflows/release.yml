@@ -82,6 +82,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist
           Copy-Item target/${{ matrix.target }}/release/monitor-server.exe dist/
           Copy-Item target/${{ matrix.target }}/release/monitor-client.exe dist/
+          Copy-Item install.ps1 dist/
           Copy-Item README.md dist/
           cd dist
           Compress-Archive -Path * -DestinationPath "monitor-${{ matrix.archive_name }}.zip"
@@ -111,7 +112,10 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          files: artifacts/**/*
+          files: |
+            artifacts/**/*
+            install.sh
+            install.ps1
           draft: false
           prerelease: false
           generate_release_notes: true

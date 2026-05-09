@@ -34,7 +34,7 @@
 
 \`\`\`bash
 # Download
-curl -sSL https://get.codemonitor.io | bash
+curl -sSL https://github.com/codigocentral/code-monitor/releases/latest/download/install.sh | sudo bash
 
 # Start server (on each machine to monitor)
 ./monitor-server

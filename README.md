@@ -2,7 +2,7 @@
 
 > **Lightweight multi-server monitoring built in Rust**
 
-[![CI](https://github.com/diogo/code-monitor/workflows/CI/badge.svg)]()
+[![CI](https://github.com/codigocentral/code-monitor/workflows/CI/badge.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)]()
 [![Version](https://img.shields.io/badge/version-0.1.0-green)]()
 
@@ -40,9 +40,16 @@ Code Monitor is a **high-performance system monitoring tool** that combines the 
 
 ## 📦 Installation
 
-### Quick Install
+### Linux/macOS
 ```bash
-curl -sSL https://get.codemonitor.io | bash
+curl -sSL https://github.com/codigocentral/code-monitor/releases/latest/download/install.sh | sudo bash
+```
+
+### Windows
+Run PowerShell as Administrator:
+
+```powershell
+iwr https://github.com/codigocentral/code-monitor/releases/latest/download/install.ps1 -UseB | iex
 ```
 
 ### Docker
@@ -52,7 +59,7 @@ docker-compose up -d
 
 ### From Source
 ```bash
-git clone https://github.com/diogo/code-monitor
+git clone https://github.com/codigocentral/code-monitor
 cd code-monitor
 cargo build --release
 ```

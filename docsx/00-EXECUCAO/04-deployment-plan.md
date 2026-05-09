@@ -46,9 +46,9 @@ ssh admin5@10.10.0.1
 
 # Baixar/copiar binário e install.sh
 sudo curl -L -o /tmp/monitor-server \
-  https://github.com/diogo/code-monitor/releases/download/v0.2.0/monitor-server-linux-x86_64
+  https://github.com/codigocentral/code-monitor/releases/download/v0.2.0/monitor-linux-x86_64.tar.gz
 sudo curl -L -o /tmp/install.sh \
-  https://raw.githubusercontent.com/diogo/code-monitor/main/install.sh
+  https://raw.githubusercontent.com/codigocentral/code-monitor/main/install.sh
 sudo chmod +x /tmp/install.sh /tmp/monitor-server
 
 # Rodar install
