@@ -56,6 +56,13 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
+    /// Create or update the server configuration interactively
+    Init {
+        /// Overwrite an existing config without asking
+        #[arg(short, long)]
+        force: bool,
+    },
+
     /// Show the access token for clients to connect
     ShowToken,
 
@@ -211,9 +218,14 @@ async fn main() -> Result<()> {
 }
 
 fn handle_command(cmd: &Commands, config_path: &str) -> Result<()> {
+    if let Commands::Init { force } = cmd {
+        return init_config(config_path, *force);
+    }
+
     let mut config = Config::load(config_path)?;
 
     match cmd {
+        Commands::Init { .. } => unreachable!(),
         Commands::ShowToken => {
             println!();
             println!("🔑 Access Token for clients:");
@@ -284,6 +296,170 @@ fn handle_command(cmd: &Commands, config_path: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn init_config(config_path: &str, force: bool) -> Result<()> {
+    use std::io::{self, Write};
+    use std::path::Path;
+
+    let path = Path::new(config_path);
+    if path.exists() && !force && !prompt_bool("Config exists. Update it?", true)? {
+        println!("Keeping existing config: {}", config_path);
+        return Ok(());
+    }
+
+    let mut config = if path.exists() {
+        Config::load(path)?
+    } else {
+        Config::default()
+    };
+
+    println!();
+    println!("Code Monitor server setup");
+    println!();
+
+    config.update_interval_seconds = prompt_u64(
+        "Update interval seconds",
+        config.update_interval_seconds,
+    )?;
+    config.max_clients = prompt_usize("Max clients", config.max_clients)?;
+    config.enable_authentication = prompt_bool(
+        "Enable token authentication",
+        config.enable_authentication,
+    )?;
+
+    if config.enable_authentication
+        && (config.access_token.is_empty() || prompt_bool("Generate a new access token", false)?)
+    {
+        config.generate_access_token();
+    }
+
+    if prompt_bool("Enable TLS paths in config", config.tls.is_some())? {
+        let current = config.tls.clone();
+        let cert_default = current
+            .as_ref()
+            .map(|tls| tls.cert_path.as_str())
+            .unwrap_or("/etc/code-monitor/certs/server.crt");
+        let key_default = current
+            .as_ref()
+            .map(|tls| tls.key_path.as_str())
+            .unwrap_or("/etc/code-monitor/certs/server.key");
+        let ca_default = current
+            .as_ref()
+            .and_then(|tls| tls.ca_path.as_deref())
+            .unwrap_or("");
+
+        let cert_path = prompt_string("Server certificate path", cert_default)?;
+        let key_path = prompt_string("Server private key path", key_default)?;
+        let ca_path = prompt_string("Client CA path for mTLS (blank to disable)", ca_default)?;
+
+        config.tls = Some(config::TlsConfig {
+            cert_path,
+            key_path,
+            ca_path: blank_to_none(ca_path),
+        });
+    } else {
+        config.tls = None;
+    }
+
+    let units_default = if config.systemd_units.is_empty() {
+        String::new()
+    } else {
+        config.systemd_units.join(",")
+    };
+    let units = prompt_string("systemd units to watch, comma-separated (blank for none)", &units_default)?;
+    config.systemd_units = units
+        .split(',')
+        .map(str::trim)
+        .filter(|unit| !unit.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    config.save(path)?;
+
+    println!();
+    println!("Server config written to {}", config_path);
+    if config.enable_authentication {
+        println!();
+        println!("Access token:");
+        println!("{}", config.access_token);
+        println!();
+        println!("Use this token when adding the server on monitor-client.");
+    }
+    println!();
+    println!("Start server:");
+    println!("monitor-server --config {}", config_path);
+    println!();
+
+    io::stdout().flush()?;
+    Ok(())
+}
+
+fn prompt_string(label: &str, default: &str) -> Result<String> {
+    use std::io::{self, Write};
+
+    if default.is_empty() {
+        print!("{}: ", label);
+    } else {
+        print!("{} [{}]: ", label, default);
+    }
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let input = input.trim();
+    if input.is_empty() {
+        Ok(default.to_string())
+    } else {
+        Ok(input.to_string())
+    }
+}
+
+fn prompt_bool(label: &str, default: bool) -> Result<bool> {
+    let suffix = if default { "Y/n" } else { "y/N" };
+    loop {
+        let answer = prompt_string(&format!("{} ({})", label, suffix), "")?;
+        if answer.is_empty() {
+            return Ok(default);
+        }
+        match answer.to_ascii_lowercase().as_str() {
+            "y" | "yes" | "s" | "sim" => return Ok(true),
+            "n" | "no" | "nao" | "não" => return Ok(false),
+            _ => println!("Please answer yes or no."),
+        }
+    }
+}
+
+fn prompt_u64(label: &str, default: u64) -> Result<u64> {
+    loop {
+        let answer = prompt_string(label, &default.to_string())?;
+        match answer.parse() {
+            Ok(value) => return Ok(value),
+            Err(_) => println!("Please enter a valid number."),
+        }
+    }
+}
+
+fn prompt_usize(label: &str, default: usize) -> Result<usize> {
+    loop {
+        let answer = prompt_string(label, &default.to_string())?;
+        match answer.parse() {
+            Ok(value) => return Ok(value),
+            Err(_) => println!("Please enter a valid number."),
+        }
+    }
+}
+
+fn blank_to_none(value: String) -> Option<String> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 #[cfg(test)]

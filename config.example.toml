@@ -11,3 +11,6 @@ log_level = "info"
 # cert_path = "/etc/code-monitor/server.crt"
 # key_path = "/etc/code-monitor/server.key"
 # ca_path = "/etc/code-monitor/ca.crt"
+
+# Interactive setup:
+# monitor-server --config config.toml init

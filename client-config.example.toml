@@ -14,3 +14,6 @@ access_token = "replace-with-server-token"
 # ca_cert_path = "/path/to/ca.crt"
 # client_cert_path = "/path/to/client.crt"
 # client_key_path = "/path/to/client.key"
+
+# Interactive setup:
+# monitor-client --config client-config.toml init

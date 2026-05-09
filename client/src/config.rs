@@ -64,6 +64,10 @@ impl ClientConfigManager {
         Ok(())
     }
 
+    pub fn config_path(&self) -> &std::path::Path {
+        &self.config_path
+    }
+
     pub fn add_server(&mut self, server: ServerEndpoint) -> Result<()> {
         let mut config = self.load_config()?;
 

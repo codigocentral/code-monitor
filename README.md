@@ -69,6 +69,7 @@ cargo build --release
 ### 1. Start the Server
 ```bash
 # On each server you want to monitor
+sudo monitor-server --config /etc/code-monitor/config.toml init
 ./monitor-server --address 0.0.0.0 --port 50051
 ```
 
@@ -88,6 +89,7 @@ The server will display:
 ### 2. Connect with Client
 ```bash
 # Interactive dashboard
+monitor-client init
 ./monitor-client
 
 # Or quick connect

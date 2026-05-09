@@ -47,6 +47,9 @@ async fn main() -> Result<()> {
     let command = args.command.unwrap_or(cli::Commands::Dashboard);
 
     match command {
+        cli::Commands::Init { force } => {
+            init_client(&mut config_manager, force).await?;
+        }
         cli::Commands::Add {
             name,
             address,
@@ -104,6 +107,185 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn init_client(config_manager: &mut ClientConfigManager, force: bool) -> Result<()> {
+    use std::io::{self, Write};
+
+    let mut config = config_manager.load_config()?;
+    if !config.servers.is_empty() && force {
+        config.servers.clear();
+    }
+
+    println!();
+    println!("Code Monitor client setup");
+    println!();
+
+    config.update_interval_seconds =
+        prompt_u64("Update interval seconds", config.update_interval_seconds)?;
+    config.auto_reconnect = prompt_bool("Auto reconnect", config.auto_reconnect)?;
+    config.reconnect_delay_seconds =
+        prompt_u64("Reconnect delay seconds", config.reconnect_delay_seconds)?;
+
+    if config.servers.is_empty() || prompt_bool("Add a server now", true)? {
+        let server = prompt_server().await?;
+        let test_now = prompt_bool("Test connection now", true)?;
+        if test_now {
+            test_server_connection(&server, config.tls.as_ref()).await?;
+        }
+
+        if let Some(existing) = config
+            .servers
+            .iter_mut()
+            .find(|s| s.address == server.address && s.port == server.port)
+        {
+            *existing = server;
+        } else {
+            config.servers.push(server);
+        }
+    }
+
+    config_manager.save_config(&config)?;
+
+    println!();
+    println!(
+        "Client config written to {}",
+        config_manager.config_path().display()
+    );
+    println!("Open dashboard:");
+    println!("monitor-client --config {} dashboard", config_manager.config_path().display());
+    println!();
+
+    io::stdout().flush()?;
+    Ok(())
+}
+
+async fn prompt_server() -> Result<ServerEndpoint> {
+    let name = prompt_string("Server name", "My Server")?;
+    let address = prompt_required_string("Server address or IP")?;
+    let port = prompt_u16("Server port", 50051)?;
+    let token = blank_to_none(prompt_string("Access token (blank if auth is disabled)", "")?);
+    let description = blank_to_none(prompt_string("Description (blank for none)", "")?);
+
+    Ok(ServerEndpoint {
+        id: uuid::Uuid::new_v4(),
+        name,
+        address,
+        port,
+        description,
+        access_token: token,
+    })
+}
+
+async fn test_server_connection(
+    server: &ServerEndpoint,
+    tls_config: Option<&shared::types::ClientTlsConfig>,
+) -> Result<()> {
+    let scheme = if tls_config.is_some() { "https" } else { "http" };
+    let endpoint = format!("{}://{}:{}", scheme, server.address, server.port);
+
+    println!();
+    println!("Testing connection to {}...", endpoint);
+    match MonitorClient::connect_with_token(
+        &endpoint,
+        5,
+        false,
+        server.access_token.as_deref(),
+        tls_config,
+    )
+    .await
+    {
+        Ok(mut client) => match client.get_system_info().await {
+            Ok(info) => {
+                println!("Connected.");
+                println!("Hostname: {}", info.hostname);
+                println!("OS: {}", info.os);
+            }
+            Err(e) => {
+                println!("Connected, but system info failed: {}", e);
+            }
+        },
+        Err(e) => {
+            println!("Connection failed: {}", e);
+        }
+    }
+    println!();
+
+    Ok(())
+}
+
+fn prompt_string(label: &str, default: &str) -> Result<String> {
+    use std::io::{self, Write};
+
+    if default.is_empty() {
+        print!("{}: ", label);
+    } else {
+        print!("{} [{}]: ", label, default);
+    }
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let input = input.trim();
+    if input.is_empty() {
+        Ok(default.to_string())
+    } else {
+        Ok(input.to_string())
+    }
+}
+
+fn prompt_required_string(label: &str) -> Result<String> {
+    loop {
+        let value = prompt_string(label, "")?;
+        if !value.trim().is_empty() {
+            return Ok(value);
+        }
+        println!("This value is required.");
+    }
+}
+
+fn prompt_bool(label: &str, default: bool) -> Result<bool> {
+    let suffix = if default { "Y/n" } else { "y/N" };
+    loop {
+        let answer = prompt_string(&format!("{} ({})", label, suffix), "")?;
+        if answer.is_empty() {
+            return Ok(default);
+        }
+        match answer.to_ascii_lowercase().as_str() {
+            "y" | "yes" | "s" | "sim" => return Ok(true),
+            "n" | "no" | "nao" | "não" => return Ok(false),
+            _ => println!("Please answer yes or no."),
+        }
+    }
+}
+
+fn prompt_u64(label: &str, default: u64) -> Result<u64> {
+    loop {
+        let answer = prompt_string(label, &default.to_string())?;
+        match answer.parse() {
+            Ok(value) => return Ok(value),
+            Err(_) => println!("Please enter a valid number."),
+        }
+    }
+}
+
+fn prompt_u16(label: &str, default: u16) -> Result<u16> {
+    loop {
+        let answer = prompt_string(label, &default.to_string())?;
+        match answer.parse() {
+            Ok(value) => return Ok(value),
+            Err(_) => println!("Please enter a valid port."),
+        }
+    }
+}
+
+fn blank_to_none(value: String) -> Option<String> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 async fn add_server(

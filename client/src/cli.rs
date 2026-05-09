@@ -23,6 +23,13 @@ pub struct CliArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
+    /// Configure the client interactively
+    Init {
+        /// Replace configured servers instead of appending
+        #[arg(short, long)]
+        force: bool,
+    },
+
     /// Add a new server to monitor
     Add {
         /// Server name (friendly name)
@@ -199,6 +206,12 @@ mod tests {
             }
             _ => panic!("Expected Add command"),
         }
+    }
+
+    #[test]
+    fn verify_init_command() {
+        let args = CliArgs::parse_from(vec!["monitor-client", "init", "--force"]);
+        assert!(matches!(args.command, Some(Commands::Init { force: true })));
     }
 
     #[test]

@@ -31,6 +31,13 @@ Atualizacao:
 sudo code-monitor-update
 ```
 
+Onboarding:
+
+```bash
+sudo monitor-server --config /etc/code-monitor/config.toml init
+monitor-server --config /etc/code-monitor/config.toml show-token
+```
+
 ## macOS
 
 ```bash
@@ -64,6 +71,13 @@ Atualizacao:
 powershell -ExecutionPolicy Bypass -File "C:\Program Files\CodeMonitor\code-monitor-update.ps1"
 ```
 
+Onboarding:
+
+```powershell
+monitor-server --config "C:\ProgramData\CodeMonitor\config.toml" init
+monitor-server --config "C:\ProgramData\CodeMonitor\config.toml" show-token
+```
+
 ## Componentes
 
 Por padrao o instalador instala o `server`.
@@ -88,3 +102,13 @@ sudo CODE_MONITOR_COMPONENT=both ./install.sh
 .\install.ps1 -Component both
 ```
 
+## Client onboarding
+
+Em qualquer sistema:
+
+```bash
+monitor-client init
+monitor-client dashboard
+```
+
+O onboarding do cliente pergunta nome, endereco, porta e token do servidor. Ele tambem pode testar a conexao antes de salvar.
