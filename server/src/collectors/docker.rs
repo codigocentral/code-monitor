@@ -9,12 +9,14 @@ use bollard::container::StatsOptions;
 use bollard::Docker;
 use futures_util::stream::StreamExt;
 use shared::types::ContainerInfo;
-use tracing::{error, info, warn};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tracing::{debug, info, warn};
 
 /// Collector for Docker container metrics
 pub struct DockerCollector {
     docker: Option<Docker>,
     _socket_path: String,
+    connection_failed: AtomicBool,
 }
 
 impl DockerCollector {
@@ -23,6 +25,7 @@ impl DockerCollector {
         Self {
             docker: None,
             _socket_path: String::new(),
+            connection_failed: AtomicBool::new(false),
         }
     }
 
@@ -48,6 +51,7 @@ impl DockerCollector {
         Self {
             docker,
             _socket_path: socket_path,
+            connection_failed: AtomicBool::new(false),
         }
     }
 
@@ -75,17 +79,22 @@ impl DockerCollector {
         Self {
             docker,
             _socket_path: socket_path.to_string(),
+            connection_failed: AtomicBool::new(false),
         }
     }
 
     /// Check if Docker is available
     #[allow(dead_code)]
     pub fn is_available(&self) -> bool {
-        self.docker.is_some()
+        self.docker.is_some() && !self.connection_failed.load(Ordering::SeqCst)
     }
 
     /// Collect container metrics
     pub async fn collect_containers(&self) -> Result<Vec<ContainerInfo>> {
+        if self.connection_failed.load(Ordering::SeqCst) {
+            return Ok(Vec::new());
+        }
+
         let docker = match &self.docker {
             Some(d) => d,
             None => return Ok(Vec::new()),
@@ -100,7 +109,21 @@ impl DockerCollector {
         let containers = match docker.list_containers(Some(options)).await {
             Ok(c) => c,
             Err(e) => {
-                error!("Failed to list Docker containers: {}", e);
+                let is_connect_error = e.to_string().to_lowercase().contains("connect");
+                let already_failed = self.connection_failed.load(Ordering::SeqCst);
+                if is_connect_error {
+                    if !already_failed {
+                        warn!(
+                            "Docker daemon not available ({}). Docker metrics will be disabled.",
+                            e
+                        );
+                        self.connection_failed.store(true, Ordering::SeqCst);
+                    } else {
+                        debug!("Docker daemon still unavailable; skipping container collection");
+                    }
+                } else {
+                    warn!("Failed to list Docker containers: {}", e);
+                }
                 return Ok(Vec::new());
             }
         };
@@ -241,7 +264,7 @@ impl crate::collectors::Collector for DockerCollector {
     }
 
     fn is_enabled(&self) -> bool {
-        self.docker.is_some()
+        self.docker.is_some() && !self.connection_failed.load(Ordering::SeqCst)
     }
 
     async fn collect(&self) -> Result<()> {

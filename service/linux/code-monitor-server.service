@@ -1,0 +1,25 @@
+[Unit]
+Description=Code Monitor Server
+Documentation=https://gitlab.didaticos.com/codigocentral/code-monitor
+After=network.target
+
+[Service]
+Type=simple
+User=code-monitor
+Group=code-monitor
+WorkingDirectory=/etc/code-monitor
+ExecStart=/usr/local/bin/monitor-server --config /etc/code-monitor/config.toml
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=code-monitor-server
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/etc/code-monitor /var/lib/code-monitor
+
+[Install]
+WantedBy=multi-user.target
