@@ -280,25 +280,31 @@ mod tests {
 
     #[test]
     fn test_validate_access_token_disabled() {
-        let mut config = Config::default();
-        config.enable_authentication = false;
-        config.access_token = "secret".to_string();
+        let config = Config {
+            enable_authentication: false,
+            access_token: "secret".to_string(),
+            ..Default::default()
+        };
         assert!(config.validate_access_token("anything"));
     }
 
     #[test]
     fn test_validate_access_token_enabled_valid() {
-        let mut config = Config::default();
-        config.enable_authentication = true;
-        config.access_token = "secret".to_string();
+        let config = Config {
+            enable_authentication: true,
+            access_token: "secret".to_string(),
+            ..Default::default()
+        };
         assert!(config.validate_access_token("secret"));
     }
 
     #[test]
     fn test_validate_access_token_enabled_invalid() {
-        let mut config = Config::default();
-        config.enable_authentication = true;
-        config.access_token = "secret".to_string();
+        let config = Config {
+            enable_authentication: true,
+            access_token: "secret".to_string(),
+            ..Default::default()
+        };
         assert!(!config.validate_access_token("wrong"));
     }
 
@@ -331,15 +337,19 @@ mod tests {
 
     #[test]
     fn test_is_client_authorized_disabled() {
-        let mut config = Config::default();
-        config.enable_authentication = false;
+        let config = Config {
+            enable_authentication: false,
+            ..Default::default()
+        };
         assert!(config.is_client_authorized("any"));
     }
 
     #[test]
     fn test_is_client_authorized_enabled() {
-        let mut config = Config::default();
-        config.enable_authentication = true;
+        let mut config = Config {
+            enable_authentication: true,
+            ..Default::default()
+        };
         config.authorized_clients.push(AuthorizedClient {
             name: "client-1".to_string(),
             public_key: "pk1".to_string(),
@@ -405,8 +415,10 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let path = temp_file.path();
 
-        let mut config = Config::default();
-        config.access_token = String::new();
+        let config = Config {
+            access_token: String::new(),
+            ..Default::default()
+        };
         config.save(path).unwrap();
 
         let loaded = Config::load(path).unwrap();
@@ -531,8 +543,10 @@ mod tests {
 
     #[test]
     fn test_is_client_authorized_empty_list() {
-        let mut config = Config::default();
-        config.enable_authentication = true;
+        let config = Config {
+            enable_authentication: true,
+            ..Default::default()
+        };
         assert!(!config.is_client_authorized("any-key"));
     }
 

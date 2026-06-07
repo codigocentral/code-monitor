@@ -470,8 +470,10 @@ mod tests {
     fn create_test_config_file() -> (NamedTempFile, String) {
         let temp_file = NamedTempFile::new().unwrap();
         let path = temp_file.path().to_string_lossy().to_string();
-        let mut config = Config::default();
-        config.access_token = "test-token-123".to_string();
+        let config = Config {
+            access_token: "test-token-123".to_string(),
+            ..Default::default()
+        };
         config.save(&path).unwrap();
         (temp_file, path)
     }
@@ -526,9 +528,11 @@ mod tests {
     fn test_handle_command_enable_auth_generates_token() {
         let temp_file = NamedTempFile::new().unwrap();
         let path = temp_file.path().to_string_lossy().to_string();
-        let mut config = Config::default();
-        config.enable_authentication = false;
-        config.access_token = String::new();
+        let config = Config {
+            enable_authentication: false,
+            access_token: String::new(),
+            ..Default::default()
+        };
         config.save(&path).unwrap();
 
         let result = handle_command(&Commands::EnableAuth, &path);

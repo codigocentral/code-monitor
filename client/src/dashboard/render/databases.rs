@@ -222,52 +222,6 @@ pub(super) fn draw_postgres_tab<B: tui::backend::Backend>(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_format_db_size_mb_zero() {
-        assert_eq!(format_db_size_mb(0), "0.0 MB");
-    }
-
-    #[test]
-    fn test_format_db_size_mb_one_mb() {
-        assert_eq!(format_db_size_mb(1_048_576), "1.0 MB");
-    }
-
-    #[test]
-    fn test_format_db_size_mb_fractional() {
-        assert_eq!(format_db_size_mb(1_572_864), "1.5 MB");
-    }
-
-    #[test]
-    fn test_format_db_size_mb_large() {
-        assert_eq!(format_db_size_mb(1_073_741_824), "1024.0 MB");
-    }
-
-    #[test]
-    fn test_truncate_query_short() {
-        assert_eq!(truncate_query("SELECT 1", 60), "SELECT 1");
-    }
-
-    #[test]
-    fn test_truncate_query_exact() {
-        let query = "a".repeat(60);
-        assert_eq!(truncate_query(&query, 60), query);
-    }
-
-    #[test]
-    fn test_truncate_query_long() {
-        let query = "a".repeat(100);
-        assert_eq!(truncate_query(&query, 60), format!("{}...", "a".repeat(60)));
-    }
-
-    #[test]
-    fn test_truncate_query_empty() {
-        assert_eq!(truncate_query("", 60), "");
-    }
-}
 
 pub(super) fn draw_mariadb_tab<B: tui::backend::Backend>(
     f: &mut Frame<B>,
@@ -466,5 +420,51 @@ pub(super) fn draw_mariadb_tab<B: tui::backend::Backend>(
             .alignment(Alignment::Center)
             .block(block);
         f.render_widget(no_server, area);
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_db_size_mb_zero() {
+        assert_eq!(format_db_size_mb(0), "0.0 MB");
+    }
+
+    #[test]
+    fn test_format_db_size_mb_one_mb() {
+        assert_eq!(format_db_size_mb(1_048_576), "1.0 MB");
+    }
+
+    #[test]
+    fn test_format_db_size_mb_fractional() {
+        assert_eq!(format_db_size_mb(1_572_864), "1.5 MB");
+    }
+
+    #[test]
+    fn test_format_db_size_mb_large() {
+        assert_eq!(format_db_size_mb(1_073_741_824), "1024.0 MB");
+    }
+
+    #[test]
+    fn test_truncate_query_short() {
+        assert_eq!(truncate_query("SELECT 1", 60), "SELECT 1");
+    }
+
+    #[test]
+    fn test_truncate_query_exact() {
+        let query = "a".repeat(60);
+        assert_eq!(truncate_query(&query, 60), query);
+    }
+
+    #[test]
+    fn test_truncate_query_long() {
+        let query = "a".repeat(100);
+        assert_eq!(truncate_query(&query, 60), format!("{}...", "a".repeat(60)));
+    }
+
+    #[test]
+    fn test_truncate_query_empty() {
+        assert_eq!(truncate_query("", 60), "");
     }
 }

@@ -577,9 +577,11 @@ mod tests {
         let monitor = SystemMonitor::new(1, vec![], vec![], vec![])
             .await
             .expect("Failed to create monitor");
-        let mut config = Config::default();
-        config.enable_authentication = auth_enabled;
-        config.access_token = "test-secret-token".to_string();
+        let config = Config {
+            enable_authentication: auth_enabled,
+            access_token: "test-secret-token".to_string(),
+            ..Default::default()
+        };
         MonitorServiceImpl::from_arc(Arc::new(monitor), config)
             .expect("Failed to create service")
     }
@@ -671,8 +673,10 @@ mod tests {
             .expect("Failed to create monitor");
         monitor.start_background_monitoring();
 
-        let mut config = Config::default();
-        config.enable_authentication = false;
+        let config = Config {
+            enable_authentication: false,
+            ..Default::default()
+        };
         let service = MonitorServiceImpl::from_arc(Arc::new(monitor), config)
             .expect("Failed to create service");
 
@@ -725,9 +729,11 @@ mod tests {
             .expect("Failed to create monitor");
         monitor.start_background_monitoring();
 
-        let mut config = Config::default();
-        config.enable_authentication = true;
-        config.access_token = "integration-token".to_string();
+        let config = Config {
+            enable_authentication: true,
+            access_token: "integration-token".to_string(),
+            ..Default::default()
+        };
         let service = MonitorServiceImpl::from_arc(Arc::new(monitor), config)
             .expect("Failed to create service");
 
@@ -783,8 +789,10 @@ mod tests {
             .expect("Failed to create monitor");
         monitor.start_background_monitoring();
 
-        let mut config = Config::default();
-        config.enable_authentication = false;
+        let config = Config {
+            enable_authentication: false,
+            ..Default::default()
+        };
         let service = MonitorServiceImpl::from_arc(Arc::new(monitor), config)
             .expect("Failed to create service");
 
@@ -842,8 +850,10 @@ mod tests {
             .expect("Failed to create monitor");
         monitor.start_background_monitoring();
 
-        let mut config = Config::default();
-        config.enable_authentication = false;
+        let config = Config {
+            enable_authentication: false,
+            ..Default::default()
+        };
         let service = MonitorServiceImpl::from_arc(Arc::new(monitor), config)
             .expect("Failed to create service");
 
@@ -888,8 +898,10 @@ mod tests {
             .expect("Failed to create monitor");
         monitor.start_background_monitoring();
 
-        let mut config = Config::default();
-        config.enable_authentication = false;
+        let config = Config {
+            enable_authentication: false,
+            ..Default::default()
+        };
         let service = MonitorServiceImpl::from_arc(Arc::new(monitor), config)
             .expect("Failed to create service");
 
@@ -934,8 +946,10 @@ mod tests {
             .expect("Failed to create monitor");
         monitor.start_background_monitoring();
 
-        let mut config = Config::default();
-        config.enable_authentication = false;
+        let config = Config {
+            enable_authentication: false,
+            ..Default::default()
+        };
         let service = MonitorServiceImpl::from_arc(Arc::new(monitor), config)
             .expect("Failed to create service");
 
@@ -983,8 +997,10 @@ mod tests {
             .expect("Failed to create monitor");
         monitor.start_background_monitoring();
 
-        let mut config = Config::default();
-        config.enable_authentication = false;
+        let config = Config {
+            enable_authentication: false,
+            ..Default::default()
+        };
         let service = MonitorServiceImpl::from_arc(Arc::new(monitor), config)
             .expect("Failed to create service");
 
@@ -1029,8 +1045,10 @@ mod tests {
             .expect("Failed to create monitor");
         monitor.start_background_monitoring();
 
-        let mut config = Config::default();
-        config.enable_authentication = false;
+        let config = Config {
+            enable_authentication: false,
+            ..Default::default()
+        };
         let service = MonitorServiceImpl::from_arc(Arc::new(monitor), config)
             .expect("Failed to create service");
 
@@ -1075,8 +1093,10 @@ mod tests {
             .expect("Failed to create monitor");
         monitor.start_background_monitoring();
 
-        let mut config = Config::default();
-        config.enable_authentication = false;
+        let config = Config {
+            enable_authentication: false,
+            ..Default::default()
+        };
         let service = MonitorServiceImpl::from_arc(Arc::new(monitor), config)
             .expect("Failed to create service");
 

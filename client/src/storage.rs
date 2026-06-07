@@ -158,13 +158,16 @@ impl MetricsStorage {
 
     /// Purge old metrics (retention policy)
     pub fn purge_old(&self, days: i64) -> Result<usize> {
-        let cutoff = Utc::now() - chrono::Duration::days(days);
-        let cutoff_timestamp = cutoff.timestamp();
-
-        let deleted = self.conn.execute(
-            "DELETE FROM metrics WHERE timestamp < ?1",
-            params![cutoff_timestamp],
-        )?;
+        let deleted = if days == 0 {
+            self.conn.execute("DELETE FROM metrics", [])?
+        } else {
+            let cutoff = Utc::now() - chrono::Duration::days(days);
+            let cutoff_timestamp = cutoff.timestamp();
+            self.conn.execute(
+                "DELETE FROM metrics WHERE timestamp < ?1",
+                params![cutoff_timestamp],
+            )?
+        };
 
         info!("Purged {} old metrics records", deleted);
 

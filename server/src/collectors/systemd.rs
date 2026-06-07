@@ -189,7 +189,7 @@ MemoryCurrent=1048576
             "active" => ("active".to_string(), true),
             "inactive" => ("inactive".to_string(), false),
             "failed" => ("failed".to_string(), false),
-            _ => (format!("unknown"), false),
+            _ => ("unknown".to_string(), false),
         };
 
         assert_eq!(status, "active");
@@ -218,7 +218,7 @@ MemoryCurrent=[not set]
             "active" => ("active".to_string(), true),
             "inactive" => ("inactive".to_string(), false),
             "failed" => ("failed".to_string(), false),
-            _ => (format!("unknown"), false),
+            _ => ("unknown".to_string(), false),
         };
 
         assert_eq!(status, "failed");
@@ -239,12 +239,8 @@ MemoryCurrent=[not set]
 
     #[test]
     fn test_systemd_timestamp_parsing_na() {
-        let value = "n/a";
-        let parsed: Option<chrono::DateTime<chrono::Utc>> = if value == "n/a" || value.is_empty() {
-            None
-        } else {
-            None // simplified
-        };
+        let _value = "n/a";
+        let parsed: Option<chrono::DateTime<chrono::Utc>> = None;
         assert!(parsed.is_none());
     }
 }
