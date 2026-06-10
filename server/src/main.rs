@@ -19,6 +19,7 @@ use crate::service::MonitorServiceImpl;
 mod collectors;
 mod config;
 mod health;
+mod metrics;
 mod monitor;
 mod service;
 mod tls;
@@ -89,6 +90,31 @@ pub enum Commands {
 
     /// Enable authentication
     EnableAuth,
+
+    /// Add an authorized client public key (for Ed25519 signature auth)
+    AddClient {
+        /// Friendly name for the client
+        #[arg(short, long)]
+        name: String,
+
+        /// Base64-encoded Ed25519 public key (from 'monitor-client gen-keys')
+        #[arg(short, long)]
+        public_key: String,
+    },
+
+    /// Export the current configuration to a backup file
+    ExportConfig {
+        /// Destination path for the backup
+        #[arg(short, long)]
+        output: String,
+    },
+
+    /// Import, validate and apply a configuration backup
+    ImportConfig {
+        /// Path of the backup to import
+        #[arg(short, long)]
+        input: String,
+    },
 }
 
 #[tokio::main]
@@ -347,6 +373,22 @@ fn handle_command(cmd: &Commands, config_path: &str) -> Result<()> {
             println!();
             println!("Access Token: {}", config.access_token);
             println!();
+        }
+        Commands::AddClient { name, public_key } => {
+            config.add_authorized_client(name.clone(), public_key.clone());
+            config.save(config_path)?;
+            println!("✅ Client '{}' authorized for signature auth.", name);
+        }
+        Commands::ExportConfig { output } => {
+            config.save(output)?;
+            println!("✅ Configuration exported to {}", output);
+            println!("⚠️  The backup contains the access token — store it safely.");
+        }
+        Commands::ImportConfig { input } => {
+            let imported = Config::load(input)?;
+            imported.save(config_path)?;
+            println!("✅ Configuration imported from {} and applied.", input);
+            println!("Restart the server for the changes to take effect.");
         }
     }
 

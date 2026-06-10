@@ -11,6 +11,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::info;
 
+use crate::metrics;
+
 /// Health check status
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthStatus {
@@ -126,6 +128,38 @@ async fn metrics_check(State(state): State<Arc<HealthState>>) -> Result<String, 
     metrics.push_str("# TYPE code_monitor_uptime_seconds counter\n");
     metrics.push_str(&format!("code_monitor_uptime_seconds {}\n", uptime_secs));
 
+    // gRPC service counters
+    metrics.push_str(
+        "# HELP code_monitor_grpc_requests_total Total authenticated gRPC requests handled\n",
+    );
+    metrics.push_str("# TYPE code_monitor_grpc_requests_total counter\n");
+    metrics.push_str(&format!(
+        "code_monitor_grpc_requests_total {}\n",
+        metrics::get(&metrics::GRPC_REQUESTS_TOTAL)
+    ));
+
+    metrics.push_str("# HELP code_monitor_grpc_auth_failures_total Total gRPC requests rejected by authentication\n");
+    metrics.push_str("# TYPE code_monitor_grpc_auth_failures_total counter\n");
+    metrics.push_str(&format!(
+        "code_monitor_grpc_auth_failures_total {}\n",
+        metrics::get(&metrics::GRPC_AUTH_FAILURES_TOTAL)
+    ));
+
+    metrics.push_str("# HELP code_monitor_grpc_streams_rejected_total Total streaming connections rejected by the max_clients limit\n");
+    metrics.push_str("# TYPE code_monitor_grpc_streams_rejected_total counter\n");
+    metrics.push_str(&format!(
+        "code_monitor_grpc_streams_rejected_total {}\n",
+        metrics::get(&metrics::GRPC_STREAMS_REJECTED_TOTAL)
+    ));
+
+    metrics
+        .push_str("# HELP code_monitor_grpc_active_streams Currently open streaming connections\n");
+    metrics.push_str("# TYPE code_monitor_grpc_active_streams gauge\n");
+    metrics.push_str(&format!(
+        "code_monitor_grpc_active_streams {}\n",
+        metrics::get(&metrics::GRPC_ACTIVE_STREAMS)
+    ));
+
     Ok(metrics)
 }
 
@@ -236,6 +270,10 @@ mod tests {
         let metrics = String::from_utf8(body.to_vec()).unwrap();
         assert!(metrics.contains("code_monitor_build_info"));
         assert!(metrics.contains("code_monitor_uptime_seconds"));
+        assert!(metrics.contains("code_monitor_grpc_requests_total"));
+        assert!(metrics.contains("code_monitor_grpc_auth_failures_total"));
+        assert!(metrics.contains("code_monitor_grpc_streams_rejected_total"));
+        assert!(metrics.contains("code_monitor_grpc_active_streams"));
     }
 
     #[tokio::test]

@@ -27,6 +27,7 @@ use tonic::{Request, Response, Status};
 use tracing::{error, info, warn};
 
 use crate::config::Config;
+use crate::metrics;
 use crate::monitor::SystemMonitor;
 
 fn datetime_to_timestamp(dt: DateTime<Utc>) -> prost_types::Timestamp {
@@ -52,6 +53,7 @@ struct CountedStream<S> {
 impl<S> Drop for CountedStream<S> {
     fn drop(&mut self) {
         self.counter.fetch_sub(1, Ordering::SeqCst);
+        metrics::dec(&metrics::GRPC_ACTIVE_STREAMS);
     }
 }
 
@@ -127,6 +129,7 @@ impl MonitorServiceImpl {
 
         // If auth is disabled, allow all
         if !config.enable_authentication {
+            metrics::inc(&metrics::GRPC_REQUESTS_TOTAL);
             return Ok(());
         }
 
@@ -136,6 +139,7 @@ impl MonitorServiceImpl {
                 .to_str()
                 .map_err(|_| Status::unauthenticated("Invalid token format"))?;
             if config.validate_access_token(token_str) {
+                metrics::inc(&metrics::GRPC_REQUESTS_TOTAL);
                 return Ok(());
             }
         }
@@ -147,11 +151,13 @@ impl MonitorServiceImpl {
                 .map_err(|_| Status::unauthenticated("Invalid auth format"))?;
             if let Some(token) = auth_str.strip_prefix("Bearer ") {
                 if config.validate_access_token(token) {
+                    metrics::inc(&metrics::GRPC_REQUESTS_TOTAL);
                     return Ok(());
                 }
             }
         }
 
+        metrics::inc(&metrics::GRPC_AUTH_FAILURES_TOTAL);
         Err(Status::unauthenticated("Invalid or missing access token"))
     }
 }
@@ -358,11 +364,13 @@ impl MonitorService for MonitorServiceImpl {
                 "Rejecting stream: max_clients limit of {} reached",
                 max_clients
             );
+            metrics::inc(&metrics::GRPC_STREAMS_REJECTED_TOTAL);
             return Err(Status::resource_exhausted(format!(
                 "Maximum number of connected clients reached ({})",
                 max_clients
             )));
         }
+        metrics::inc(&metrics::GRPC_ACTIVE_STREAMS);
 
         let req = request.into_inner();
         let update_interval = std::cmp::max(req.update_interval_seconds, 1);

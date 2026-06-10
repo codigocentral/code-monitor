@@ -18,6 +18,11 @@ pub struct Config {
     /// If empty, a new one will be generated on startup
     #[serde(default)]
     pub access_token: String,
+    /// Additional tokens with read-only (viewer) role.
+    /// All current RPCs are reads, so viewers can call everything today;
+    /// future mutating RPCs will require the admin token (access_token).
+    #[serde(default)]
+    pub viewer_tokens: Vec<String>,
     /// List of authorized client public keys (base64 encoded)
     #[serde(default)]
     pub authorized_clients: Vec<AuthorizedClient>,
@@ -118,6 +123,23 @@ fn default_true() -> bool {
     true
 }
 
+/// Role granted to an authenticated caller (RBAC)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Role {
+    /// Full access, including future mutating RPCs
+    Admin,
+    /// Read-only access
+    Viewer,
+}
+
+impl Role {
+    /// Whether this role can call mutating/administrative RPCs
+    #[allow(dead_code)]
+    pub fn can_write(&self) -> bool {
+        matches!(self, Role::Admin)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthorizedClient {
     /// Friendly name for this client
@@ -141,6 +163,7 @@ impl Default for Config {
             enable_authentication: true,
             log_level: "info".to_string(),
             access_token: String::new(),
+            viewer_tokens: Vec::new(),
             authorized_clients: Vec::new(),
             postgres_clusters: Vec::new(),
             mariadb_clusters: Vec::new(),
@@ -170,11 +193,39 @@ impl Config {
             config.save(path)?;
         }
 
+        config.apply_env_overrides();
+
         config
             .validate()
             .map_err(|e| anyhow::anyhow!("Invalid configuration in {}: {}", path.display(), e))?;
 
         Ok(config)
+    }
+
+    /// Override configuration values from CODE_MONITOR_* environment variables.
+    /// Useful for containers and systemd drop-ins without editing config.toml.
+    pub fn apply_env_overrides(&mut self) {
+        if let Ok(v) = std::env::var("CODE_MONITOR_UPDATE_INTERVAL") {
+            if let Ok(n) = v.parse() {
+                self.update_interval_seconds = n;
+            }
+        }
+        if let Ok(v) = std::env::var("CODE_MONITOR_MAX_CLIENTS") {
+            if let Ok(n) = v.parse() {
+                self.max_clients = n;
+            }
+        }
+        if let Ok(v) = std::env::var("CODE_MONITOR_LOG_LEVEL") {
+            self.log_level = v;
+        }
+        if let Ok(v) = std::env::var("CODE_MONITOR_ACCESS_TOKEN") {
+            if !v.is_empty() {
+                self.access_token = v;
+            }
+        }
+        if let Ok(v) = std::env::var("CODE_MONITOR_ENABLE_AUTH") {
+            self.enable_authentication = v == "1" || v.eq_ignore_ascii_case("true");
+        }
     }
 
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
@@ -231,10 +282,22 @@ impl Config {
 
     /// Validate an access token
     pub fn validate_access_token(&self, token: &str) -> bool {
+        self.token_role(token).is_some()
+    }
+
+    /// Resolve the role granted by a token.
+    /// Returns None when the token is not valid.
+    pub fn token_role(&self, token: &str) -> Option<Role> {
         if !self.enable_authentication {
-            return true;
+            return Some(Role::Admin);
         }
-        self.access_token == token
+        if self.access_token == token {
+            return Some(Role::Admin);
+        }
+        if self.viewer_tokens.iter().any(|t| t == token) {
+            return Some(Role::Viewer);
+        }
+        None
     }
 
     /// Add an authorized client
@@ -291,6 +354,7 @@ mod tests {
             enable_authentication: false,
             log_level: "debug".to_string(),
             access_token: "test-token".to_string(),
+            viewer_tokens: Vec::new(),
             authorized_clients: Vec::new(),
             postgres_clusters: Vec::new(),
             mariadb_clusters: Vec::new(),
@@ -492,6 +556,7 @@ mod tests {
             enable_authentication: true,
             log_level: "warn".to_string(),
             access_token: "my-secret-token".to_string(),
+            viewer_tokens: vec!["viewer-token".to_string()],
             authorized_clients: vec![AuthorizedClient {
                 name: "client-1".to_string(),
                 public_key: "abc123".to_string(),
@@ -647,6 +712,56 @@ mod tests {
         assert_eq!(config.port, 3307);
         assert_eq!(config.user, "admin");
         assert!(!config.enabled);
+    }
+
+    #[test]
+    fn test_token_role_admin_and_viewer() {
+        let config = Config {
+            enable_authentication: true,
+            access_token: "admin-tok".to_string(),
+            viewer_tokens: vec!["viewer-tok".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(config.token_role("admin-tok"), Some(Role::Admin));
+        assert_eq!(config.token_role("viewer-tok"), Some(Role::Viewer));
+        assert_eq!(config.token_role("wrong"), None);
+        assert!(config.validate_access_token("viewer-tok"));
+        assert!(Role::Admin.can_write());
+        assert!(!Role::Viewer.can_write());
+    }
+
+    #[test]
+    fn test_token_role_auth_disabled_grants_admin() {
+        let config = Config {
+            enable_authentication: false,
+            ..Default::default()
+        };
+        assert_eq!(config.token_role("anything"), Some(Role::Admin));
+    }
+
+    #[test]
+    fn test_env_overrides() {
+        // Set/unset env vars inside a single test to avoid races between tests
+        std::env::set_var("CODE_MONITOR_UPDATE_INTERVAL", "42");
+        std::env::set_var("CODE_MONITOR_MAX_CLIENTS", "7");
+        std::env::set_var("CODE_MONITOR_LOG_LEVEL", "warn");
+        std::env::set_var("CODE_MONITOR_ACCESS_TOKEN", "env-token");
+        std::env::set_var("CODE_MONITOR_ENABLE_AUTH", "false");
+
+        let mut config = Config::default();
+        config.apply_env_overrides();
+
+        std::env::remove_var("CODE_MONITOR_UPDATE_INTERVAL");
+        std::env::remove_var("CODE_MONITOR_MAX_CLIENTS");
+        std::env::remove_var("CODE_MONITOR_LOG_LEVEL");
+        std::env::remove_var("CODE_MONITOR_ACCESS_TOKEN");
+        std::env::remove_var("CODE_MONITOR_ENABLE_AUTH");
+
+        assert_eq!(config.update_interval_seconds, 42);
+        assert_eq!(config.max_clients, 7);
+        assert_eq!(config.log_level, "warn");
+        assert_eq!(config.access_token, "env-token");
+        assert!(!config.enable_authentication);
     }
 
     #[test]
