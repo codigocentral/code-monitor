@@ -1735,8 +1735,12 @@ mod tests {
 
     #[test]
     fn test_with_config_path() {
-        let app = create_test_app().with_config_path(std::path::PathBuf::from("custom-config.toml"));
-        assert_eq!(app.config_path, std::path::PathBuf::from("custom-config.toml"));
+        let app =
+            create_test_app().with_config_path(std::path::PathBuf::from("custom-config.toml"));
+        assert_eq!(
+            app.config_path,
+            std::path::PathBuf::from("custom-config.toml")
+        );
     }
 
     #[test]
@@ -1953,24 +1957,22 @@ mod tests {
         app.current_tab = 4;
         app.containers_cache.insert(
             server_id,
-            vec![
-                ContainerInfo {
-                    id: "c1".to_string(),
-                    name: "container1".to_string(),
-                    image: "img1".to_string(),
-                    status: "running".to_string(),
-                    state: "running".to_string(),
-                    health: "healthy".to_string(),
-                    cpu_percent: 0.0,
-                    memory_usage_bytes: 0,
-                    memory_limit_bytes: 0,
-                    memory_percent: 0.0,
-                    restart_count: 0,
-                    network_rx_bytes: 0,
-                    network_tx_bytes: 0,
-                    networks: vec![],
-                },
-            ],
+            vec![ContainerInfo {
+                id: "c1".to_string(),
+                name: "container1".to_string(),
+                image: "img1".to_string(),
+                status: "running".to_string(),
+                state: "running".to_string(),
+                health: "healthy".to_string(),
+                cpu_percent: 0.0,
+                memory_usage_bytes: 0,
+                memory_limit_bytes: 0,
+                memory_percent: 0.0,
+                restart_count: 0,
+                network_rx_bytes: 0,
+                network_tx_bytes: 0,
+                networks: vec![],
+            }],
         );
         assert_eq!(app.get_current_list_len(), 1);
     }
@@ -1982,19 +1984,17 @@ mod tests {
         app.current_tab = 5;
         app.postgres_cache.insert(
             server_id,
-            vec![
-                PostgresClusterInfo {
-                    name: "pg".to_string(),
-                    host: "localhost".to_string(),
-                    port: 5432,
-                    databases: vec![],
-                    connections_total: 0,
-                    connections_by_state: vec![],
-                    cache_hit_ratio: 0.0,
-                    top_queries: vec![],
-                    timestamp: Utc::now(),
-                },
-            ],
+            vec![PostgresClusterInfo {
+                name: "pg".to_string(),
+                host: "localhost".to_string(),
+                port: 5432,
+                databases: vec![],
+                connections_total: 0,
+                connections_by_state: vec![],
+                cache_hit_ratio: 0.0,
+                top_queries: vec![],
+                timestamp: Utc::now(),
+            }],
         );
         assert_eq!(app.get_current_list_len(), 1);
     }
@@ -2006,19 +2006,17 @@ mod tests {
         app.current_tab = 6;
         app.mariadb_cache.insert(
             server_id,
-            vec![
-                MariaDBClusterInfo {
-                    name: "mdb".to_string(),
-                    host: "localhost".to_string(),
-                    port: 3306,
-                    schemas: vec![],
-                    connections_active: 0,
-                    connections_total: 0,
-                    innodb_status: None,
-                    processes: vec![],
-                    timestamp: Utc::now(),
-                },
-            ],
+            vec![MariaDBClusterInfo {
+                name: "mdb".to_string(),
+                host: "localhost".to_string(),
+                port: 3306,
+                schemas: vec![],
+                connections_active: 0,
+                connections_total: 0,
+                innodb_status: None,
+                processes: vec![],
+                timestamp: Utc::now(),
+            }],
         );
         assert_eq!(app.get_current_list_len(), 1);
     }

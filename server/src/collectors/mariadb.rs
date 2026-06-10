@@ -231,7 +231,10 @@ mod tests {
             enabled: true,
         };
         let collector = MariaDBCollector::new(config);
-        assert_eq!(collector.config.socket_path.as_ref().unwrap(), "/run/mysqld/mysqld.sock");
+        assert_eq!(
+            collector.config.socket_path.as_ref().unwrap(),
+            "/run/mysqld/mysqld.sock"
+        );
     }
 
     #[test]
@@ -251,11 +254,7 @@ mod tests {
 
     #[test]
     fn test_parse_schema_info() {
-        let info = MariaDBCollector::parse_schema_info(
-            "app_db".to_string(),
-            10_485_760,
-            42,
-        );
+        let info = MariaDBCollector::parse_schema_info("app_db".to_string(), 10_485_760, 42);
         assert_eq!(info.name, "app_db");
         assert_eq!(info.size_bytes, 10_485_760);
         assert_eq!(info.table_count, 42);
@@ -263,11 +262,7 @@ mod tests {
 
     #[test]
     fn test_parse_schema_info_empty() {
-        let info = MariaDBCollector::parse_schema_info(
-            "".to_string(),
-            0,
-            0,
-        );
+        let info = MariaDBCollector::parse_schema_info("".to_string(), 0, 0);
         assert_eq!(info.name, "");
         assert_eq!(info.size_bytes, 0);
         assert_eq!(info.table_count, 0);
@@ -275,11 +270,7 @@ mod tests {
 
     #[test]
     fn test_parse_schema_info_large_table_count() {
-        let info = MariaDBCollector::parse_schema_info(
-            "big_db".to_string(),
-            u64::MAX,
-            u64::MAX,
-        );
+        let info = MariaDBCollector::parse_schema_info("big_db".to_string(), u64::MAX, u64::MAX);
         assert_eq!(info.name, "big_db");
         assert_eq!(info.size_bytes, u64::MAX);
         // u64::MAX as u32 wraps around
@@ -303,7 +294,10 @@ mod tests {
         assert_eq!(collector.config.port, 3307);
         assert_eq!(collector.config.user, "admin");
         assert_eq!(collector.config.password.as_ref().unwrap(), "secret");
-        assert_eq!(collector.config.socket_path.as_ref().unwrap(), "/run/mysqld/mysqld.sock");
+        assert_eq!(
+            collector.config.socket_path.as_ref().unwrap(),
+            "/run/mysqld/mysqld.sock"
+        );
         assert!(collector.config.enabled);
     }
 
@@ -328,22 +322,14 @@ mod tests {
 
     #[test]
     fn test_parse_schema_info_max_size() {
-        let info = MariaDBCollector::parse_schema_info(
-            "huge".to_string(),
-            u64::MAX,
-            1,
-        );
+        let info = MariaDBCollector::parse_schema_info("huge".to_string(), u64::MAX, 1);
         assert_eq!(info.size_bytes, u64::MAX);
         assert_eq!(info.table_count, 1);
     }
 
     #[test]
     fn test_parse_schema_info_zero_table_count() {
-        let info = MariaDBCollector::parse_schema_info(
-            "empty".to_string(),
-            0,
-            0,
-        );
+        let info = MariaDBCollector::parse_schema_info("empty".to_string(), 0, 0);
         assert_eq!(info.size_bytes, 0);
         assert_eq!(info.table_count, 0);
     }

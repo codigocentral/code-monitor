@@ -1,7 +1,7 @@
 #!/bin/bash
 # Generate self-signed certificates for development
 
-set -e
+set -euo pipefail
 
 CERT_DIR="${1:-./certs}"
 mkdir -p "$CERT_DIR"

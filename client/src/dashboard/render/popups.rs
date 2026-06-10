@@ -437,7 +437,11 @@ mod tests {
     }
 
     fn buffer_to_string(buffer: &tui::buffer::Buffer) -> String {
-        buffer.content.iter().map(|cell| cell.symbol.clone()).collect()
+        buffer
+            .content
+            .iter()
+            .map(|cell| cell.symbol.clone())
+            .collect()
     }
 
     // ------------------------------------------------------------------
@@ -818,7 +822,8 @@ mod tests {
         });
 
         // With duration_seconds=0, min_samples=1
-        app.alert_manager.process_metrics("srv-1", "Server 1", 99.0, 0.0, 0.0);
+        app.alert_manager
+            .process_metrics("srv-1", "Server 1", 99.0, 0.0, 0.0);
 
         terminal
             .draw(|f| draw_alerts_popup(f, &app, f.size()))
@@ -861,7 +866,8 @@ mod tests {
             channels: vec![],
         });
 
-        app.alert_manager.process_metrics("srv-1", "Server 1", 0.0, 80.0, 50.0);
+        app.alert_manager
+            .process_metrics("srv-1", "Server 1", 0.0, 80.0, 50.0);
 
         terminal
             .draw(|f| draw_alerts_popup(f, &app, f.size()))
@@ -890,7 +896,8 @@ mod tests {
             channels: vec![],
         });
 
-        app.alert_manager.process_metrics("srv-1", "Server 1", 99.0, 0.0, 0.0);
+        app.alert_manager
+            .process_metrics("srv-1", "Server 1", 99.0, 0.0, 0.0);
 
         terminal
             .draw(|f| draw_alerts_popup(f, &app, f.size()))

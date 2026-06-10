@@ -19,7 +19,9 @@ use shared::proto::monitoring::{
     UpdatesRequest,
 };
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
+use std::task::{Context, Poll};
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 use tracing::{error, info, warn};
@@ -38,9 +40,33 @@ fn now_timestamp() -> prost_types::Timestamp {
     datetime_to_timestamp(Utc::now())
 }
 
+/// Maximum accepted length for the process filter parameter
+const MAX_FILTER_LEN: usize = 256;
+
+/// Stream wrapper that decrements the active client counter when dropped
+struct CountedStream<S> {
+    inner: S,
+    counter: Arc<AtomicUsize>,
+}
+
+impl<S> Drop for CountedStream<S> {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl<S: Stream + Unpin> Stream for CountedStream<S> {
+    type Item = S::Item;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.inner).poll_next(cx)
+    }
+}
+
 pub struct MonitorServiceImpl {
     monitor: Arc<SystemMonitor>,
     config: Arc<RwLock<Config>>,
+    active_streams: Arc<AtomicUsize>,
 }
 
 impl MonitorServiceImpl {
@@ -49,6 +75,7 @@ impl MonitorServiceImpl {
         let service = Self {
             monitor: Arc::new(monitor),
             config: Arc::new(RwLock::new(Config::default())),
+            active_streams: Arc::new(AtomicUsize::new(0)),
         };
 
         // Start background monitoring
@@ -62,6 +89,7 @@ impl MonitorServiceImpl {
         let service = Self {
             monitor: Arc::new(monitor),
             config: Arc::new(RwLock::new(config)),
+            active_streams: Arc::new(AtomicUsize::new(0)),
         };
 
         // Start background monitoring
@@ -75,6 +103,7 @@ impl MonitorServiceImpl {
         let service = Self {
             monitor,
             config: Arc::new(RwLock::new(config)),
+            active_streams: Arc::new(AtomicUsize::new(0)),
         };
 
         // Note: background monitoring should already be started
@@ -185,6 +214,13 @@ impl MonitorService for MonitorServiceImpl {
 
         let req = request.into_inner();
         let limit = req.limit;
+        if req.filter.len() > MAX_FILTER_LEN {
+            return Err(Status::invalid_argument(format!(
+                "filter must be at most {} characters (got {})",
+                MAX_FILTER_LEN,
+                req.filter.len()
+            )));
+        }
         let filter = if req.filter.is_empty() {
             None
         } else {
@@ -301,6 +337,33 @@ impl MonitorService for MonitorServiceImpl {
 
         info!("Handling StreamSystemUpdates request");
 
+        // Enforce max_clients on long-lived streaming connections
+        let max_clients = self
+            .config
+            .read()
+            .map_err(|_| Status::internal("Config lock error"))?
+            .max_clients;
+        if self
+            .active_streams
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                if n < max_clients {
+                    Some(n + 1)
+                } else {
+                    None
+                }
+            })
+            .is_err()
+        {
+            warn!(
+                "Rejecting stream: max_clients limit of {} reached",
+                max_clients
+            );
+            return Err(Status::resource_exhausted(format!(
+                "Maximum number of connected clients reached ({})",
+                max_clients
+            )));
+        }
+
         let req = request.into_inner();
         let update_interval = std::cmp::max(req.update_interval_seconds, 1);
 
@@ -366,7 +429,10 @@ impl MonitorService for MonitorServiceImpl {
             }
         });
 
-        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        let stream = CountedStream {
+            inner: tokio_stream::wrappers::ReceiverStream::new(rx),
+            counter: Arc::clone(&self.active_streams),
+        };
         Ok(Response::new(
             Box::pin(stream) as Self::StreamSystemUpdatesStream
         ))
@@ -582,8 +648,7 @@ mod tests {
             access_token: "test-secret-token".to_string(),
             ..Default::default()
         };
-        MonitorServiceImpl::from_arc(Arc::new(monitor), config)
-            .expect("Failed to create service")
+        MonitorServiceImpl::from_arc(Arc::new(monitor), config).expect("Failed to create service")
     }
 
     #[tokio::test]
@@ -608,9 +673,10 @@ mod tests {
     async fn test_validate_request_valid_x_access_token() {
         let service = create_test_service(true).await;
         let mut request = Request::new(());
-        request
-            .metadata_mut()
-            .insert("x-access-token", MetadataValue::from_static("test-secret-token"));
+        request.metadata_mut().insert(
+            "x-access-token",
+            MetadataValue::from_static("test-secret-token"),
+        );
         let result = service.validate_request(&request);
         assert!(result.is_ok());
     }
@@ -619,9 +685,10 @@ mod tests {
     async fn test_validate_request_valid_bearer_token() {
         let service = create_test_service(true).await;
         let mut request = Request::new(());
-        request
-            .metadata_mut()
-            .insert("authorization", MetadataValue::from_static("Bearer test-secret-token"));
+        request.metadata_mut().insert(
+            "authorization",
+            MetadataValue::from_static("Bearer test-secret-token"),
+        );
         let result = service.validate_request(&request);
         assert!(result.is_ok());
     }
@@ -643,9 +710,10 @@ mod tests {
     async fn test_validate_request_invalid_bearer_format() {
         let service = create_test_service(true).await;
         let mut request = Request::new(());
-        request
-            .metadata_mut()
-            .insert("authorization", MetadataValue::from_static("Basic dXNlcjpwYXNz"));
+        request.metadata_mut().insert(
+            "authorization",
+            MetadataValue::from_static("Basic dXNlcjpwYXNz"),
+        );
         let result = service.validate_request(&request);
         assert!(result.is_err());
         let status = result.unwrap_err();
@@ -686,8 +754,7 @@ mod tests {
             .expect("Failed to bind");
         let port = listener.local_addr().unwrap().port();
 
-        let server = Server::builder()
-            .add_service(MonitorServiceServer::new(service));
+        let server = Server::builder().add_service(MonitorServiceServer::new(service));
 
         tokio::spawn(async move {
             let _ = server
@@ -742,8 +809,7 @@ mod tests {
             .expect("Failed to bind");
         let port = listener.local_addr().unwrap().port();
 
-        let server = Server::builder()
-            .add_service(MonitorServiceServer::new(service));
+        let server = Server::builder().add_service(MonitorServiceServer::new(service));
 
         tokio::spawn(async move {
             let _ = server
@@ -780,8 +846,7 @@ mod tests {
     async fn test_integration_get_processes() {
         use shared::proto::monitoring::{
             monitor_service_client::MonitorServiceClient,
-            monitor_service_server::MonitorServiceServer,
-            ProcessesRequest,
+            monitor_service_server::MonitorServiceServer, ProcessesRequest,
         };
 
         let monitor = SystemMonitor::new(1, vec![], vec![], vec![])
@@ -801,8 +866,7 @@ mod tests {
             .expect("Failed to bind");
         let port = listener.local_addr().unwrap().port();
 
-        let server = Server::builder()
-            .add_service(MonitorServiceServer::new(service));
+        let server = Server::builder().add_service(MonitorServiceServer::new(service));
 
         tokio::spawn(async move {
             let _ = server
@@ -862,8 +926,7 @@ mod tests {
             .expect("Failed to bind");
         let port = listener.local_addr().unwrap().port();
 
-        let server = Server::builder()
-            .add_service(MonitorServiceServer::new(service));
+        let server = Server::builder().add_service(MonitorServiceServer::new(service));
 
         tokio::spawn(async move {
             let _ = server
@@ -910,8 +973,7 @@ mod tests {
             .expect("Failed to bind");
         let port = listener.local_addr().unwrap().port();
 
-        let server = Server::builder()
-            .add_service(MonitorServiceServer::new(service));
+        let server = Server::builder().add_service(MonitorServiceServer::new(service));
 
         tokio::spawn(async move {
             let _ = server
@@ -937,8 +999,7 @@ mod tests {
     async fn test_integration_get_containers() {
         use shared::proto::monitoring::{
             monitor_service_client::MonitorServiceClient,
-            monitor_service_server::MonitorServiceServer,
-            ContainersRequest,
+            monitor_service_server::MonitorServiceServer, ContainersRequest,
         };
 
         let monitor = SystemMonitor::new(1, vec![], vec![], vec![])
@@ -958,8 +1019,7 @@ mod tests {
             .expect("Failed to bind");
         let port = listener.local_addr().unwrap().port();
 
-        let server = Server::builder()
-            .add_service(MonitorServiceServer::new(service));
+        let server = Server::builder().add_service(MonitorServiceServer::new(service));
 
         tokio::spawn(async move {
             let _ = server
@@ -1009,8 +1069,7 @@ mod tests {
             .expect("Failed to bind");
         let port = listener.local_addr().unwrap().port();
 
-        let server = Server::builder()
-            .add_service(MonitorServiceServer::new(service));
+        let server = Server::builder().add_service(MonitorServiceServer::new(service));
 
         tokio::spawn(async move {
             let _ = server
@@ -1057,8 +1116,7 @@ mod tests {
             .expect("Failed to bind");
         let port = listener.local_addr().unwrap().port();
 
-        let server = Server::builder()
-            .add_service(MonitorServiceServer::new(service));
+        let server = Server::builder().add_service(MonitorServiceServer::new(service));
 
         tokio::spawn(async move {
             let _ = server
@@ -1105,8 +1163,7 @@ mod tests {
             .expect("Failed to bind");
         let port = listener.local_addr().unwrap().port();
 
-        let server = Server::builder()
-            .add_service(MonitorServiceServer::new(service));
+        let server = Server::builder().add_service(MonitorServiceServer::new(service));
 
         tokio::spawn(async move {
             let _ = server

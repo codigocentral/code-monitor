@@ -384,7 +384,10 @@ mod tests {
 
     #[test]
     fn test_slack_severity_color() {
-        let channel = SlackChannel::new("test".to_string(), "https://hooks.slack.com/test".to_string());
+        let channel = SlackChannel::new(
+            "test".to_string(),
+            "https://hooks.slack.com/test".to_string(),
+        );
         assert_eq!(channel.severity_color(&AlertSeverity::Info), "#36a64f");
         assert_eq!(channel.severity_color(&AlertSeverity::Warning), "#ff9900");
         assert_eq!(channel.severity_color(&AlertSeverity::Critical), "#ff0000");
@@ -392,19 +395,24 @@ mod tests {
 
     #[test]
     fn test_webhook_channel_name() {
-        let channel = WebhookChannel::new("my-webhook".to_string(), "https://example.com".to_string());
+        let channel =
+            WebhookChannel::new("my-webhook".to_string(), "https://example.com".to_string());
         assert_eq!(channel.name(), "my-webhook");
     }
 
     #[test]
     fn test_slack_channel_name() {
-        let channel = SlackChannel::new("my-slack".to_string(), "https://hooks.slack.com".to_string());
+        let channel = SlackChannel::new(
+            "my-slack".to_string(),
+            "https://hooks.slack.com".to_string(),
+        );
         assert_eq!(channel.name(), "my-slack");
     }
 
     #[test]
     fn test_discord_channel_name() {
-        let channel = DiscordChannel::new("my-discord".to_string(), "https://discord.com".to_string());
+        let channel =
+            DiscordChannel::new("my-discord".to_string(), "https://discord.com".to_string());
         assert_eq!(channel.name(), "my-discord");
     }
 
@@ -469,10 +477,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_webhook_channel_send_error() {
-        let channel = WebhookChannel::new(
-            "test".to_string(),
-            "http://127.0.0.1:1/webhook".to_string(),
-        );
+        let channel =
+            WebhookChannel::new("test".to_string(), "http://127.0.0.1:1/webhook".to_string());
         let alert = crate::alerts::Alert::new(
             crate::alerts::AlertType::CpuHigh,
             crate::alerts::AlertSeverity::Warning,
@@ -488,10 +494,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_slack_channel_send_error() {
-        let channel = SlackChannel::new(
-            "test".to_string(),
-            "http://127.0.0.1:1/slack".to_string(),
-        );
+        let channel = SlackChannel::new("test".to_string(), "http://127.0.0.1:1/slack".to_string());
         let alert = crate::alerts::Alert::new(
             crate::alerts::AlertType::CpuHigh,
             crate::alerts::AlertSeverity::Warning,
@@ -507,10 +510,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_discord_channel_send_error() {
-        let channel = DiscordChannel::new(
-            "test".to_string(),
-            "http://127.0.0.1:1/discord".to_string(),
-        );
+        let channel =
+            DiscordChannel::new("test".to_string(), "http://127.0.0.1:1/discord".to_string());
         let alert = crate::alerts::Alert::new(
             crate::alerts::AlertType::CpuHigh,
             crate::alerts::AlertSeverity::Warning,

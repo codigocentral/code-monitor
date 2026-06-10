@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use shared::types::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use sysinfo::{CpuExt, DiskExt, NetworkExt, NetworksExt, PidExt, ProcessExt, System, SystemExt};
 use tokio::time::{interval, Duration};
 use tracing::{error, info};
@@ -68,9 +68,9 @@ fn get_interface_ips() -> HashMap<String, String> {
 }
 
 pub struct SystemMonitor {
-    system: Arc<Mutex<System>>,
+    system: Arc<RwLock<System>>,
     update_interval: Duration,
-    last_update: Arc<Mutex<DateTime<Utc>>>,
+    last_update: Arc<RwLock<DateTime<Utc>>>,
     is_running: Arc<AtomicBool>,
     docker_collector: DockerCollector,
     postgres_collectors: Vec<PostgresCollector>,
@@ -103,16 +103,23 @@ impl SystemMonitor {
         let systemd_collector = if systemd_units.is_empty() {
             None
         } else {
-            info!("Initialized systemd collector for {} unit(s)", systemd_units.len());
+            info!(
+                "Initialized systemd collector for {} unit(s)",
+                systemd_units.len()
+            );
             Some(SystemdCollector::new(systemd_units))
         };
 
-        info!("Initialized {} Postgres collector(s), {} MariaDB collector(s)", postgres_collectors.len(), mariadb_collectors.len());
+        info!(
+            "Initialized {} Postgres collector(s), {} MariaDB collector(s)",
+            postgres_collectors.len(),
+            mariadb_collectors.len()
+        );
 
         let monitor = Self {
-            system: Arc::new(Mutex::new(system)),
+            system: Arc::new(RwLock::new(system)),
             update_interval: Duration::from_secs(update_interval_seconds),
-            last_update: Arc::new(Mutex::new(Utc::now())),
+            last_update: Arc::new(RwLock::new(Utc::now())),
             is_running: Arc::new(AtomicBool::new(false)),
             docker_collector: DockerCollector::new(),
             postgres_collectors,
@@ -120,7 +127,10 @@ impl SystemMonitor {
             systemd_collector,
         };
 
-        info!("System monitor initialized with {} second update interval", update_interval_seconds);
+        info!(
+            "System monitor initialized with {} second update interval",
+            update_interval_seconds
+        );
         Ok(monitor)
     }
 
@@ -159,17 +169,17 @@ impl SystemMonitor {
     }
 
     fn update_system_info(
-        system: &Arc<Mutex<System>>,
-        last_update: &Arc<Mutex<DateTime<Utc>>>,
+        system: &Arc<RwLock<System>>,
+        last_update: &Arc<RwLock<DateTime<Utc>>>,
     ) -> Result<()> {
         let mut sys = system
-            .lock()
+            .write()
             .map_err(|e| anyhow::anyhow!("Failed to lock system: {}", e))?;
 
         sys.refresh_all();
 
         *last_update
-            .lock()
+            .write()
             .map_err(|e| anyhow::anyhow!("Failed to lock last_update: {}", e))? = Utc::now();
 
         Ok(())
@@ -178,7 +188,7 @@ impl SystemMonitor {
     pub fn get_system_info(&self) -> Result<SystemInfo> {
         let sys = self
             .system
-            .lock()
+            .read()
             .map_err(|e| anyhow::anyhow!("Failed to lock system: {}", e))?;
 
         let memory_total = sys.total_memory();
@@ -232,7 +242,7 @@ impl SystemMonitor {
             disk_info,
             timestamp: *self
                 .last_update
-                .lock()
+                .read()
                 .map_err(|e| anyhow::anyhow!("Failed to lock last_update: {}", e))?,
         };
 
@@ -242,7 +252,7 @@ impl SystemMonitor {
     pub fn get_processes(&self, limit: u32, filter: Option<String>) -> Result<Vec<ProcessInfo>> {
         let sys = self
             .system
-            .lock()
+            .read()
             .map_err(|e| anyhow::anyhow!("Failed to lock system: {}", e))?;
 
         let mut processes: Vec<_> = sys
@@ -294,7 +304,7 @@ impl SystemMonitor {
     pub fn get_services(&self) -> Result<Vec<ServiceInfo>> {
         let sys = self
             .system
-            .lock()
+            .read()
             .map_err(|e| anyhow::anyhow!("Failed to lock system: {}", e))?;
 
         // Get all running processes and identify those that look like services
@@ -403,7 +413,7 @@ impl SystemMonitor {
     pub fn get_network_info(&self) -> Result<Vec<NetworkInfo>> {
         let sys = self
             .system
-            .lock()
+            .read()
             .map_err(|e| anyhow::anyhow!("Failed to lock system: {}", e))?;
 
         // Get IP addresses for all interfaces
@@ -454,7 +464,9 @@ mod tests {
             .expect("Failed to create monitor");
 
         // Verify we can get system info without panicking
-        let info = monitor.get_system_info().expect("Failed to get system info");
+        let info = monitor
+            .get_system_info()
+            .expect("Failed to get system info");
         assert!(!info.hostname.is_empty());
         assert!(info.memory_total_bytes > 0);
         assert!(info.cpu_count > 0);
@@ -467,11 +479,15 @@ mod tests {
             .expect("Failed to create monitor");
 
         // Get all processes (limit = 0)
-        let processes = monitor.get_processes(0, None).expect("Failed to get processes");
+        let processes = monitor
+            .get_processes(0, None)
+            .expect("Failed to get processes");
         assert!(!processes.is_empty(), "Should have at least one process");
 
         // Test with limit
-        let limited = monitor.get_processes(5, None).expect("Failed to get limited processes");
+        let limited = monitor
+            .get_processes(5, None)
+            .expect("Failed to get limited processes");
         assert!(limited.len() <= 5);
     }
 
@@ -507,7 +523,9 @@ mod tests {
             .await
             .expect("Failed to create monitor");
 
-        let networks = monitor.get_network_info().expect("Failed to get network info");
+        let networks = monitor
+            .get_network_info()
+            .expect("Failed to get network info");
         // Should have at least loopback or one interface
         assert!(!networks.is_empty());
 
@@ -524,7 +542,10 @@ mod tests {
             .await
             .expect("Failed to create monitor");
 
-        let containers = monitor.get_containers().await.expect("Failed to get containers");
+        let containers = monitor
+            .get_containers()
+            .await
+            .expect("Failed to get containers");
         // Docker is likely not available in test environment
         // The collector should gracefully return empty
         assert!(containers.is_empty() || !containers.is_empty());
@@ -536,7 +557,10 @@ mod tests {
             .await
             .expect("Failed to create monitor");
 
-        let units = monitor.get_systemd_units().await.expect("Failed to get systemd units");
+        let units = monitor
+            .get_systemd_units()
+            .await
+            .expect("Failed to get systemd units");
         assert!(units.is_empty());
     }
 
@@ -561,7 +585,9 @@ mod tests {
             .await
             .expect("Failed to create monitor");
 
-        let info = monitor.get_system_info().expect("Failed to get system info");
+        let info = monitor
+            .get_system_info()
+            .expect("Failed to get system info");
 
         // Memory consistency: used + available <= total
         assert_eq!(
@@ -576,7 +602,9 @@ mod tests {
             .await
             .expect("Failed to create monitor");
 
-        let info = monitor.get_system_info().expect("Failed to get system info");
+        let info = monitor
+            .get_system_info()
+            .expect("Failed to get system info");
 
         for disk in &info.disk_info {
             // Disk consistency: used + available <= total
@@ -584,8 +612,7 @@ mod tests {
 
             // Usage percent should be consistent
             if disk.total_bytes > 0 {
-                let expected_percent =
-                    (disk.used_bytes as f64 / disk.total_bytes as f64) * 100.0;
+                let expected_percent = (disk.used_bytes as f64 / disk.total_bytes as f64) * 100.0;
                 assert!(
                     (disk.usage_percent - expected_percent).abs() < 0.1,
                     "Disk usage percent mismatch: {} vs {}",
@@ -604,7 +631,9 @@ mod tests {
             .await
             .expect("Failed to create monitor");
 
-        let info = monitor.get_system_info().expect("Failed to get system info");
+        let info = monitor
+            .get_system_info()
+            .expect("Failed to get system info");
         assert!(info.cpu_count > 0, "CPU count should be positive");
     }
 
@@ -614,7 +643,9 @@ mod tests {
             .await
             .expect("Failed to create monitor");
 
-        let info = monitor.get_system_info().expect("Failed to get system info");
+        let info = monitor
+            .get_system_info()
+            .expect("Failed to get system info");
         let now = chrono::Utc::now();
 
         // Timestamp should not be older than 1 minute (it comes from last_update)
@@ -632,7 +663,9 @@ mod tests {
             .await
             .expect("Failed to create monitor");
 
-        let processes = monitor.get_processes(0, None).expect("Failed to get processes");
+        let processes = monitor
+            .get_processes(0, None)
+            .expect("Failed to get processes");
 
         for i in 1..processes.len() {
             assert!(
@@ -658,7 +691,9 @@ mod tests {
             .await
             .expect("Failed to create monitor");
 
-        let networks = monitor.get_network_info().expect("Failed to get network info");
+        let networks = monitor
+            .get_network_info()
+            .expect("Failed to get network info");
 
         for net in &networks {
             let parts: Vec<&str> = net.mac_address.split(':').collect();
@@ -692,7 +727,9 @@ mod tests {
 
         let start = std::time::Instant::now();
         for _ in 0..100 {
-            let _ = monitor.get_system_info().expect("Failed to get system info");
+            let _ = monitor
+                .get_system_info()
+                .expect("Failed to get system info");
         }
         let elapsed = start.elapsed();
 
@@ -712,7 +749,9 @@ mod tests {
 
         let start = std::time::Instant::now();
         for _ in 0..10 {
-            let _ = monitor.get_processes(50, None).expect("Failed to get processes");
+            let _ = monitor
+                .get_processes(50, None)
+                .expect("Failed to get processes");
         }
         let elapsed = start.elapsed();
 
@@ -732,7 +771,7 @@ mod tests {
         let result = SystemMonitor::update_system_info(&monitor.system, &monitor.last_update);
         assert!(result.is_ok());
 
-        let last = monitor.last_update.lock().unwrap();
+        let last = monitor.last_update.read().unwrap();
         let age = chrono::Utc::now() - *last;
         assert!(age.num_seconds() < 5, "last_update should be very recent");
     }
@@ -791,7 +830,10 @@ mod tests {
             .await
             .expect("Failed to create monitor");
 
-        let units = monitor.get_systemd_units().await.expect("Failed to get systemd units");
+        let units = monitor
+            .get_systemd_units()
+            .await
+            .expect("Failed to get systemd units");
         // On non-Linux this will be empty; on Linux it depends on whether systemctl is available.
         // The call itself must succeed.
         let _ = units.len();
@@ -803,7 +845,10 @@ mod tests {
             .await
             .expect("Failed to create monitor");
 
-        let clusters = monitor.get_postgres_clusters().await.expect("Failed to get postgres");
+        let clusters = monitor
+            .get_postgres_clusters()
+            .await
+            .expect("Failed to get postgres");
         assert!(clusters.is_empty());
     }
 
@@ -813,7 +858,10 @@ mod tests {
             .await
             .expect("Failed to create monitor");
 
-        let clusters = monitor.get_mariadb_clusters().await.expect("Failed to get mariadb");
+        let clusters = monitor
+            .get_mariadb_clusters()
+            .await
+            .expect("Failed to get mariadb");
         assert!(clusters.is_empty());
     }
 
@@ -823,7 +871,9 @@ mod tests {
             .await
             .expect("Failed to create monitor");
 
-        let processes = monitor.get_processes(1, None).expect("Failed to get processes");
+        let processes = monitor
+            .get_processes(1, None)
+            .expect("Failed to get processes");
         assert!(processes.len() <= 1);
         assert!(!processes.is_empty(), "Should have at least one process");
     }
@@ -849,26 +899,31 @@ mod tests {
             .await
             .expect("Failed to create monitor");
 
-        let networks = monitor.get_network_info().expect("Failed to get network info");
-        assert!(!networks.is_empty(), "Should have at least one network interface");
+        let networks = monitor
+            .get_network_info()
+            .expect("Failed to get network info");
+        assert!(
+            !networks.is_empty(),
+            "Should have at least one network interface"
+        );
     }
 
     // ------------------------------------------------------------------
     // Poisoned mutex coverage
     // ------------------------------------------------------------------
 
-    fn poison_mutex<T: Send + 'static>(arc: &Arc<Mutex<T>>) {
+    fn poison_mutex<T: Send + Sync + 'static>(arc: &Arc<RwLock<T>>) {
         let clone = Arc::clone(arc);
         let handle = std::thread::spawn(move || {
-            let _guard = clone.lock().unwrap();
-            panic!("intentional panic to poison mutex");
+            let _guard = clone.write().unwrap();
+            panic!("intentional panic to poison lock");
         });
         let _ = handle.join();
     }
 
     fn create_manual_monitor(
-        system: Arc<Mutex<System>>,
-        last_update: Arc<Mutex<DateTime<Utc>>>,
+        system: Arc<RwLock<System>>,
+        last_update: Arc<RwLock<DateTime<Utc>>>,
     ) -> SystemMonitor {
         SystemMonitor {
             system,
@@ -884,17 +939,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_system_info_system_poisoned() {
-        let system = Arc::new(Mutex::new(System::new_all()));
+        let system = Arc::new(RwLock::new(System::new_all()));
         poison_mutex(&system);
-        let last_update = Arc::new(Mutex::new(Utc::now()));
+        let last_update = Arc::new(RwLock::new(Utc::now()));
         let result = SystemMonitor::update_system_info(&system, &last_update);
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_update_system_info_last_update_poisoned() {
-        let system = Arc::new(Mutex::new(System::new_all()));
-        let last_update = Arc::new(Mutex::new(Utc::now()));
+        let system = Arc::new(RwLock::new(System::new_all()));
+        let last_update = Arc::new(RwLock::new(Utc::now()));
         poison_mutex(&last_update);
         let result = SystemMonitor::update_system_info(&system, &last_update);
         assert!(result.is_err());
@@ -902,49 +957,49 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_system_info_system_poisoned() {
-        let system = Arc::new(Mutex::new(System::new_all()));
+        let system = Arc::new(RwLock::new(System::new_all()));
         poison_mutex(&system);
-        let monitor = create_manual_monitor(system, Arc::new(Mutex::new(Utc::now())));
+        let monitor = create_manual_monitor(system, Arc::new(RwLock::new(Utc::now())));
         assert!(monitor.get_system_info().is_err());
     }
 
     #[tokio::test]
     async fn test_get_system_info_last_update_poisoned() {
-        let last_update = Arc::new(Mutex::new(Utc::now()));
+        let last_update = Arc::new(RwLock::new(Utc::now()));
         poison_mutex(&last_update);
-        let monitor = create_manual_monitor(Arc::new(Mutex::new(System::new_all())), last_update);
+        let monitor = create_manual_monitor(Arc::new(RwLock::new(System::new_all())), last_update);
         assert!(monitor.get_system_info().is_err());
     }
 
     #[tokio::test]
     async fn test_get_processes_system_poisoned() {
-        let system = Arc::new(Mutex::new(System::new_all()));
+        let system = Arc::new(RwLock::new(System::new_all()));
         poison_mutex(&system);
-        let monitor = create_manual_monitor(system, Arc::new(Mutex::new(Utc::now())));
+        let monitor = create_manual_monitor(system, Arc::new(RwLock::new(Utc::now())));
         assert!(monitor.get_processes(10, None).is_err());
     }
 
     #[tokio::test]
     async fn test_get_services_system_poisoned() {
-        let system = Arc::new(Mutex::new(System::new_all()));
+        let system = Arc::new(RwLock::new(System::new_all()));
         poison_mutex(&system);
-        let monitor = create_manual_monitor(system, Arc::new(Mutex::new(Utc::now())));
+        let monitor = create_manual_monitor(system, Arc::new(RwLock::new(Utc::now())));
         assert!(monitor.get_services().is_err());
     }
 
     #[tokio::test]
     async fn test_get_network_info_system_poisoned() {
-        let system = Arc::new(Mutex::new(System::new_all()));
+        let system = Arc::new(RwLock::new(System::new_all()));
         poison_mutex(&system);
-        let monitor = create_manual_monitor(system, Arc::new(Mutex::new(Utc::now())));
+        let monitor = create_manual_monitor(system, Arc::new(RwLock::new(Utc::now())));
         assert!(monitor.get_network_info().is_err());
     }
 
     #[tokio::test]
     async fn test_background_monitoring_with_poisoned_system() {
-        let system = Arc::new(Mutex::new(System::new_all()));
+        let system = Arc::new(RwLock::new(System::new_all()));
         poison_mutex(&system);
-        let monitor = create_manual_monitor(system, Arc::new(Mutex::new(Utc::now())));
+        let monitor = create_manual_monitor(system, Arc::new(RwLock::new(Utc::now())));
         monitor.start_background_monitoring();
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         monitor.stop_background_monitoring();
@@ -969,9 +1024,9 @@ mod tests {
             enabled: true,
         };
         let monitor = SystemMonitor {
-            system: Arc::new(Mutex::new(System::new_all())),
+            system: Arc::new(RwLock::new(System::new_all())),
             update_interval: Duration::from_secs(1),
-            last_update: Arc::new(Mutex::new(Utc::now())),
+            last_update: Arc::new(RwLock::new(Utc::now())),
             is_running: Arc::new(AtomicBool::new(false)),
             docker_collector: DockerCollector::new(),
             postgres_collectors: vec![PostgresCollector::new(pg_config)],
@@ -979,10 +1034,14 @@ mod tests {
             systemd_collector: None,
         };
 
-        let result = tokio::time::timeout(Duration::from_secs(10), monitor.get_postgres_clusters()).await;
+        let result =
+            tokio::time::timeout(Duration::from_secs(10), monitor.get_postgres_clusters()).await;
         assert!(result.is_ok(), "Should not timeout");
         let clusters = result.unwrap().expect("Should return Ok");
-        assert!(clusters.is_empty(), "Failing collector should yield empty clusters");
+        assert!(
+            clusters.is_empty(),
+            "Failing collector should yield empty clusters"
+        );
     }
 
     #[tokio::test]
@@ -997,9 +1056,9 @@ mod tests {
             enabled: true,
         };
         let monitor = SystemMonitor {
-            system: Arc::new(Mutex::new(System::new_all())),
+            system: Arc::new(RwLock::new(System::new_all())),
             update_interval: Duration::from_secs(1),
-            last_update: Arc::new(Mutex::new(Utc::now())),
+            last_update: Arc::new(RwLock::new(Utc::now())),
             is_running: Arc::new(AtomicBool::new(false)),
             docker_collector: DockerCollector::new(),
             postgres_collectors: vec![],
@@ -1007,22 +1066,47 @@ mod tests {
             systemd_collector: None,
         };
 
-        let result = tokio::time::timeout(Duration::from_secs(10), monitor.get_mariadb_clusters()).await;
+        let result =
+            tokio::time::timeout(Duration::from_secs(10), monitor.get_mariadb_clusters()).await;
         assert!(result.is_ok(), "Should not timeout");
         let clusters = result.unwrap().expect("Should return Ok");
-        assert!(clusters.is_empty(), "Failing collector should yield empty clusters");
+        assert!(
+            clusters.is_empty(),
+            "Failing collector should yield empty clusters"
+        );
     }
 
     #[test]
     fn test_map_process_status_all_variants() {
-        assert!(matches!(SystemMonitor::map_process_status(sysinfo::ProcessStatus::Run), ServiceStatus::Running));
-        assert!(matches!(SystemMonitor::map_process_status(sysinfo::ProcessStatus::Sleep), ServiceStatus::Running));
-        assert!(matches!(SystemMonitor::map_process_status(sysinfo::ProcessStatus::Idle), ServiceStatus::Running));
-        assert!(matches!(SystemMonitor::map_process_status(sysinfo::ProcessStatus::Stop), ServiceStatus::Stopped));
-        assert!(matches!(SystemMonitor::map_process_status(sysinfo::ProcessStatus::Zombie), ServiceStatus::Failed));
-        assert!(matches!(SystemMonitor::map_process_status(sysinfo::ProcessStatus::Dead), ServiceStatus::Stopped));
+        assert!(matches!(
+            SystemMonitor::map_process_status(sysinfo::ProcessStatus::Run),
+            ServiceStatus::Running
+        ));
+        assert!(matches!(
+            SystemMonitor::map_process_status(sysinfo::ProcessStatus::Sleep),
+            ServiceStatus::Running
+        ));
+        assert!(matches!(
+            SystemMonitor::map_process_status(sysinfo::ProcessStatus::Idle),
+            ServiceStatus::Running
+        ));
+        assert!(matches!(
+            SystemMonitor::map_process_status(sysinfo::ProcessStatus::Stop),
+            ServiceStatus::Stopped
+        ));
+        assert!(matches!(
+            SystemMonitor::map_process_status(sysinfo::ProcessStatus::Zombie),
+            ServiceStatus::Failed
+        ));
+        assert!(matches!(
+            SystemMonitor::map_process_status(sysinfo::ProcessStatus::Dead),
+            ServiceStatus::Stopped
+        ));
         // Unknown / other variants default to Running
-        assert!(matches!(SystemMonitor::map_process_status(sysinfo::ProcessStatus::Unknown(99)), ServiceStatus::Running));
+        assert!(matches!(
+            SystemMonitor::map_process_status(sysinfo::ProcessStatus::Unknown(99)),
+            ServiceStatus::Running
+        ));
     }
 
     #[test]

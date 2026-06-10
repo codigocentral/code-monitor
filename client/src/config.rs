@@ -61,6 +61,18 @@ impl ClientConfigManager {
     pub fn save_config(&self, config: &ClientConfig) -> Result<()> {
         let content = toml::to_string_pretty(config)?;
         fs::write(&self.config_path, content)?;
+
+        // The config stores server access tokens: restrict it to the owner.
+        // On Windows the file inherits the user-profile NTFS ACLs, which
+        // already keep other non-admin users out.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&self.config_path)?.permissions();
+            perms.set_mode(0o600);
+            fs::set_permissions(&self.config_path, perms)?;
+        }
+
         Ok(())
     }
 
@@ -138,6 +150,19 @@ impl ClientConfigManager {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    #[test]
+    fn test_save_config_restricts_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("perm-config.toml");
+        let _manager = ClientConfigManager::new(&config_path).unwrap();
+
+        let mode = fs::metadata(&config_path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "config file must be owner-only");
+    }
 
     #[test]
     fn test_config_manager() {

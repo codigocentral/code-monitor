@@ -1,0 +1,49 @@
+# Build artifacts
+target/
+**/*.rs.bk
+
+# VCS and CI
+.git/
+.github/
+.gitignore
+
+# Local configs and secrets (only the .example files belong in images)
+config.toml
+client-config.toml
+.env
+certs/
+keys/
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Databases, logs and profiling artifacts
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*.log
+*.profraw
+*.pdb
+
+# Scratch/debug files in the repo root
+check_*.rs
+check_*.exe
+
+# Documentation (not needed in images)
+docsx/
+doc/
+*.md
+
+# IDE/OS noise
+.idea/
+.vscode/
+.claude/
+.DS_Store
+Thumbs.db
+
+# Docker files themselves
+Dockerfile.*
+docker-compose.yml
+.dockerignore

@@ -141,6 +141,7 @@ pub struct AlertState {
     samples: VecDeque<(DateTime<Utc>, f64)>,
     triggered: bool,
     last_triggered: Option<DateTime<Utc>>,
+    silenced_until: Option<DateTime<Utc>>,
 }
 
 impl AlertState {
@@ -149,6 +150,7 @@ impl AlertState {
             samples: VecDeque::new(),
             triggered: false,
             last_triggered: None,
+            silenced_until: None,
         }
     }
 
@@ -197,6 +199,23 @@ impl AlertState {
         match self.last_triggered {
             None => true,
             Some(last) => Utc::now() - last > cooldown,
+        }
+    }
+
+    /// Silence this alert for the given duration: no new alerts are generated until it expires
+    pub fn silence(&mut self, duration: Duration) {
+        self.silenced_until = Some(Utc::now() + duration);
+    }
+
+    /// Remove an active silence
+    pub fn unsilence(&mut self) {
+        self.silenced_until = None;
+    }
+
+    pub fn is_silenced(&self) -> bool {
+        match self.silenced_until {
+            None => false,
+            Some(until) => Utc::now() < until,
         }
     }
 }
@@ -293,7 +312,10 @@ impl AlertManager {
             let min_samples = (rule.duration_seconds / 5).max(1) as usize; // Assuming 5s sample interval
 
             if exceeded && state.check_threshold(rule.threshold, min_samples) {
-                if !state.is_triggered() && state.can_trigger_again(Duration::minutes(5)) {
+                if !state.is_triggered()
+                    && state.can_trigger_again(Duration::minutes(5))
+                    && !state.is_silenced()
+                {
                     state.mark_triggered();
 
                     let alert = Alert::new(
@@ -338,6 +360,30 @@ impl AlertManager {
             return Some(alert);
         }
         None
+    }
+
+    /// Silence alerts of a given type for a server for the given duration
+    pub fn silence_alert(&mut self, server_id: &str, alert_type: AlertType, duration: Duration) {
+        let state = self
+            .states
+            .entry((server_id.to_string(), alert_type))
+            .or_default();
+        state.silence(duration);
+    }
+
+    /// Remove an active silence for a server/alert type pair
+    pub fn unsilence_alert(&mut self, server_id: &str, alert_type: AlertType) {
+        if let Some(state) = self.states.get_mut(&(server_id.to_string(), alert_type)) {
+            state.unsilence();
+        }
+    }
+
+    /// Check whether alerts of a given type are currently silenced for a server
+    pub fn is_alert_silenced(&self, server_id: &str, alert_type: AlertType) -> bool {
+        self.states
+            .get(&(server_id.to_string(), alert_type))
+            .map(|s| s.is_silenced())
+            .unwrap_or(false)
     }
 
     pub fn get_active_alerts(&self) -> &[Alert] {
@@ -475,6 +521,41 @@ mod tests {
     }
 
     #[test]
+    fn test_alert_state_silence() {
+        let mut state = AlertState::new();
+        assert!(!state.is_silenced());
+
+        state.silence(Duration::minutes(10));
+        assert!(state.is_silenced());
+
+        state.unsilence();
+        assert!(!state.is_silenced());
+    }
+
+    #[test]
+    fn test_alert_state_silence_expires() {
+        let mut state = AlertState::new();
+        // A silence in the past must not be active
+        state.silenced_until = Some(Utc::now() - Duration::seconds(1));
+        assert!(!state.is_silenced());
+    }
+
+    #[test]
+    fn test_alert_manager_silence_alert() {
+        let mut manager = AlertManager::new();
+        assert!(!manager.is_alert_silenced("srv-1", AlertType::CpuHigh));
+
+        manager.silence_alert("srv-1", AlertType::CpuHigh, Duration::minutes(30));
+        assert!(manager.is_alert_silenced("srv-1", AlertType::CpuHigh));
+        // Other servers/types are unaffected
+        assert!(!manager.is_alert_silenced("srv-2", AlertType::CpuHigh));
+        assert!(!manager.is_alert_silenced("srv-1", AlertType::MemoryHigh));
+
+        manager.unsilence_alert("srv-1", AlertType::CpuHigh);
+        assert!(!manager.is_alert_silenced("srv-1", AlertType::CpuHigh));
+    }
+
+    #[test]
     fn test_alert_manager_add_remove_rule() {
         let mut manager = AlertManager::new();
         assert_eq!(manager.get_rules().len(), 0);
@@ -552,7 +633,10 @@ mod tests {
         let result = manager.acknowledge_alert(alert_id, "operator".to_string());
         assert!(result.is_some());
         assert!(result.unwrap().acknowledged);
-        assert_eq!(manager.active_alerts[0].acknowledged_by.as_ref().unwrap(), "operator");
+        assert_eq!(
+            manager.active_alerts[0].acknowledged_by.as_ref().unwrap(),
+            "operator"
+        );
     }
 
     #[test]
@@ -690,7 +774,10 @@ mod tests {
         let result = manager.acknowledge_alert(alert_id, "admin".to_string());
         assert!(result.is_some());
         assert!(result.unwrap().acknowledged);
-        assert_eq!(manager.alert_history[0].acknowledged_by.as_ref().unwrap(), "admin");
+        assert_eq!(
+            manager.alert_history[0].acknowledged_by.as_ref().unwrap(),
+            "admin"
+        );
     }
 
     #[test]

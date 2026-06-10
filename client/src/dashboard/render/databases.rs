@@ -70,9 +70,7 @@ pub(super) fn draw_postgres_tab<B: tui::backend::Backend>(
                     } else {
                         c.databases
                             .iter()
-                            .map(|d| {
-                                format!("{} ({})", d.name, format_db_size_mb(d.size_bytes))
-                            })
+                            .map(|d| format!("{} ({})", d.name, format_db_size_mb(d.size_bytes)))
                             .collect::<Vec<_>>()
                             .join(", ")
                     };
@@ -221,7 +219,6 @@ pub(super) fn draw_postgres_tab<B: tui::backend::Backend>(
         f.render_widget(no_server, area);
     }
 }
-
 
 pub(super) fn draw_mariadb_tab<B: tui::backend::Backend>(
     f: &mut Frame<B>,

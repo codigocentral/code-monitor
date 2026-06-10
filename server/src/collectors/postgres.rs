@@ -274,7 +274,10 @@ mod tests {
             enabled: true,
         };
         let collector = PostgresCollector::new(config);
-        assert_eq!(collector.config.socket_path.as_ref().unwrap(), "/run/postgresql/.s.PGSQL.5432");
+        assert_eq!(
+            collector.config.socket_path.as_ref().unwrap(),
+            "/run/postgresql/.s.PGSQL.5432"
+        );
     }
 
     #[test]
@@ -295,12 +298,7 @@ mod tests {
 
     #[test]
     fn test_parse_database_info() {
-        let info = PostgresCollector::parse_database_info(
-            "mydb".to_string(),
-            1_048_576,
-            5,
-            99.5,
-        );
+        let info = PostgresCollector::parse_database_info("mydb".to_string(), 1_048_576, 5, 99.5);
         assert_eq!(info.name, "mydb");
         assert_eq!(info.size_bytes, 1_048_576);
         assert_eq!(info.num_backends, 5);
@@ -310,23 +308,13 @@ mod tests {
     #[test]
     fn test_parse_database_info_negative_size() {
         // Edge case: negative size from DB should be cast to large u64
-        let info = PostgresCollector::parse_database_info(
-            "test".to_string(),
-            -1,
-            0,
-            100.0,
-        );
+        let info = PostgresCollector::parse_database_info("test".to_string(), -1, 0, 100.0);
         assert_eq!(info.size_bytes, u64::MAX); // -1 as i64 cast to u64
     }
 
     #[test]
     fn test_parse_database_info_zero() {
-        let info = PostgresCollector::parse_database_info(
-            "".to_string(),
-            0,
-            0,
-            0.0,
-        );
+        let info = PostgresCollector::parse_database_info("".to_string(), 0, 0, 0.0);
         assert_eq!(info.name, "");
         assert_eq!(info.size_bytes, 0);
         assert_eq!(info.num_backends, 0);
@@ -402,24 +390,15 @@ mod tests {
 
     #[test]
     fn test_parse_database_info_nan_cache_hit() {
-        let info = PostgresCollector::parse_database_info(
-            "nandb".to_string(),
-            100,
-            1,
-            f64::NAN,
-        );
+        let info = PostgresCollector::parse_database_info("nandb".to_string(), 100, 1, f64::NAN);
         assert_eq!(info.name, "nandb");
         assert!(info.cache_hit_ratio.is_nan());
     }
 
     #[test]
     fn test_parse_database_info_infinite_cache_hit() {
-        let info = PostgresCollector::parse_database_info(
-            "infdb".to_string(),
-            100,
-            1,
-            f64::INFINITY,
-        );
+        let info =
+            PostgresCollector::parse_database_info("infdb".to_string(), 100, 1, f64::INFINITY);
         assert!(info.cache_hit_ratio.is_infinite());
     }
 }

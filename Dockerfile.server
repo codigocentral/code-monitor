@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y protobuf-compiler && rm -rf /var/lib/ap
 
 # Copy workspace files
 COPY Cargo.toml Cargo.lock ./
-COPY shared/Cargo.toml shared/Cargo.lock ./shared/
+COPY shared/Cargo.toml ./shared/
 COPY server/Cargo.toml ./server/
 COPY client/Cargo.toml ./client/
 
@@ -16,6 +16,9 @@ COPY client/Cargo.toml ./client/
 COPY shared/src ./shared/src
 COPY server/src ./server/src
 COPY shared/build.rs ./shared/
+
+# Stub out the client member so the workspace resolves without its sources
+RUN mkdir -p client/src && echo "fn main() {}" > client/src/main.rs
 
 # Build the server
 RUN cargo build --release --bin monitor-server

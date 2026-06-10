@@ -65,8 +65,12 @@ async fn main() -> Result<()> {
         cli::Commands::List => {
             list_servers(&config_manager).await?;
         }
-        cli::Commands::Monitor { server, interval } => {
-            monitor_server(&config_manager, server, interval).await?;
+        cli::Commands::Monitor {
+            server,
+            interval,
+            format,
+        } => {
+            monitor_server(&config_manager, server, interval, format).await?;
         }
         cli::Commands::Serve { address, port } => {
             start_server_mode(&config_manager, address, port).await?;
@@ -153,7 +157,10 @@ async fn init_client(config_manager: &mut ClientConfigManager, force: bool) -> R
         config_manager.config_path().display()
     );
     println!("Open dashboard:");
-    println!("monitor-client --config {} dashboard", config_manager.config_path().display());
+    println!(
+        "monitor-client --config {} dashboard",
+        config_manager.config_path().display()
+    );
     println!();
 
     io::stdout().flush()?;
@@ -164,7 +171,10 @@ async fn prompt_server() -> Result<ServerEndpoint> {
     let name = prompt_string("Server name", "My Server")?;
     let address = prompt_required_string("Server address or IP")?;
     let port = prompt_u16("Server port", 50051)?;
-    let token = blank_to_none(prompt_string("Access token (blank if auth is disabled)", "")?);
+    let token = blank_to_none(prompt_string(
+        "Access token (blank if auth is disabled)",
+        "",
+    )?);
     let description = blank_to_none(prompt_string("Description (blank for none)", "")?);
 
     Ok(ServerEndpoint {
@@ -181,7 +191,11 @@ async fn test_server_connection(
     server: &ServerEndpoint,
     tls_config: Option<&shared::types::ClientTlsConfig>,
 ) -> Result<()> {
-    let scheme = if tls_config.is_some() { "https" } else { "http" };
+    let scheme = if tls_config.is_some() {
+        "https"
+    } else {
+        "http"
+    };
     let endpoint = format!("{}://{}:{}", scheme, server.address, server.port);
 
     println!();
@@ -492,6 +506,7 @@ async fn monitor_server(
     config_manager: &ClientConfigManager,
     server_id: Option<uuid::Uuid>,
     interval: u64,
+    format: cli::MonitorFormat,
 ) -> Result<()> {
     let config = config_manager.load_config()?;
 
@@ -531,7 +546,7 @@ async fn monitor_server(
     }
 
     // Start monitoring loop
-    start_monitoring_loop(clients, interval).await?;
+    start_monitoring_loop(clients, interval, format).await?;
 
     Ok(())
 }
@@ -539,6 +554,7 @@ async fn monitor_server(
 async fn start_monitoring_loop(
     mut clients: HashMap<uuid::Uuid, (ServerEndpoint, MonitorClient)>,
     interval: u64,
+    format: cli::MonitorFormat,
 ) -> Result<()> {
     loop {
         let mut system_summaries = Vec::new();
@@ -579,10 +595,28 @@ async fn start_monitoring_loop(
         }
 
         // Display the collected data
-        display_system_summary(&system_summaries);
+        match format {
+            cli::MonitorFormat::Text => display_system_summary(&system_summaries),
+            cli::MonitorFormat::Json => print_system_summary_json(&system_summaries),
+        }
 
         // Wait for the next update
         sleep(Duration::from_secs(interval)).await;
+    }
+}
+
+/// Headless output: one JSON line per server sample, suitable for piping to other tools
+fn print_system_summary_json(summaries: &Vec<(ServerEndpoint, SystemInfo)>) {
+    for (server, system_info) in summaries {
+        let sample = serde_json::json!({
+            "server_id": server.id,
+            "server_name": server.name,
+            "address": server.address,
+            "port": server.port,
+            "sampled_at": chrono::Utc::now().to_rfc3339(),
+            "system": system_info,
+        });
+        println!("{}", sample);
     }
 }
 
@@ -1216,8 +1250,12 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mut manager = ClientConfigManager::new(&temp.path().join("cfg.toml")).unwrap();
 
-        manager.add_server(create_test_endpoint("a", "10.0.0.1", 50051)).unwrap();
-        manager.add_server(create_test_endpoint("b", "10.0.0.2", 50052)).unwrap();
+        manager
+            .add_server(create_test_endpoint("a", "10.0.0.1", 50051))
+            .unwrap();
+        manager
+            .add_server(create_test_endpoint("b", "10.0.0.2", 50052))
+            .unwrap();
 
         let result = list_servers(&manager).await;
         assert!(result.is_ok());

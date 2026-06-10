@@ -38,10 +38,10 @@ jobs:
             use_cross: false
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
 
@@ -61,7 +61,7 @@ jobs:
 
       - name: Install cross
         if: matrix.use_cross == true
-        uses: taiki-e/install-action@cross
+        uses: taiki-e/install-action@903f26e8b95aae0a27e09ef88bbd23ace6415d8e # cross
 
       - name: Build release binaries with cross
         if: matrix.use_cross == true
@@ -95,7 +95,7 @@ jobs:
           Compress-Archive -Path * -DestinationPath "monitor-${{ matrix.archive_name }}.zip"
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.archive_name }}
           path: |
@@ -109,15 +109,15 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: artifacts
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
         with:
           files: |
             artifacts/**/*

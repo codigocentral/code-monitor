@@ -71,6 +71,9 @@ cargo build --release
 # On each server you want to monitor
 sudo monitor-server --config /etc/code-monitor/config.toml init
 ./monitor-server --address 0.0.0.0 --port 50051
+
+# IPv6: listen on all IPv6 interfaces (clients connect via [::1] or the host's IPv6 address)
+./monitor-server --address :: --port 50051
 ```
 
 The server will display:

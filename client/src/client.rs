@@ -96,10 +96,7 @@ impl MonitorClient {
     }
 
     /// Create a request with optional authentication token
-    fn create_request_with_token<T>(
-        payload: T,
-        access_token: Option<&str>,
-    ) -> tonic::Request<T> {
+    fn create_request_with_token<T>(payload: T, access_token: Option<&str>) -> tonic::Request<T> {
         let mut request = tonic::Request::new(payload);
 
         if let Some(token) = access_token {
@@ -115,8 +112,15 @@ impl MonitorClient {
         self.auto_reconnect
     }
 
+    /// Build a gRPC client with gzip compression enabled in both directions
+    fn grpc_client(&self) -> MonitorServiceClient<Channel> {
+        MonitorServiceClient::new(self.channel.clone())
+            .send_compressed(tonic::codec::CompressionEncoding::Gzip)
+            .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+    }
+
     pub async fn get_system_info(&mut self) -> Result<SystemInfo> {
-        let mut client = MonitorServiceClient::new(self.channel.clone());
+        let mut client = self.grpc_client();
 
         let request = self.create_request(());
         let response = client
@@ -165,7 +169,7 @@ impl MonitorClient {
         limit: u32,
         filter: Option<String>,
     ) -> Result<Vec<ProcessInfo>> {
-        let mut client = MonitorServiceClient::new(self.channel.clone());
+        let mut client = self.grpc_client();
 
         let request = self.create_request(ProcessesRequest {
             limit,
@@ -201,7 +205,7 @@ impl MonitorClient {
     }
 
     pub async fn get_services(&mut self) -> Result<Vec<ServiceInfo>> {
-        let mut client = MonitorServiceClient::new(self.channel.clone());
+        let mut client = self.grpc_client();
 
         let request = self.create_request(());
         let response = client
@@ -242,7 +246,7 @@ impl MonitorClient {
     }
 
     pub async fn get_network_info(&mut self) -> Result<Vec<NetworkInfo>> {
-        let mut client = MonitorServiceClient::new(self.channel.clone());
+        let mut client = self.grpc_client();
 
         let request = self.create_request(());
         let response = client
@@ -271,7 +275,7 @@ impl MonitorClient {
     }
 
     pub async fn get_containers(&mut self, filter: Option<String>) -> Result<Vec<ContainerInfo>> {
-        let mut client = MonitorServiceClient::new(self.channel.clone());
+        let mut client = self.grpc_client();
 
         let request = self.create_request(shared::proto::monitoring::ContainersRequest {
             filter: filter.unwrap_or_default(),
@@ -308,7 +312,7 @@ impl MonitorClient {
     }
 
     pub async fn get_postgres_info(&mut self) -> Result<Vec<PostgresClusterInfo>> {
-        let mut client = MonitorServiceClient::new(self.channel.clone());
+        let mut client = self.grpc_client();
 
         let request = self.create_request(());
         let response = client
@@ -366,7 +370,7 @@ impl MonitorClient {
     }
 
     pub async fn get_mariadb_info(&mut self) -> Result<Vec<MariaDBClusterInfo>> {
-        let mut client = MonitorServiceClient::new(self.channel.clone());
+        let mut client = self.grpc_client();
 
         let request = self.create_request(());
         let response = client
@@ -428,7 +432,7 @@ impl MonitorClient {
     }
 
     pub async fn get_systemd_info(&mut self) -> Result<Vec<SystemdUnitInfo>> {
-        let mut client = MonitorServiceClient::new(self.channel.clone());
+        let mut client = self.grpc_client();
 
         let request = self.create_request(());
         let response = client
@@ -456,7 +460,7 @@ impl MonitorClient {
 
     #[allow(dead_code)]
     pub async fn stream_system_updates(&mut self) -> Result<Streaming<SystemUpdate>> {
-        let mut client = MonitorServiceClient::new(self.channel.clone());
+        let mut client = self.grpc_client();
 
         let request = self.create_request(UpdatesRequest {
             update_interval_seconds: self.update_interval,

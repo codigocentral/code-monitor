@@ -781,11 +781,7 @@ mod tests {
             description: None,
             access_token: None,
         };
-        let mut app = DashboardApp::new(
-            vec![server.clone()],
-            NotificationConfig::default(),
-            None,
-        );
+        let mut app = DashboardApp::new(vec![server.clone()], NotificationConfig::default(), None);
         app.servers = vec![server];
         app
     }
@@ -851,11 +847,7 @@ mod tests {
 
     #[test]
     fn test_draw_overview_no_servers() {
-        let mut app = DashboardApp::new(
-            vec![],
-            NotificationConfig::default(),
-            None,
-        );
+        let mut app = DashboardApp::new(vec![], NotificationConfig::default(), None);
         app.servers = vec![];
         let buffer = render_app_to_buffer(&app, draw_overview_tab);
         assert!(buffer_contains(&buffer, "No servers configured"));
@@ -928,11 +920,7 @@ mod tests {
 
     #[test]
     fn test_draw_services_no_server() {
-        let mut app = DashboardApp::new(
-            vec![],
-            NotificationConfig::default(),
-            None,
-        );
+        let mut app = DashboardApp::new(vec![], NotificationConfig::default(), None);
         app.servers = vec![];
         let buffer = render_app_to_buffer(&app, draw_services_tab);
         assert!(buffer_contains(&buffer, "No server selected"));
@@ -1006,11 +994,7 @@ mod tests {
 
     #[test]
     fn test_draw_network_no_server() {
-        let mut app = DashboardApp::new(
-            vec![],
-            NotificationConfig::default(),
-            None,
-        );
+        let mut app = DashboardApp::new(vec![], NotificationConfig::default(), None);
         app.servers = vec![];
         let buffer = render_app_to_buffer(&app, draw_network_tab);
         assert!(buffer_contains(&buffer, "No server selected"));
@@ -1068,11 +1052,7 @@ mod tests {
 
     #[test]
     fn test_draw_containers_no_server() {
-        let mut app = DashboardApp::new(
-            vec![],
-            NotificationConfig::default(),
-            None,
-        );
+        let mut app = DashboardApp::new(vec![], NotificationConfig::default(), None);
         app.servers = vec![];
         let buffer = render_app_to_buffer(&app, draw_containers_tab);
         assert!(buffer_contains(&buffer, "No server selected"));
@@ -1192,11 +1172,7 @@ mod tests {
 
     #[test]
     fn test_draw_systemd_no_server() {
-        let mut app = DashboardApp::new(
-            vec![],
-            NotificationConfig::default(),
-            None,
-        );
+        let mut app = DashboardApp::new(vec![], NotificationConfig::default(), None);
         app.servers = vec![];
         let buffer = render_app_to_buffer(&app, draw_systemd_tab);
         assert!(buffer_contains(&buffer, "No server selected"));

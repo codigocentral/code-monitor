@@ -7,7 +7,7 @@ edition = "2021"
 # Client-specific dependencies
 shared = { path = "../shared" }
 tokio = { version = "1.0", features = ["full"] }
-tonic = { version = "0.10", features = ["tls"] }
+tonic = { version = "0.10", features = ["tls", "gzip"] }
 prost = "0.12"
 prost-types = "0.12"
 anyhow = "1.0"

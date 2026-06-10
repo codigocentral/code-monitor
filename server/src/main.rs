@@ -8,6 +8,7 @@ use clap::{Parser, Subcommand};
 use shared::proto::monitoring::monitor_service_server::MonitorServiceServer;
 use shared::types::ServerConfig;
 use std::net::SocketAddr;
+use tonic::codec::CompressionEncoding;
 use tonic::transport::Server;
 use tracing::{info, warn};
 
@@ -49,6 +50,10 @@ struct Args {
     /// Log level (trace, debug, info, warn, error)
     #[arg(short, long, default_value = "info")]
     log_level: String,
+
+    /// Emit logs as structured JSON (also enabled via CODE_MONITOR_LOG_JSON=1)
+    #[arg(long)]
+    log_json: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -106,7 +111,18 @@ async fn main() -> Result<()> {
         _ => tracing::Level::INFO,
     };
 
-    tracing_subscriber::fmt().with_max_level(log_level).init();
+    let json_logging = args.log_json
+        || std::env::var("CODE_MONITOR_LOG_JSON")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+    if json_logging {
+        tracing_subscriber::fmt()
+            .json()
+            .with_max_level(log_level)
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_max_level(log_level).init();
+    }
 
     info!("Starting system monitoring server...");
 
@@ -201,7 +217,7 @@ async fn main() -> Result<()> {
     }
 
     // Start the gRPC server (with optional TLS)
-    let mut server_builder = if tls::is_tls_available(&config.tls) {
+    let server_builder = if tls::is_tls_available(&config.tls) {
         info!("TLS enabled for gRPC server");
         let tls_config = tls::load_tls_config(config.tls.as_ref().unwrap())?;
         Server::builder().tls_config(tls_config)?
@@ -210,11 +226,50 @@ async fn main() -> Result<()> {
     };
 
     server_builder
-        .add_service(MonitorServiceServer::new(service))
-        .serve(addr)
+        .timeout(std::time::Duration::from_secs(30))
+        .http2_keepalive_interval(Some(std::time::Duration::from_secs(30)))
+        .http2_keepalive_timeout(Some(std::time::Duration::from_secs(10)))
+        .add_service(
+            MonitorServiceServer::new(service)
+                .send_compressed(CompressionEncoding::Gzip)
+                .accept_compressed(CompressionEncoding::Gzip),
+        )
+        .serve_with_shutdown(addr, shutdown_signal())
         .await?;
 
+    info!("Server stopped");
     Ok(())
+}
+
+/// Wait for SIGINT (Ctrl+C) or SIGTERM (Unix) to trigger a graceful shutdown
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            warn!("Failed to install Ctrl+C handler: {}", e);
+            std::future::pending::<()>().await;
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(e) => {
+                warn!("Failed to install SIGTERM handler: {}", e);
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => info!("Received Ctrl+C, shutting down gracefully..."),
+        _ = terminate => info!("Received SIGTERM, shutting down gracefully..."),
+    }
 }
 
 fn handle_command(cmd: &Commands, config_path: &str) -> Result<()> {
@@ -318,15 +373,11 @@ fn init_config(config_path: &str, force: bool) -> Result<()> {
     println!("Code Monitor server setup");
     println!();
 
-    config.update_interval_seconds = prompt_u64(
-        "Update interval seconds",
-        config.update_interval_seconds,
-    )?;
+    config.update_interval_seconds =
+        prompt_u64("Update interval seconds", config.update_interval_seconds)?;
     config.max_clients = prompt_usize("Max clients", config.max_clients)?;
-    config.enable_authentication = prompt_bool(
-        "Enable token authentication",
-        config.enable_authentication,
-    )?;
+    config.enable_authentication =
+        prompt_bool("Enable token authentication", config.enable_authentication)?;
 
     if config.enable_authentication
         && (config.access_token.is_empty() || prompt_bool("Generate a new access token", false)?)
@@ -367,7 +418,10 @@ fn init_config(config_path: &str, force: bool) -> Result<()> {
     } else {
         config.systemd_units.join(",")
     };
-    let units = prompt_string("systemd units to watch, comma-separated (blank for none)", &units_default)?;
+    let units = prompt_string(
+        "systemd units to watch, comma-separated (blank for none)",
+        &units_default,
+    )?;
     config.systemd_units = units
         .split(',')
         .map(str::trim)
@@ -561,7 +615,12 @@ mod tests {
         });
         config.save(&path).unwrap();
 
-        let result = handle_command(&Commands::RemoveClient { name: "test-client".to_string() }, &path);
+        let result = handle_command(
+            &Commands::RemoveClient {
+                name: "test-client".to_string(),
+            },
+            &path,
+        );
         assert!(result.is_ok());
 
         let config = Config::load(&path).unwrap();
@@ -571,7 +630,12 @@ mod tests {
     #[test]
     fn test_handle_command_remove_client_not_found() {
         let (_temp, path) = create_test_config_file();
-        let result = handle_command(&Commands::RemoveClient { name: "nonexistent".to_string() }, &path);
+        let result = handle_command(
+            &Commands::RemoveClient {
+                name: "nonexistent".to_string(),
+            },
+            &path,
+        );
         assert!(result.is_ok());
     }
 }

@@ -1,8 +1,17 @@
 //! CLI command definitions and argument parsing
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 use uuid::Uuid;
+
+/// Output format for the monitor command
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum MonitorFormat {
+    /// Human-readable dashboard that refreshes the screen
+    Text,
+    /// One JSON document per sample on stdout (headless/scripting mode)
+    Json,
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "monitor-client")]
@@ -83,6 +92,10 @@ pub enum Commands {
         /// Update interval in seconds
         #[arg(short, long, default_value = "5")]
         interval: u64,
+
+        /// Output format: text dashboard or JSON lines for headless use
+        #[arg(short, long, value_enum, default_value_t = MonitorFormat::Text)]
+        format: MonitorFormat,
     },
 
     /// Start client in server mode (for remote access)
@@ -277,9 +290,26 @@ mod tests {
         let args = CliArgs::parse_from(vec!["monitor-client", "monitor"]);
 
         match args.command {
-            Some(Commands::Monitor { server, interval }) => {
+            Some(Commands::Monitor {
+                server,
+                interval,
+                format,
+            }) => {
                 assert!(server.is_none());
                 assert_eq!(interval, 5);
+                assert_eq!(format, MonitorFormat::Text);
+            }
+            _ => panic!("Expected Monitor command"),
+        }
+    }
+
+    #[test]
+    fn verify_monitor_command_json_format() {
+        let args = CliArgs::parse_from(vec!["monitor-client", "monitor", "--format", "json"]);
+
+        match args.command {
+            Some(Commands::Monitor { format, .. }) => {
+                assert_eq!(format, MonitorFormat::Json);
             }
             _ => panic!("Expected Monitor command"),
         }

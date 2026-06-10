@@ -83,7 +83,11 @@ async fn readiness_check(
     // Check readiness state
     checks.push(HealthCheck {
         name: "readiness".to_string(),
-        status: if state.ready { "ok".to_string() } else { "fail".to_string() },
+        status: if state.ready {
+            "ok".to_string()
+        } else {
+            "fail".to_string()
+        },
         message: None,
     });
 
@@ -167,7 +171,12 @@ mod tests {
     async fn test_health_check_endpoint() {
         let app = test_router();
         let response = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
@@ -185,7 +194,12 @@ mod tests {
     async fn test_readiness_check_endpoint() {
         let app = test_router();
         let response = app
-            .oneshot(Request::builder().uri("/ready").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
@@ -205,7 +219,12 @@ mod tests {
     async fn test_metrics_endpoint() {
         let app = test_router();
         let response = app
-            .oneshot(Request::builder().uri("/metrics").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
@@ -223,7 +242,12 @@ mod tests {
     async fn test_unknown_endpoint_returns_404() {
         let app = test_router();
         let response = app
-            .oneshot(Request::builder().uri("/unknown").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/unknown")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
@@ -247,7 +271,12 @@ mod tests {
         // First request
         let response1 = app
             .clone()
-            .oneshot(Request::builder().uri("/metrics").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let body1 = axum::body::to_bytes(response1.into_body(), usize::MAX)
@@ -260,14 +289,24 @@ mod tests {
             .lines()
             .find(|l| l.starts_with("code_monitor_uptime_seconds"))
             .unwrap();
-        let uptime1: u64 = uptime_line1.split_whitespace().last().unwrap().parse().unwrap();
+        let uptime1: u64 = uptime_line1
+            .split_whitespace()
+            .last()
+            .unwrap()
+            .parse()
+            .unwrap();
 
         // Wait a tiny bit
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // Second request
         let response2 = app
-            .oneshot(Request::builder().uri("/metrics").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let body2 = axum::body::to_bytes(response2.into_body(), usize::MAX)
@@ -279,7 +318,12 @@ mod tests {
             .lines()
             .find(|l| l.starts_with("code_monitor_uptime_seconds"))
             .unwrap();
-        let uptime2: u64 = uptime_line2.split_whitespace().last().unwrap().parse().unwrap();
+        let uptime2: u64 = uptime_line2
+            .split_whitespace()
+            .last()
+            .unwrap()
+            .parse()
+            .unwrap();
 
         assert!(
             uptime2 >= uptime1,
@@ -293,7 +337,12 @@ mod tests {
     async fn test_health_version_matches_package() {
         let app = test_router();
         let response = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
@@ -308,7 +357,12 @@ mod tests {
     async fn test_readiness_check_contains_expected_checks() {
         let app = test_router();
         let response = app
-            .oneshot(Request::builder().uri("/ready").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
@@ -320,15 +374,27 @@ mod tests {
         assert!(readiness.ready);
         assert_eq!(readiness.checks.len(), 3);
 
-        let uptime_check = readiness.checks.iter().find(|c| c.name == "uptime").unwrap();
+        let uptime_check = readiness
+            .checks
+            .iter()
+            .find(|c| c.name == "uptime")
+            .unwrap();
         assert_eq!(uptime_check.status, "ok");
         assert!(uptime_check.message.as_ref().unwrap().ends_with('s'));
 
-        let grpc_check = readiness.checks.iter().find(|c| c.name == "grpc_service").unwrap();
+        let grpc_check = readiness
+            .checks
+            .iter()
+            .find(|c| c.name == "grpc_service")
+            .unwrap();
         assert_eq!(grpc_check.status, "ok");
         assert_eq!(grpc_check.message.as_ref().unwrap(), "running");
 
-        let readiness_check = readiness.checks.iter().find(|c| c.name == "readiness").unwrap();
+        let readiness_check = readiness
+            .checks
+            .iter()
+            .find(|c| c.name == "readiness")
+            .unwrap();
         assert_eq!(readiness_check.status, "ok");
     }
 
@@ -336,7 +402,12 @@ mod tests {
     async fn test_metrics_format_valid_prometheus() {
         let app = test_router();
         let response = app
-            .oneshot(Request::builder().uri("/metrics").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
@@ -371,7 +442,12 @@ mod tests {
         });
         let app = create_router(state);
         let response = app
-            .oneshot(Request::builder().uri("/ready").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
@@ -382,7 +458,11 @@ mod tests {
             .unwrap();
         let readiness: ReadinessStatus = serde_json::from_slice(&body).unwrap();
         assert!(!readiness.ready);
-        let readiness_check = readiness.checks.iter().find(|c| c.name == "readiness").unwrap();
+        let readiness_check = readiness
+            .checks
+            .iter()
+            .find(|c| c.name == "readiness")
+            .unwrap();
         assert_eq!(readiness_check.status, "fail");
     }
 
@@ -396,9 +476,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
-        let handle = tokio::spawn(async move {
-            start_health_server(port).await.unwrap()
-        });
+        let handle = tokio::spawn(async move { start_health_server(port).await.unwrap() });
 
         // Give the server a moment to start
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -416,7 +494,11 @@ mod tests {
         let mut buf = vec![0u8; 1024];
         let n = stream.read(&mut buf).await.unwrap();
         let response = String::from_utf8_lossy(&buf[..n]);
-        assert!(response.contains("200 OK"), "Response should be 200 OK: {}", response);
+        assert!(
+            response.contains("200 OK"),
+            "Response should be 200 OK: {}",
+            response
+        );
 
         handle.abort();
     }

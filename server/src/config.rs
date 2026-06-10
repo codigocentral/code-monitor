@@ -2,7 +2,8 @@
 
 use anyhow::Result;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as BASE64, Engine as _};
-use rand::Rng;
+use rand::rngs::OsRng;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
@@ -169,6 +170,10 @@ impl Config {
             config.save(path)?;
         }
 
+        config
+            .validate()
+            .map_err(|e| anyhow::anyhow!("Invalid configuration in {}: {}", path.display(), e))?;
+
         Ok(config)
     }
 
@@ -178,11 +183,50 @@ impl Config {
         Ok(())
     }
 
-    /// Generate a user-friendly access token
+    /// Generate a user-friendly access token using the OS cryptographic RNG
     pub fn generate_access_token(&mut self) {
-        let mut rng = rand::thread_rng();
-        let bytes: [u8; 16] = rng.gen();
+        let mut bytes = [0u8; 32];
+        OsRng.fill_bytes(&mut bytes);
         self.access_token = BASE64.encode(bytes);
+    }
+
+    /// Validate configuration values, returning a descriptive error on the first violation
+    pub fn validate(&self) -> Result<()> {
+        if self.update_interval_seconds < 1 {
+            anyhow::bail!("update_interval_seconds must be at least 1");
+        }
+        if self.max_clients < 1 || self.max_clients > 10_000 {
+            anyhow::bail!(
+                "max_clients must be between 1 and 10000 (got {})",
+                self.max_clients
+            );
+        }
+        const VALID_LEVELS: [&str; 5] = ["trace", "debug", "info", "warn", "error"];
+        if !VALID_LEVELS.contains(&self.log_level.as_str()) {
+            anyhow::bail!(
+                "log_level must be one of trace, debug, info, warn, error (got '{}')",
+                self.log_level
+            );
+        }
+        for cluster in &self.postgres_clusters {
+            if cluster.port == 0 {
+                anyhow::bail!("postgres cluster '{}' has invalid port 0", cluster.name);
+            }
+        }
+        for cluster in &self.mariadb_clusters {
+            if cluster.port == 0 {
+                anyhow::bail!("mariadb cluster '{}' has invalid port 0", cluster.name);
+            }
+        }
+        if let Some(tls) = &self.tls {
+            if tls.cert_path.trim().is_empty() {
+                anyhow::bail!("tls.cert_path must not be empty when TLS is configured");
+            }
+            if tls.key_path.trim().is_empty() {
+                anyhow::bail!("tls.key_path must not be empty when TLS is configured");
+            }
+        }
+        Ok(())
     }
 
     /// Validate an access token
@@ -361,9 +405,12 @@ mod tests {
 
     #[test]
     fn test_postgres_cluster_config_defaults() {
-        let config: PostgresClusterConfig = toml::from_str(r#"
+        let config: PostgresClusterConfig = toml::from_str(
+            r#"
             name = "test"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert_eq!(config.name, "test");
         assert_eq!(config.host, "localhost");
         assert_eq!(config.port, 5432);
@@ -374,9 +421,12 @@ mod tests {
 
     #[test]
     fn test_mariadb_cluster_config_defaults() {
-        let config: MariaDBClusterConfig = toml::from_str(r#"
+        let config: MariaDBClusterConfig = toml::from_str(
+            r#"
             name = "test"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert_eq!(config.name, "test");
         assert_eq!(config.host, "localhost");
         assert_eq!(config.port, 3306);
@@ -404,7 +454,10 @@ mod tests {
         assert_eq!(config.update_interval_seconds, 5);
         assert_eq!(config.max_clients, 100);
         assert!(config.enable_authentication);
-        assert!(!config.access_token.is_empty(), "Token should be auto-generated");
+        assert!(
+            !config.access_token.is_empty(),
+            "Token should be auto-generated"
+        );
 
         // File should have been created
         assert!(path.exists());
@@ -422,7 +475,10 @@ mod tests {
         config.save(path).unwrap();
 
         let loaded = Config::load(path).unwrap();
-        assert!(!loaded.access_token.is_empty(), "Empty token should be regenerated on load");
+        assert!(
+            !loaded.access_token.is_empty(),
+            "Empty token should be regenerated on load"
+        );
     }
 
     #[test]
@@ -460,7 +516,10 @@ mod tests {
                 socket_path: None,
                 enabled: true,
             }],
-            systemd_units: vec!["nginx.service".to_string(), "postgresql.service".to_string()],
+            systemd_units: vec![
+                "nginx.service".to_string(),
+                "postgresql.service".to_string(),
+            ],
             tls: Some(TlsConfig {
                 cert_path: "/etc/ssl/server.crt".to_string(),
                 key_path: "/etc/ssl/server.key".to_string(),
@@ -552,14 +611,17 @@ mod tests {
 
     #[test]
     fn test_postgres_cluster_config_with_overrides() {
-        let config: PostgresClusterConfig = toml::from_str(r#"
+        let config: PostgresClusterConfig = toml::from_str(
+            r#"
             name = "custom"
             host = "192.168.1.50"
             port = 5433
             database = "metrics"
             user = "admin"
             enabled = false
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert_eq!(config.name, "custom");
         assert_eq!(config.host, "192.168.1.50");
         assert_eq!(config.port, 5433);
@@ -570,18 +632,113 @@ mod tests {
 
     #[test]
     fn test_mariadb_cluster_config_with_overrides() {
-        let config: MariaDBClusterConfig = toml::from_str(r#"
+        let config: MariaDBClusterConfig = toml::from_str(
+            r#"
             name = "custom"
             host = "192.168.1.60"
             port = 3307
             user = "admin"
             enabled = false
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert_eq!(config.name, "custom");
         assert_eq!(config.host, "192.168.1.60");
         assert_eq!(config.port, 3307);
         assert_eq!(config.user, "admin");
         assert!(!config.enabled);
+    }
+
+    #[test]
+    fn test_validate_default_config() {
+        assert!(Config::default().validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_interval() {
+        let config = Config {
+            update_interval_seconds: 0,
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_invalid_max_clients() {
+        let config = Config {
+            max_clients: 0,
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+
+        let config = Config {
+            max_clients: 20_000,
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_invalid_log_level() {
+        let config = Config {
+            log_level: "verbose".to_string(),
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_port_cluster() {
+        let mut config = Config::default();
+        config.postgres_clusters.push(PostgresClusterConfig {
+            name: "bad".to_string(),
+            host: "localhost".to_string(),
+            port: 0,
+            database: "postgres".to_string(),
+            user: "code-monitor".to_string(),
+            password: None,
+            socket_path: None,
+            enabled: true,
+        });
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_tls_paths() {
+        let config = Config {
+            tls: Some(TlsConfig {
+                cert_path: "".to_string(),
+                key_path: "/etc/ssl/key.pem".to_string(),
+                ca_path: None,
+            }),
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_load_rejects_invalid_values() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let path = temp_file.path();
+
+        let config = Config {
+            update_interval_seconds: 0,
+            access_token: "tok".to_string(),
+            ..Default::default()
+        };
+        config.save(path).unwrap();
+        assert!(Config::load(path).is_err());
+    }
+
+    #[test]
+    fn test_generated_token_is_unique() {
+        let mut a = Config::default();
+        let mut b = Config::default();
+        a.generate_access_token();
+        b.generate_access_token();
+        assert_ne!(a.access_token, b.access_token);
+        // 32 random bytes -> 43 chars of URL-safe base64 without padding
+        assert_eq!(a.access_token.len(), 43);
     }
 
     #[test]
