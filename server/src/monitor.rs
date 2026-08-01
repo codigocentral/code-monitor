@@ -14,6 +14,7 @@ use tracing::{error, info};
 
 use crate::collectors::docker::DockerCollector;
 use crate::collectors::mariadb::MariaDBCollector;
+use crate::collectors::memory::{MemoryCollector, SwapActivityTracker};
 use crate::collectors::net_ports::NetPortsCollector;
 use crate::collectors::postgres::PostgresCollector;
 use crate::collectors::systemd::SystemdCollector;
@@ -92,6 +93,11 @@ pub struct SystemMonitor {
     systemd_collector: SystemdCollector,
     tls_collector: TlsCollector,
     net_ports_collector: NetPortsCollector,
+    memory_collector: MemoryCollector,
+    /// Paging counters from the previous poll, so activity can be a rate
+    swap_activity: Arc<RwLock<SwapActivityTracker>>,
+    /// Latest derived paging rate, refreshed by the background loop
+    swap_rate: Arc<RwLock<(f64, f64)>>,
 }
 
 impl SystemMonitor {
@@ -143,6 +149,9 @@ impl SystemMonitor {
             systemd_collector,
             tls_collector: TlsCollector::default(),
             net_ports_collector: NetPortsCollector::default(),
+            memory_collector: MemoryCollector::default(),
+            swap_activity: Arc::new(RwLock::new(SwapActivityTracker::new())),
+            swap_rate: Arc::new(RwLock::new((0.0, 0.0))),
         };
 
         info!(
@@ -166,6 +175,8 @@ impl SystemMonitor {
         let update_interval = self.update_interval;
         let is_running = Arc::clone(&self.is_running);
         let last_update = Arc::clone(&self.last_update);
+        let swap_activity = Arc::clone(&self.swap_activity);
+        let swap_rate = Arc::clone(&self.swap_rate);
 
         tokio::spawn(async move {
             let mut interval_timer = interval(update_interval);
@@ -183,6 +194,11 @@ impl SystemMonitor {
                 if let Err(e) = Self::update_system_info(&system, &last_update) {
                     error!("Failed to update system info: {}", e);
                 }
+
+                // Paging is only meaningful as a rate, so it is sampled on the
+                // same cadence rather than computed on demand from a counter
+                // that has been climbing since boot.
+                Self::update_swap_rate(&swap_activity, &swap_rate);
             }
 
             info!("Background system monitoring stopped");
@@ -210,6 +226,30 @@ impl SystemMonitor {
             .map_err(|e| anyhow::anyhow!("Failed to lock last_update: {}", e))? = Utc::now();
 
         Ok(())
+    }
+
+    /// Refresh the derived paging rate from the current counters.
+    fn update_swap_rate(
+        activity: &Arc<RwLock<SwapActivityTracker>>,
+        rate: &Arc<RwLock<(f64, f64)>>,
+    ) {
+        let counters = match MemoryCollector::new().paging_counters() {
+            Some(counters) => counters,
+            None => return, // Not Linux, or no swap accounting
+        };
+
+        let observed = match activity.write() {
+            Ok(mut tracker) => tracker.observe(counters, Utc::now()),
+            Err(e) => {
+                error!("Failed to lock swap activity: {}", e);
+                return;
+            }
+        };
+
+        match rate.write() {
+            Ok(mut current) => *current = observed,
+            Err(e) => error!("Failed to lock swap rate: {}", e),
+        }
     }
 
     pub fn get_system_info(&self) -> Result<SystemInfo> {
@@ -249,6 +289,12 @@ impl SystemMonitor {
 
         let cpu_usage = sys.global_cpu_info().cpu_usage() as f64;
 
+        let (swap_in, swap_out) = self
+            .swap_rate
+            .read()
+            .map(|rate| *rate)
+            .unwrap_or((0.0, 0.0));
+
         let system_info = SystemInfo {
             hostname: sys.host_name().unwrap_or_else(|| "unknown".to_string()),
             os: format!(
@@ -276,10 +322,10 @@ impl SystemMonitor {
             swap: SwapInfo {
                 total_bytes: sys.total_swap(),
                 used_bytes: sys.used_swap(),
-                in_pages_per_sec: 0.0,
-                out_pages_per_sec: 0.0,
+                in_pages_per_sec: swap_in,
+                out_pages_per_sec: swap_out,
             },
-            memory_pressure: None,
+            memory_pressure: self.memory_collector.pressure(),
         };
 
         Ok(system_info)
@@ -310,8 +356,7 @@ impl SystemMonitor {
                     command_line: process.cmd().join(" "),
                     start_time: Utc::now() - chrono::Duration::seconds(process.run_time() as i64),
                     status: format!("{:?}", process.status()),
-                    // VmSwap is not collected yet; None means unknown, not zero
-                    swap_bytes: None,
+                    swap_bytes: self.memory_collector.process_swap(pid.as_u32()),
                 }
             })
             .collect();
@@ -401,7 +446,13 @@ impl SystemMonitor {
     }
 
     pub async fn get_containers(&self) -> Result<Vec<ContainerInfo>> {
-        self.docker_collector.collect_containers().await
+        // Read the per-container swap totals once for the whole host: walking
+        // /proc per container would be quadratic on a host with 40 of them.
+        let swap_by_container = self.memory_collector.swap_by_container();
+
+        self.docker_collector
+            .collect_containers(&swap_by_container)
+            .await
     }
 
     fn map_process_status(status: sysinfo::ProcessStatus) -> ServiceStatus {
@@ -1110,6 +1161,9 @@ mod tests {
             systemd_collector: SystemdCollector::new(Vec::new()),
             tls_collector: TlsCollector::default(),
             net_ports_collector: NetPortsCollector::default(),
+            memory_collector: MemoryCollector::default(),
+            swap_activity: Arc::new(RwLock::new(SwapActivityTracker::new())),
+            swap_rate: Arc::new(RwLock::new((0.0, 0.0))),
         }
     }
 
@@ -1210,6 +1264,9 @@ mod tests {
             systemd_collector: SystemdCollector::new(Vec::new()),
             tls_collector: TlsCollector::default(),
             net_ports_collector: NetPortsCollector::default(),
+            memory_collector: MemoryCollector::default(),
+            swap_activity: Arc::new(RwLock::new(SwapActivityTracker::new())),
+            swap_rate: Arc::new(RwLock::new((0.0, 0.0))),
         };
 
         let result =
@@ -1244,6 +1301,9 @@ mod tests {
             systemd_collector: SystemdCollector::new(Vec::new()),
             tls_collector: TlsCollector::default(),
             net_ports_collector: NetPortsCollector::default(),
+            memory_collector: MemoryCollector::default(),
+            swap_activity: Arc::new(RwLock::new(SwapActivityTracker::new())),
+            swap_rate: Arc::new(RwLock::new((0.0, 0.0))),
         };
 
         let result =

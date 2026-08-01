@@ -104,6 +104,18 @@ pub(super) async fn fetch_server_data(app: &mut DashboardApp, server_id: uuid::U
                 let _ = app.notification_dispatcher.dispatch(alert).await;
             }
 
+            // Memory pressure is judged by activity, not by how much swap is
+            // occupied — see AlertManager::process_memory_pressure.
+            let pressure_alerts = app.alert_manager.process_memory_pressure(
+                &server_id_str,
+                &server_name,
+                info.swap.activity_pages_per_sec(),
+                info.memory_pressure.as_ref().map(|p| p.full_avg60),
+            );
+            for alert in &pressure_alerts {
+                let _ = app.notification_dispatcher.dispatch(alert).await;
+            }
+
             app.system_info_cache.insert(server_id, info.clone());
         }
         if let Some(services) = services {

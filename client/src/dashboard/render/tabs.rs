@@ -11,6 +11,99 @@ use crate::dashboard::DashboardApp;
 
 use super::{format_bytes, format_uptime, Theme};
 
+/// Format a container's swap, marking the ones a `swapoff` would kill.
+///
+/// This is the pre-flight the fleet needed: SonarQube was capped at 2000M and
+/// holding ~1.1G in swap, so clearing swap brought it straight past its cgroup
+/// limit and the kernel killed it. Every number needed to predict that was
+/// already in /proc; nothing was reading it.
+fn format_container_swap(container: &shared::types::ContainerInfo) -> String {
+    match container.swap_bytes {
+        None => "?".to_string(),
+        Some(0) => "—".to_string(),
+        Some(swap) if container.would_exceed_limit_on_swapoff() => {
+            format!("{} ⚠", format_bytes(swap))
+        }
+        Some(swap) => format_bytes(swap),
+    }
+}
+
+/// Paging rate above which a host is treated as thrashing.
+///
+/// Sustained paging at this level means the working set does not fit; brief
+/// spikes during a backup or a deploy do not.
+const THRASHING_PAGES_PER_SEC: f64 = 200.0;
+
+/// Share of the last minute with every task stalled that counts as pressure.
+///
+/// PSI reports a percentage, so this is 5% of wall-clock time spent with
+/// nothing able to run.
+const PSI_FULL_WARNING_PERCENT: f64 = 5.0;
+
+/// Describe swap in the terms that matter: how much is moving, not how much is
+/// parked.
+///
+/// Occupancy is reported without any alerting colour on purpose. It is a
+/// high-water mark from some past spike, and colouring it is what makes
+/// dashboards flag the healthy host and ignore the thrashing one.
+fn format_swap_line(swap: &shared::types::SwapInfo) -> Vec<(String, Style)> {
+    let mut parts = Vec::new();
+
+    parts.push((
+        format!(
+            "Swap: {} / {} ({:.0}%)",
+            format_bytes(swap.used_bytes),
+            format_bytes(swap.total_bytes),
+            swap.used_percent()
+        ),
+        Style::default().fg(Theme::MUTED),
+    ));
+
+    let activity = swap.activity_pages_per_sec();
+    let activity_style = if activity > THRASHING_PAGES_PER_SEC {
+        Style::default()
+            .fg(Theme::ERROR)
+            .add_modifier(Modifier::BOLD)
+    } else if activity > 0.0 {
+        Style::default().fg(Theme::WARNING)
+    } else {
+        Style::default().fg(Theme::SUCCESS)
+    };
+
+    parts.push((
+        format!(
+            "paging: {:.0}/s in, {:.0}/s out",
+            swap.in_pages_per_sec, swap.out_pages_per_sec
+        ),
+        activity_style,
+    ));
+
+    parts
+}
+
+/// Describe memory pressure, when the kernel reports it.
+fn format_pressure_line(pressure: &shared::types::MemoryPressure) -> (String, Style) {
+    let style = if pressure.full_avg60 > PSI_FULL_WARNING_PERCENT {
+        Style::default()
+            .fg(Theme::ERROR)
+            .add_modifier(Modifier::BOLD)
+    } else if pressure.full_avg60 > 0.0 {
+        Style::default().fg(Theme::WARNING)
+    } else {
+        Style::default().fg(Theme::MUTED)
+    };
+
+    (
+        format!(
+            "PSI some {:.2}% / full {:.2}% (stalled {} total)",
+            pressure.some_avg60,
+            pressure.full_avg60,
+            format_uptime(pressure.full_total_seconds as u64)
+        ),
+        style,
+    )
+}
+
 /// Restarts beyond which a container is shown as crash-looping rather than
 /// merely restarted.
 ///
@@ -77,6 +170,10 @@ fn summarize_container_risks(containers: &[shared::types::ContainerInfo]) -> Opt
         .iter()
         .filter(|c| c.restart_count >= CRASH_LOOP_RESTARTS)
         .count();
+    let swapoff_risk = containers
+        .iter()
+        .filter(|c| c.would_exceed_limit_on_swapoff())
+        .count();
 
     let mut parts = Vec::new();
     if unlimited > 0 {
@@ -91,6 +188,9 @@ fn summarize_container_risks(containers: &[shared::types::ContainerInfo]) -> Opt
     }
     if crash_looping > 0 {
         parts.push(format!("{} crash-looping", crash_looping));
+    }
+    if swapoff_risk > 0 {
+        parts.push(format!("{} would OOM on swapoff", swapoff_risk));
     }
 
     if parts.is_empty() {
@@ -160,9 +260,10 @@ pub(super) fn draw_overview_tab<B: tui::backend::Backend>(
                 .get(&server.id)
                 .map(|f| f.as_slice())
                 .unwrap_or(&[]);
-            // The failed-unit line only exists when something is failing, so it
-            // costs no vertical space on a healthy host.
-            let header_height = if failed_units.is_empty() { 3 } else { 4 };
+            // Optional lines cost no vertical space when they have nothing to
+            // say, so a healthy host keeps a compact header.
+            let has_swap = info.swap.total_bytes > 0 || info.memory_pressure.is_some();
+            let header_height = 2 + u16::from(!failed_units.is_empty()) + u16::from(has_swap) + 1;
 
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -226,6 +327,25 @@ pub(super) fn draw_overview_tab<B: tui::backend::Backend>(
                         Style::default().fg(Theme::MUTED),
                     ),
                 ]));
+            }
+
+            if has_swap {
+                let mut swap_spans =
+                    vec![Span::styled("󰓡 ", Style::default().fg(Theme::MEM_COLOR))];
+                for (index, (text, style)) in format_swap_line(&info.swap).into_iter().enumerate() {
+                    if index > 0 {
+                        swap_spans.push(Span::styled("  │  ", Style::default().fg(Theme::BORDER)));
+                    }
+                    swap_spans.push(Span::styled(text, style));
+                }
+
+                if let Some(pressure) = &info.memory_pressure {
+                    let (text, style) = format_pressure_line(pressure);
+                    swap_spans.push(Span::styled("  │  ", Style::default().fg(Theme::BORDER)));
+                    swap_spans.push(Span::styled(text, style));
+                }
+
+                header_lines.push(Spans::from(swap_spans));
             }
 
             let sys_info = Paragraph::new(header_lines);
@@ -912,6 +1032,17 @@ pub(super) fn draw_containers_tab<B: tui::backend::Backend>(
                                 Style::default().fg(Theme::MUTED)
                             },
                         )),
+                        Cell::from(Span::styled(
+                            format_container_swap(c),
+                            if c.would_exceed_limit_on_swapoff() {
+                                // Clearing swap would push it past its limit
+                                Style::default()
+                                    .fg(Theme::ERROR)
+                                    .add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(Theme::MUTED)
+                            },
+                        )),
                     ])
                 })
                 .collect();
@@ -919,7 +1050,7 @@ pub(super) fn draw_containers_tab<B: tui::backend::Backend>(
             let table = Table::new(rows)
                 .header(
                     Row::new(vec![
-                        "Name", "Image", "Status", "CPU", "Memory", "MEM %", "Restarts",
+                        "Name", "Image", "Status", "CPU", "Memory", "MEM %", "Restarts", "Swap",
                     ])
                     .style(
                         Style::default()
@@ -931,13 +1062,14 @@ pub(super) fn draw_containers_tab<B: tui::backend::Backend>(
                 // Sums to 94%: the table inserts a space between columns, and
                 // claiming the full width would push the last one off screen
                 .widths(&[
-                    Constraint::Percentage(19),
-                    Constraint::Percentage(18),
-                    Constraint::Percentage(16),
-                    Constraint::Percentage(8),
+                    Constraint::Percentage(17),
                     Constraint::Percentage(15),
+                    Constraint::Percentage(14),
+                    Constraint::Percentage(7),
+                    Constraint::Percentage(14),
                     Constraint::Percentage(9),
-                    Constraint::Percentage(9),
+                    Constraint::Percentage(8),
+                    Constraint::Percentage(10),
                 ])
                 .highlight_style(
                     Style::default()
@@ -1936,6 +2068,160 @@ mod tests {
 
         let buffer = render_app_to_buffer(&app, draw_overview_tab);
         assert!(!buffer_contains(&buffer, "systemd unit"));
+    }
+
+    // ─────────────────────────────────────────
+    // Swap and memory pressure
+    // ─────────────────────────────────────────
+
+    fn swap(used: u64, total: u64, rate_in: f64, rate_out: f64) -> SwapInfo {
+        SwapInfo {
+            total_bytes: total,
+            used_bytes: used,
+            in_pages_per_sec: rate_in,
+            out_pages_per_sec: rate_out,
+        }
+    }
+
+    #[test]
+    fn test_swap_line_shows_occupancy_without_alerting_on_it() {
+        // alemanha8: 65% occupied, paging nothing. The occupancy must be
+        // visible and must not be styled as a problem.
+        let parts = format_swap_line(&swap(5_200_000_000, 8_000_000_000, 0.0, 0.0));
+
+        assert!(parts[0].0.contains("65%"));
+        assert_eq!(
+            parts[0].1,
+            Style::default().fg(Theme::MUTED),
+            "occupancy is a high-water mark, not a warning"
+        );
+    }
+
+    #[test]
+    fn test_swap_line_flags_active_paging() {
+        let idle = format_swap_line(&swap(5_200_000_000, 8_000_000_000, 0.0, 0.0));
+        let thrashing = format_swap_line(&swap(4_400_000_000, 8_000_000_000, 180.0, 220.0));
+
+        assert_ne!(
+            idle[1].1, thrashing[1].1,
+            "a host that is paging must not look like one that is not"
+        );
+        assert!(thrashing[1].0.contains("180"));
+        assert!(thrashing[1].0.contains("220"));
+    }
+
+    #[test]
+    fn test_swap_line_distinguishes_light_paging_from_thrashing() {
+        let light = format_swap_line(&swap(1_000, 8_000_000_000, 5.0, 5.0));
+        let heavy = format_swap_line(&swap(1_000, 8_000_000_000, 300.0, 300.0));
+        assert_ne!(light[1].1, heavy[1].1);
+    }
+
+    #[test]
+    fn test_pressure_line_reports_stall_time() {
+        let (text, _) = format_pressure_line(&MemoryPressure {
+            some_avg60: 12.5,
+            full_avg60: 7.25,
+            full_total_seconds: 61_200.0, // 17 hours, the alemanha6 figure
+        });
+
+        assert!(text.contains("12.50%"));
+        assert!(text.contains("7.25%"));
+        assert!(
+            text.contains("17h"),
+            "stall total should read as time: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_pressure_line_styles_escalate() {
+        let quiet = format_pressure_line(&MemoryPressure {
+            some_avg60: 0.0,
+            full_avg60: 0.0,
+            full_total_seconds: 76.0,
+        });
+        let stalling = format_pressure_line(&MemoryPressure {
+            some_avg60: 40.0,
+            full_avg60: 20.0,
+            full_total_seconds: 61_200.0,
+        });
+        assert_ne!(quiet.1, stalling.1);
+    }
+
+    #[test]
+    fn test_overview_shows_swap_and_pressure() {
+        let mut app = create_test_app();
+        let server_id = app.servers[0].id;
+        let mut info = create_test_system_info();
+        info.swap = swap(4_400_000_000, 8_000_000_000, 180.0, 220.0);
+        info.memory_pressure = Some(MemoryPressure {
+            some_avg60: 12.5,
+            full_avg60: 7.25,
+            full_total_seconds: 61_200.0,
+        });
+        app.system_info_cache.insert(server_id, info);
+
+        let buffer = render_app_to_buffer(&app, draw_overview_tab);
+        assert!(buffer_contains(&buffer, "paging:"));
+        assert!(buffer_contains(&buffer, "PSI"));
+    }
+
+    #[test]
+    fn test_overview_omits_swap_line_without_swap() {
+        let mut app = create_test_app();
+        let server_id = app.servers[0].id;
+        let mut info = create_test_system_info();
+        info.swap = SwapInfo::default();
+        info.memory_pressure = None;
+        app.system_info_cache.insert(server_id, info);
+
+        let buffer = render_app_to_buffer(&app, draw_overview_tab);
+        assert!(!buffer_contains(&buffer, "paging:"));
+    }
+
+    // ─────────────────────────────────────────
+    // Container swapoff pre-flight
+    // ─────────────────────────────────────────
+
+    #[test]
+    fn test_container_swap_flags_swapoff_risk() {
+        // The SonarQube incident: 2000M limit, 1.4G resident, 1.1G in swap
+        let mut container = container_fixture("sonarqube");
+        container.memory_limit_bytes = 2_000_000_000;
+        container.memory_usage_bytes = 1_400_000_000;
+        container.swap_bytes = Some(1_100_000_000);
+
+        assert!(container.would_exceed_limit_on_swapoff());
+        assert!(format_container_swap(&container).contains('⚠'));
+    }
+
+    #[test]
+    fn test_container_swap_without_risk() {
+        let mut container = container_fixture("app");
+        container.swap_bytes = Some(1_000_000);
+        assert!(!format_container_swap(&container).contains('⚠'));
+    }
+
+    #[test]
+    fn test_container_swap_unknown_is_not_zero() {
+        let mut container = container_fixture("app");
+        container.swap_bytes = None;
+        assert_eq!(format_container_swap(&container), "?");
+
+        container.swap_bytes = Some(0);
+        assert_eq!(format_container_swap(&container), "—");
+    }
+
+    #[test]
+    fn test_risk_summary_counts_swapoff_victims() {
+        let mut container = container_fixture("sonarqube");
+        container.memory_limit_bytes = 2_000_000_000;
+        container.memory_usage_bytes = 1_400_000_000;
+        container.swap_bytes = Some(1_100_000_000);
+
+        let summary = summarize_container_risks(&[container]).unwrap();
+        assert!(summary.contains("1 would OOM on swapoff"));
     }
 
     // ─────────────────────────────────────────

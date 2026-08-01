@@ -186,7 +186,14 @@ impl DockerCollector {
     }
 
     /// Collect container metrics
-    pub async fn collect_containers(&self) -> Result<Vec<ContainerInfo>> {
+    ///
+    /// `swap_by_container` maps container id to the swap its processes hold,
+    /// which the caller reads once for the whole host rather than per
+    /// container.
+    pub async fn collect_containers(
+        &self,
+        swap_by_container: &std::collections::HashMap<String, u64>,
+    ) -> Result<Vec<ContainerInfo>> {
         if self.connection_failed.load(Ordering::SeqCst) {
             return Ok(Vec::new());
         }
@@ -228,6 +235,7 @@ impl DockerCollector {
 
         for container in containers {
             let id = container.id.clone().unwrap_or_default();
+            let id_for_swap = id.clone();
             let name = container
                 .names
                 .as_ref()
@@ -312,7 +320,7 @@ impl DockerCollector {
                 networks,
                 memory_limit_set: details.memory_limit_set,
                 health_detail: details.health_detail,
-                swap_bytes: None, // Requires per-process cgroup lookup
+                swap_bytes: swap_by_container.get(&id_for_swap).copied(),
             });
         }
 
@@ -385,7 +393,9 @@ impl crate::collectors::Collector for DockerCollector {
     }
 
     async fn collect(&self) -> Result<()> {
-        let _ = self.collect_containers().await?;
+        let _ = self
+            .collect_containers(&std::collections::HashMap::new())
+            .await?;
         Ok(())
     }
 }
@@ -407,7 +417,10 @@ mod tests {
         let collector = DockerCollector::new_none();
         assert!(!collector.is_available());
 
-        let containers = collector.collect_containers().await.unwrap();
+        let containers = collector
+            .collect_containers(&std::collections::HashMap::new())
+            .await
+            .unwrap();
         assert!(containers.is_empty());
     }
 
@@ -701,7 +714,10 @@ mod tests {
     #[tokio::test]
     async fn test_docker_collector_collect_containers_none() {
         let collector = DockerCollector::new_none();
-        let containers = collector.collect_containers().await.unwrap();
+        let containers = collector
+            .collect_containers(&std::collections::HashMap::new())
+            .await
+            .unwrap();
         assert!(containers.is_empty());
     }
 

@@ -20,6 +20,8 @@ pub enum AlertType {
     TlsCertificateExpiring,
     TlsRenewalBroken,
     ExposedDatastore,
+    SwapThrashing,
+    MemoryStalled,
 }
 
 impl std::fmt::Display for AlertType {
@@ -36,6 +38,8 @@ impl std::fmt::Display for AlertType {
             AlertType::TlsCertificateExpiring => write!(f, "TLS_CERTIFICATE_EXPIRING"),
             AlertType::TlsRenewalBroken => write!(f, "TLS_RENEWAL_BROKEN"),
             AlertType::ExposedDatastore => write!(f, "EXPOSED_DATASTORE"),
+            AlertType::SwapThrashing => write!(f, "SWAP_THRASHING"),
+            AlertType::MemoryStalled => write!(f, "MEMORY_STALLED"),
         }
     }
 }
@@ -607,6 +611,91 @@ impl AlertManager {
         }
     }
 
+    /// Paging rate that counts as thrashing, sustained.
+    pub const THRASHING_PAGES_PER_SEC: f64 = 200.0;
+
+    /// Share of the last minute with every task stalled that counts as
+    /// pressure. PSI reports a percentage, so this is 5% of wall-clock time.
+    pub const PSI_FULL_WARNING_PERCENT: f64 = 5.0;
+
+    /// Alert on memory pressure, judged by activity rather than occupancy.
+    ///
+    /// Swap occupancy is deliberately not an input. It is a high-water mark
+    /// from some past spike: the fleet's daily report coloured a host at 65%
+    /// occupancy that was paging nothing, and ignored one at 55% that had
+    /// paged 500 times more and spent 17 hours stalled. Rates and stall time
+    /// are what separate them.
+    ///
+    /// Both signals are sampled over a window, since a backup or a deploy can
+    /// page heavily for a few seconds without anything being wrong.
+    pub fn process_memory_pressure(
+        &mut self,
+        server_id: &str,
+        server_name: &str,
+        pages_per_sec: f64,
+        psi_full_avg60: Option<f64>,
+    ) -> Vec<Alert> {
+        let mut new_alerts = Vec::new();
+
+        let thrashing_state = self
+            .states
+            .entry((server_id.to_string(), AlertType::SwapThrashing))
+            .or_default();
+        thrashing_state.add_sample(pages_per_sec, Duration::minutes(20));
+        let sustained = thrashing_state.check_threshold(Self::THRASHING_PAGES_PER_SEC, 3);
+
+        if sustained {
+            if let Some(alert) = self.raise_once(
+                server_id,
+                server_name,
+                AlertType::SwapThrashing,
+                AlertSeverity::Warning,
+                format!(
+                    "sustained paging at {:.0} pages/s — the working set does not fit",
+                    pages_per_sec
+                ),
+                Some(pages_per_sec),
+                Some(Self::THRASHING_PAGES_PER_SEC),
+                Duration::minutes(30),
+            ) {
+                new_alerts.push(alert);
+            }
+        } else if pages_per_sec <= Self::THRASHING_PAGES_PER_SEC {
+            self.clear(server_id, AlertType::SwapThrashing);
+        }
+
+        if let Some(psi) = psi_full_avg60 {
+            let psi_state = self
+                .states
+                .entry((server_id.to_string(), AlertType::MemoryStalled))
+                .or_default();
+            psi_state.add_sample(psi, Duration::minutes(20));
+            let stalled = psi_state.check_threshold(Self::PSI_FULL_WARNING_PERCENT, 3);
+
+            if stalled {
+                if let Some(alert) = self.raise_once(
+                    server_id,
+                    server_name,
+                    AlertType::MemoryStalled,
+                    AlertSeverity::Warning,
+                    format!(
+                        "every task stalled on memory {:.1}% of the last minute",
+                        psi
+                    ),
+                    Some(psi),
+                    Some(Self::PSI_FULL_WARNING_PERCENT),
+                    Duration::minutes(30),
+                ) {
+                    new_alerts.push(alert);
+                }
+            } else if psi <= Self::PSI_FULL_WARNING_PERCENT {
+                self.clear(server_id, AlertType::MemoryStalled);
+            }
+        }
+
+        new_alerts
+    }
+
     /// Alert on data stores reachable from outside the host.
     ///
     /// A database bound to every interface works exactly as well as one bound
@@ -1150,6 +1239,111 @@ mod tests {
     // ─────────────────────────────────────────
     // systemd failed units
     // ─────────────────────────────────────────
+
+    // ─────────────────────────────────────────
+    // Memory pressure
+    // ─────────────────────────────────────────
+
+    #[test]
+    fn test_quiet_host_does_not_alert() {
+        // alemanha8: 65% swap occupancy, zero paging. Occupancy is not an
+        // input here precisely so this host stays quiet.
+        let mut manager = AlertManager::new();
+        for _ in 0..5 {
+            assert!(manager
+                .process_memory_pressure("srv-1", "alemanha8", 0.0, Some(0.0))
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn test_sustained_paging_alerts() {
+        let mut manager = AlertManager::new();
+
+        // A single spike is not enough
+        assert!(manager
+            .process_memory_pressure("srv-1", "alemanha6", 400.0, None)
+            .is_empty());
+        assert!(manager
+            .process_memory_pressure("srv-1", "alemanha6", 400.0, None)
+            .is_empty());
+
+        let alerts = manager.process_memory_pressure("srv-1", "alemanha6", 400.0, None);
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].alert_type, AlertType::SwapThrashing);
+    }
+
+    #[test]
+    fn test_brief_spike_does_not_alert() {
+        // A backup pages heavily for a moment; that is not a failing host
+        let mut manager = AlertManager::new();
+        manager.process_memory_pressure("srv-1", "srv", 1_000.0, None);
+        manager.process_memory_pressure("srv-1", "srv", 0.0, None);
+        assert!(manager
+            .process_memory_pressure("srv-1", "srv", 0.0, None)
+            .is_empty());
+    }
+
+    #[test]
+    fn test_sustained_psi_alerts() {
+        let mut manager = AlertManager::new();
+        for _ in 0..2 {
+            manager.process_memory_pressure("srv-1", "alemanha7", 0.0, Some(30.0));
+        }
+        let alerts = manager.process_memory_pressure("srv-1", "alemanha7", 0.0, Some(30.0));
+
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].alert_type, AlertType::MemoryStalled);
+    }
+
+    #[test]
+    fn test_psi_absent_is_not_an_alert() {
+        // A kernel without CONFIG_PSI reports nothing; silence, not a warning
+        let mut manager = AlertManager::new();
+        for _ in 0..5 {
+            assert!(manager
+                .process_memory_pressure("srv-1", "srv", 0.0, None)
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn test_paging_and_psi_alert_independently() {
+        let mut manager = AlertManager::new();
+        for _ in 0..2 {
+            manager.process_memory_pressure("srv-1", "alemanha6", 500.0, Some(40.0));
+        }
+        let alerts = manager.process_memory_pressure("srv-1", "alemanha6", 500.0, Some(40.0));
+
+        assert_eq!(alerts.len(), 2);
+        let types: Vec<AlertType> = alerts.iter().map(|a| a.alert_type).collect();
+        assert!(types.contains(&AlertType::SwapThrashing));
+        assert!(types.contains(&AlertType::MemoryStalled));
+    }
+
+    #[test]
+    fn test_pressure_alert_resolves_when_paging_stops() {
+        let mut manager = AlertManager::new();
+        for _ in 0..3 {
+            manager.process_memory_pressure("srv-1", "srv", 500.0, None);
+        }
+        assert!(!manager.get_active_alerts().is_empty());
+
+        manager.process_memory_pressure("srv-1", "srv", 0.0, None);
+        assert!(manager.get_active_alerts()[0].is_resolved());
+    }
+
+    #[test]
+    fn test_pressure_tracked_per_server() {
+        let mut manager = AlertManager::new();
+        for _ in 0..3 {
+            manager.process_memory_pressure("srv-1", "one", 500.0, None);
+        }
+        for _ in 0..3 {
+            manager.process_memory_pressure("srv-2", "two", 500.0, None);
+        }
+        assert_eq!(manager.get_active_alerts().len(), 2);
+    }
 
     // ─────────────────────────────────────────
     // Exposed data stores

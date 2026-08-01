@@ -5,6 +5,7 @@
 
 pub mod docker;
 pub mod mariadb;
+pub mod memory;
 pub mod net_ports;
 pub mod postgres;
 pub mod systemd;
