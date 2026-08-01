@@ -28,6 +28,48 @@ fn format_container_swap(container: &shared::types::ContainerInfo) -> String {
     }
 }
 
+/// Render the commitment line: what the configuration promises against what
+/// the machine has.
+///
+/// This is the one figure on the overview that is not a measurement. It says
+/// what the host is configured to consume, which can be read today rather than
+/// during the incident, and it names the largest term because a ratio alone
+/// sends someone hunting through configuration files.
+fn format_commitment_line(
+    commitment: &shared::commitment::MemoryCommitment,
+) -> Option<(String, Style)> {
+    use shared::commitment::CommitmentLevel;
+
+    if commitment.components.is_empty() || commitment.physical_bytes == 0 {
+        return None;
+    }
+
+    let style = match commitment.level() {
+        CommitmentLevel::Critical => Style::default()
+            .fg(Theme::ERROR)
+            .add_modifier(Modifier::BOLD),
+        CommitmentLevel::Warning => Style::default().fg(Theme::WARNING),
+        CommitmentLevel::Ok => Style::default().fg(Theme::MUTED),
+    };
+
+    let culprit = commitment
+        .top_contributors(1)
+        .first()
+        .map(|c| format!("  │  largest: {} {}", c.source, c.basis))
+        .unwrap_or_default();
+
+    Some((
+        format!(
+            "Promised: {} of {} ({:.1}×){}",
+            format_bytes(commitment.total_bytes()),
+            format_bytes(commitment.physical_bytes),
+            commitment.ratio(),
+            culprit
+        ),
+        style,
+    ))
+}
+
 /// Paging rate above which a host is treated as thrashing.
 ///
 /// Sustained paging at this level means the working set does not fit; brief
@@ -263,7 +305,13 @@ pub(super) fn draw_overview_tab<B: tui::backend::Backend>(
             // Optional lines cost no vertical space when they have nothing to
             // say, so a healthy host keeps a compact header.
             let has_swap = info.swap.total_bytes > 0 || info.memory_pressure.is_some();
-            let header_height = 2 + u16::from(!failed_units.is_empty()) + u16::from(has_swap) + 1;
+            let commitment = app.memory_commitment(server.id);
+            let commitment_line = format_commitment_line(&commitment);
+            let header_height = 2
+                + u16::from(!failed_units.is_empty())
+                + u16::from(has_swap)
+                + u16::from(commitment_line.is_some())
+                + 1;
 
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -346,6 +394,13 @@ pub(super) fn draw_overview_tab<B: tui::backend::Backend>(
                 }
 
                 header_lines.push(Spans::from(swap_spans));
+            }
+
+            if let Some((text, style)) = commitment_line {
+                header_lines.push(Spans::from(vec![
+                    Span::styled("󰾆 ", style),
+                    Span::styled(text, style),
+                ]));
             }
 
             let sys_info = Paragraph::new(header_lines);
@@ -2068,6 +2123,51 @@ mod tests {
 
         let buffer = render_app_to_buffer(&app, draw_overview_tab);
         assert!(!buffer_contains(&buffer, "systemd unit"));
+    }
+
+    // ─────────────────────────────────────────
+    // Memory commitment
+    // ─────────────────────────────────────────
+
+    fn commitment(promised: u64, physical: u64) -> shared::commitment::MemoryCommitment {
+        shared::commitment::MemoryCommitment {
+            components: vec![shared::commitment::CommitmentComponent {
+                source: "postgres pg-dev".to_string(),
+                basis: "work_mem × max_connections (500)".to_string(),
+                bytes: promised,
+            }],
+            physical_bytes: physical,
+        }
+    }
+
+    #[test]
+    fn test_commitment_line_names_the_largest_term() {
+        let (text, _) =
+            format_commitment_line(&commitment(20_000_000_000, 15_600_000_000)).unwrap();
+
+        assert!(text.contains("1.3×"), "should state the ratio: {}", text);
+        assert!(text.contains("postgres pg-dev"));
+        assert!(text.contains("work_mem"));
+    }
+
+    #[test]
+    fn test_commitment_line_styles_escalate() {
+        let ok = format_commitment_line(&commitment(8_000, 16_000)).unwrap();
+        let warning = format_commitment_line(&commitment(28_000, 16_000)).unwrap();
+        let critical = format_commitment_line(&commitment(60_000, 16_000)).unwrap();
+
+        assert_ne!(ok.1, warning.1);
+        assert_ne!(warning.1, critical.1);
+    }
+
+    #[test]
+    fn test_commitment_line_absent_without_components() {
+        assert!(format_commitment_line(&shared::commitment::MemoryCommitment::default()).is_none());
+    }
+
+    #[test]
+    fn test_commitment_line_absent_without_physical_reading() {
+        assert!(format_commitment_line(&commitment(1_000, 0)).is_none());
     }
 
     // ─────────────────────────────────────────

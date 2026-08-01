@@ -226,6 +226,26 @@ pub(super) async fn fetch_server_data(app: &mut DashboardApp, server_id: uuid::U
 
             app.tls_cache.insert(server_id, tls);
         }
+        // The commitment spans postgres, containers and JVMs, so it is
+        // computed once everything for this poll is in the cache.
+        {
+            let server_key = server_id.to_string();
+            let server_name = app
+                .servers
+                .iter()
+                .find(|s| s.id == server_id)
+                .map(|s| s.name.clone())
+                .unwrap_or_else(|| "Unknown".to_string());
+
+            let commitment = app.memory_commitment(server_id);
+            if let Some(alert) =
+                app.alert_manager
+                    .process_memory_commitment(&server_key, &server_name, &commitment)
+            {
+                let _ = app.notification_dispatcher.dispatch(&alert).await;
+            }
+        }
+
         if let Some(ports) = ports {
             let server_name = app
                 .servers

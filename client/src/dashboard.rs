@@ -441,6 +441,45 @@ impl DashboardApp {
         }
     }
 
+    /// What this server's configuration promises against what it has.
+    ///
+    /// Assembled from the caches rather than sent by the server: the terms come
+    /// from three different RPCs, and the client already holds all of them.
+    pub(super) fn memory_commitment(
+        &self,
+        server_id: uuid::Uuid,
+    ) -> shared::commitment::MemoryCommitment {
+        let physical = self
+            .system_info_cache
+            .get(&server_id)
+            .map(|info| info.memory_total_bytes)
+            .unwrap_or(0);
+
+        let empty_clusters = Vec::new();
+        let empty_containers = Vec::new();
+        let clusters = self
+            .postgres_cache
+            .get(&server_id)
+            .unwrap_or(&empty_clusters);
+        let containers = self
+            .containers_cache
+            .get(&server_id)
+            .unwrap_or(&empty_containers);
+
+        let processes: Vec<(String, String)> = self
+            .processes_cache
+            .get(&server_id)
+            .map(|procs| {
+                procs
+                    .iter()
+                    .map(|p| (p.name.clone(), p.command_line.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        shared::commitment::assess(physical, clusters, containers, &processes)
+    }
+
     fn get_current_list_len(&self) -> usize {
         if let Some(server_id) = self.get_selected_server_id() {
             match self.current_tab {

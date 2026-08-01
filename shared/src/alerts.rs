@@ -22,6 +22,7 @@ pub enum AlertType {
     ExposedDatastore,
     SwapThrashing,
     MemoryStalled,
+    MemoryOvercommitted,
 }
 
 impl std::fmt::Display for AlertType {
@@ -40,6 +41,7 @@ impl std::fmt::Display for AlertType {
             AlertType::ExposedDatastore => write!(f, "EXPOSED_DATASTORE"),
             AlertType::SwapThrashing => write!(f, "SWAP_THRASHING"),
             AlertType::MemoryStalled => write!(f, "MEMORY_STALLED"),
+            AlertType::MemoryOvercommitted => write!(f, "MEMORY_OVERCOMMITTED"),
         }
     }
 }
@@ -696,6 +698,53 @@ impl AlertManager {
         new_alerts
     }
 
+    /// Alert when the configuration promises more memory than the machine has.
+    ///
+    /// Unlike every other rule here, this one does not wait for anything to go
+    /// wrong: the numbers are all in configuration files and can be added up
+    /// today. It says "this host is configured to consume more memory than it
+    /// owns, and here is what promises it" instead of "memory is high".
+    pub fn process_memory_commitment(
+        &mut self,
+        server_id: &str,
+        server_name: &str,
+        commitment: &crate::commitment::MemoryCommitment,
+    ) -> Option<Alert> {
+        use crate::commitment::CommitmentLevel;
+
+        let severity = match commitment.level() {
+            CommitmentLevel::Ok => {
+                self.clear(server_id, AlertType::MemoryOvercommitted);
+                return None;
+            }
+            CommitmentLevel::Warning => AlertSeverity::Warning,
+            CommitmentLevel::Critical => AlertSeverity::Critical,
+        };
+
+        // Naming the largest term is the whole point: a ratio alone sends
+        // someone hunting through configuration files.
+        let culprit = commitment
+            .top_contributors(1)
+            .first()
+            .map(|c| format!("{} ({})", c.source, c.basis))
+            .unwrap_or_else(|| "unknown".to_string());
+
+        self.raise_once(
+            server_id,
+            server_name,
+            AlertType::MemoryOvercommitted,
+            severity,
+            format!(
+                "configuration promises {:.1}× physical memory; largest term is {}",
+                commitment.ratio(),
+                culprit
+            ),
+            Some(commitment.ratio()),
+            Some(crate::commitment::MemoryCommitment::WARNING_RATIO),
+            Duration::hours(6),
+        )
+    }
+
     /// Alert on data stores reachable from outside the host.
     ///
     /// A database bound to every interface works exactly as well as one bound
@@ -1239,6 +1288,112 @@ mod tests {
     // ─────────────────────────────────────────
     // systemd failed units
     // ─────────────────────────────────────────
+
+    // ─────────────────────────────────────────
+    // Memory commitment
+    // ─────────────────────────────────────────
+
+    fn commitment(
+        promised: u64,
+        physical: u64,
+        source: &str,
+    ) -> crate::commitment::MemoryCommitment {
+        crate::commitment::MemoryCommitment {
+            components: vec![crate::commitment::CommitmentComponent {
+                source: source.to_string(),
+                basis: "work_mem × max_connections (500)".to_string(),
+                bytes: promised,
+            }],
+            physical_bytes: physical,
+        }
+    }
+
+    #[test]
+    fn test_commitment_within_bounds_does_not_alert() {
+        let mut manager = AlertManager::new();
+        assert!(manager
+            .process_memory_commitment("srv-1", "srv", &commitment(8_000, 16_000, "postgres pg"))
+            .is_none());
+    }
+
+    #[test]
+    fn test_overcommitted_host_alerts_before_anything_breaks() {
+        // The distinguishing feature of this rule: nothing has gone wrong yet
+        let mut manager = AlertManager::new();
+        let alert = manager
+            .process_memory_commitment(
+                "srv-1",
+                "alemanha6",
+                &commitment(24_000, 15_600, "postgres pg-dev"),
+            )
+            .expect("a host promising more than it owns should alert");
+
+        assert_eq!(alert.alert_type, AlertType::MemoryOvercommitted);
+        assert_eq!(alert.severity, AlertSeverity::Warning);
+    }
+
+    #[test]
+    fn test_severe_overcommit_is_critical() {
+        let mut manager = AlertManager::new();
+        let alert = manager
+            .process_memory_commitment("srv-1", "srv", &commitment(50_000, 15_600, "postgres pg"))
+            .unwrap();
+        assert_eq!(alert.severity, AlertSeverity::Critical);
+    }
+
+    #[test]
+    fn test_commitment_alert_names_the_culprit() {
+        // "your server is overcommitted" sends someone hunting; naming the
+        // term does not
+        let mut manager = AlertManager::new();
+        let alert = manager
+            .process_memory_commitment(
+                "srv-1",
+                "alemanha6",
+                &commitment(24_000, 15_600, "postgres pg-dev"),
+            )
+            .unwrap();
+
+        assert!(alert.message.contains("postgres pg-dev"));
+        assert!(alert.message.contains("work_mem"));
+    }
+
+    #[test]
+    fn test_commitment_alert_does_not_repeat() {
+        let mut manager = AlertManager::new();
+        let c = commitment(24_000, 15_600, "postgres pg");
+
+        assert!(manager
+            .process_memory_commitment("srv-1", "srv", &c)
+            .is_some());
+        assert!(manager
+            .process_memory_commitment("srv-1", "srv", &c)
+            .is_none());
+    }
+
+    #[test]
+    fn test_commitment_alert_resolves_after_reconfiguration() {
+        let mut manager = AlertManager::new();
+        manager.process_memory_commitment("srv-1", "srv", &commitment(24_000, 15_600, "pg"));
+        // max_connections lowered: the promise now fits
+        manager.process_memory_commitment("srv-1", "srv", &commitment(8_000, 15_600, "pg"));
+
+        assert!(manager.get_active_alerts()[0].is_resolved());
+    }
+
+    #[test]
+    fn test_empty_commitment_never_alerts() {
+        // A host with no postgres, no limited containers and no JVMs promises
+        // nothing measurable; that is not a finding
+        let mut manager = AlertManager::new();
+        assert!(manager
+            .process_memory_commitment(
+                "srv-1",
+                "srv",
+                &crate::commitment::MemoryCommitment::default()
+            )
+            .is_none());
+    }
 
     // ─────────────────────────────────────────
     // Memory pressure

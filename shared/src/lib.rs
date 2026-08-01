@@ -10,6 +10,7 @@ pub mod proto {
 }
 
 pub mod alerts;
+pub mod commitment;
 pub mod notifications;
 
 /// Conversions between the wire types and the domain types
