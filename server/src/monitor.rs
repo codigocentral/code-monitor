@@ -152,6 +152,15 @@ impl SystemMonitor {
         Ok(monitor)
     }
 
+    /// Point the certificate collector at specific directories.
+    ///
+    /// Kept out of `new` so the many call sites that do not care about
+    /// certificates are not forced to pass an empty vector.
+    pub fn with_tls_dirs(mut self, certificate_dirs: Vec<String>) -> Self {
+        self.tls_collector = TlsCollector::new(certificate_dirs);
+        self
+    }
+
     pub fn start_background_monitoring(&self) {
         let system = Arc::clone(&self.system);
         let update_interval = self.update_interval;
@@ -445,8 +454,26 @@ impl SystemMonitor {
         self.systemd_collector.collect_failed().await
     }
 
+    /// Units that renew certificates, in the order they are worth reporting.
+    ///
+    /// The timer is what actually schedules renewal; the service is what runs
+    /// and what shows up as failed when renewal breaks.
+    const RENEWAL_UNITS: &'static [&'static str] = &["certbot.timer", "certbot.service"];
+
     pub async fn get_tls_info(&self) -> Result<shared::types::TlsSnapshot> {
-        self.tls_collector.collect().await
+        let mut snapshot = self.tls_collector.collect().await?;
+
+        // A certificate is only as safe as whatever renews it, so the two
+        // travel together rather than leaving the client to correlate them.
+        for unit in Self::RENEWAL_UNITS {
+            if let Some(status) = self.systemd_collector.unit_status(unit).await {
+                snapshot.renewal_unit_name = Some((*unit).to_string());
+                snapshot.renewal_unit_status = Some(status);
+                break;
+            }
+        }
+
+        Ok(snapshot)
     }
 
     pub async fn get_listening_ports(&self) -> Result<Vec<shared::types::ListeningPortInfo>> {

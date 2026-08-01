@@ -216,7 +216,8 @@ async fn main() -> Result<()> {
         config.mariadb_clusters.clone(),
         config.systemd_units.clone(),
     )
-    .await?;
+    .await?
+    .with_tls_dirs(config.tls_certificate_dirs.clone());
     monitor.start_background_monitoring();
 
     // Wrap in Arc for sharing

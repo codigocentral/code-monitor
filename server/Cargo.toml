@@ -34,6 +34,9 @@ tower-http = { version = "0.5", features = ["trace"] }
 # TLS
 rustls = "0.22"
 tonic-rustls = "0.1"
+# Certificate inventory: pure Rust, so the agent does not depend on a system
+# OpenSSL being present on the monitored host
+x509-parser = "0.16"
 
 # Docker
 bollard = "0.16"

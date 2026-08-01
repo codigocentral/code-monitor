@@ -17,6 +17,8 @@ pub enum AlertType {
     SystemdUnitFailed,
     ContainerCrashLoop,
     ContainerHealthcheckBroken,
+    TlsCertificateExpiring,
+    TlsRenewalBroken,
 }
 
 impl std::fmt::Display for AlertType {
@@ -30,6 +32,8 @@ impl std::fmt::Display for AlertType {
             AlertType::SystemdUnitFailed => write!(f, "SYSTEMD_UNIT_FAILED"),
             AlertType::ContainerCrashLoop => write!(f, "CONTAINER_CRASH_LOOP"),
             AlertType::ContainerHealthcheckBroken => write!(f, "CONTAINER_HEALTHCHECK_BROKEN"),
+            AlertType::TlsCertificateExpiring => write!(f, "TLS_CERTIFICATE_EXPIRING"),
+            AlertType::TlsRenewalBroken => write!(f, "TLS_RENEWAL_BROKEN"),
         }
     }
 }
@@ -434,6 +438,171 @@ impl AlertManager {
         self.add_to_history(alert.clone());
 
         Some(alert)
+    }
+
+    /// Days of remaining validity below which a certificate is a warning.
+    ///
+    /// Let's Encrypt renews at 30 days, so 21 means renewal has already had a
+    /// week to work and has not.
+    pub const TLS_WARNING_DAYS: i64 = 21;
+
+    /// Days below which expiry becomes critical.
+    pub const TLS_CRITICAL_DAYS: i64 = 7;
+
+    /// Alert on certificates approaching expiry and on broken renewal.
+    ///
+    /// Takes `(name, days_until_expiry)` pairs plus the renewal unit's status.
+    /// Both matter, and they fail independently: renewal can be dead for weeks
+    /// while every certificate still looks fine, which is exactly the state
+    /// three servers in the fleet were found in.
+    pub fn process_tls_certificates(
+        &mut self,
+        server_id: &str,
+        server_name: &str,
+        certificates: &[(String, i64)],
+        renewal_unit: Option<(&str, &str)>,
+    ) -> Vec<Alert> {
+        let mut new_alerts = Vec::new();
+
+        // Worst certificate decides the severity, and its name leads the message
+        let soonest = certificates.iter().min_by_key(|(_, days)| *days);
+
+        if let Some((name, days)) = soonest {
+            if *days <= Self::TLS_WARNING_DAYS {
+                let severity = if *days <= Self::TLS_CRITICAL_DAYS {
+                    AlertSeverity::Critical
+                } else {
+                    AlertSeverity::Warning
+                };
+
+                let expiring: Vec<&str> = certificates
+                    .iter()
+                    .filter(|(_, d)| *d <= Self::TLS_WARNING_DAYS)
+                    .map(|(n, _)| n.as_str())
+                    .collect();
+
+                let message = if *days < 0 {
+                    format!(
+                        "certificate '{}' expired {} day(s) ago ({} affected)",
+                        name,
+                        -days,
+                        expiring.len()
+                    )
+                } else {
+                    format!(
+                        "certificate '{}' expires in {} day(s) ({} of {} within {} days)",
+                        name,
+                        days,
+                        expiring.len(),
+                        certificates.len(),
+                        Self::TLS_WARNING_DAYS
+                    )
+                };
+
+                if let Some(alert) = self.raise_once(
+                    server_id,
+                    server_name,
+                    AlertType::TlsCertificateExpiring,
+                    severity,
+                    message,
+                    Some(*days as f64),
+                    Some(Self::TLS_WARNING_DAYS as f64),
+                    Duration::hours(12),
+                ) {
+                    new_alerts.push(alert);
+                }
+            } else {
+                self.clear(server_id, AlertType::TlsCertificateExpiring);
+            }
+        }
+
+        // A failed renewal unit is the leading indicator: certificates still
+        // look healthy right up to the day a whole batch expires at once.
+        match renewal_unit {
+            Some((unit, status)) if status.contains("failed") => {
+                if let Some(alert) = self.raise_once(
+                    server_id,
+                    server_name,
+                    AlertType::TlsRenewalBroken,
+                    AlertSeverity::Warning,
+                    format!(
+                        "{} is {}: {} certificate(s) will stop renewing",
+                        unit,
+                        status,
+                        certificates.len()
+                    ),
+                    Some(certificates.len() as f64),
+                    None,
+                    Duration::hours(12),
+                ) {
+                    new_alerts.push(alert);
+                }
+            }
+            _ => self.clear(server_id, AlertType::TlsRenewalBroken),
+        }
+
+        new_alerts
+    }
+
+    /// Raise an alert unless one of this type is already standing for the
+    /// server, it is silenced, or the cooldown has not elapsed.
+    #[allow(clippy::too_many_arguments)]
+    fn raise_once(
+        &mut self,
+        server_id: &str,
+        server_name: &str,
+        alert_type: AlertType,
+        severity: AlertSeverity,
+        message: String,
+        value: Option<f64>,
+        threshold: Option<f64>,
+        cooldown: Duration,
+    ) -> Option<Alert> {
+        let state = self
+            .states
+            .entry((server_id.to_string(), alert_type))
+            .or_default();
+
+        if state.is_triggered() || state.is_silenced() || !state.can_trigger_again(cooldown) {
+            return None;
+        }
+        state.mark_triggered();
+
+        let alert = Alert::new(
+            alert_type,
+            severity,
+            server_id.to_string(),
+            server_name.to_string(),
+            message,
+            value,
+            threshold,
+        );
+
+        self.active_alerts.push(alert.clone());
+        self.add_to_history(alert.clone());
+
+        Some(alert)
+    }
+
+    /// Resolve a standing alert of this type, if there is one.
+    fn clear(&mut self, server_id: &str, alert_type: AlertType) {
+        let state = self
+            .states
+            .entry((server_id.to_string(), alert_type))
+            .or_default();
+
+        if !state.is_triggered() {
+            return;
+        }
+        state.mark_resolved();
+
+        if let Some(active) = self
+            .active_alerts
+            .iter_mut()
+            .find(|a| a.server_id == server_id && a.alert_type == alert_type && !a.is_resolved())
+        {
+            active.resolve();
+        }
     }
 
     /// Alert on containers that are restarting repeatedly.
@@ -945,6 +1114,195 @@ mod tests {
     // ─────────────────────────────────────────
     // systemd failed units
     // ─────────────────────────────────────────
+
+    // ─────────────────────────────────────────
+    // TLS certificates
+    // ─────────────────────────────────────────
+
+    #[test]
+    fn test_tls_healthy_certificates_do_not_alert() {
+        let mut manager = AlertManager::new();
+        let alerts = manager.process_tls_certificates(
+            "srv-1",
+            "alemanha9",
+            &[("example.com".to_string(), 60)],
+            Some(("certbot.timer", "active")),
+        );
+        assert!(alerts.is_empty());
+    }
+
+    #[test]
+    fn test_tls_warning_at_three_weeks() {
+        let mut manager = AlertManager::new();
+        let alerts = manager.process_tls_certificates(
+            "srv-1",
+            "alemanha9",
+            &[("example.com".to_string(), 21)],
+            None,
+        );
+
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].alert_type, AlertType::TlsCertificateExpiring);
+        assert_eq!(alerts[0].severity, AlertSeverity::Warning);
+    }
+
+    #[test]
+    fn test_tls_critical_at_one_week() {
+        let mut manager = AlertManager::new();
+        let alerts = manager.process_tls_certificates(
+            "srv-1",
+            "alemanha9",
+            &[("example.com".to_string(), 7)],
+            None,
+        );
+
+        assert_eq!(alerts[0].severity, AlertSeverity::Critical);
+    }
+
+    #[test]
+    fn test_tls_expired_certificate_says_so() {
+        let mut manager = AlertManager::new();
+        let alerts = manager.process_tls_certificates(
+            "srv-1",
+            "alemanha9",
+            &[("example.com".to_string(), -3)],
+            None,
+        );
+
+        assert_eq!(alerts[0].severity, AlertSeverity::Critical);
+        assert!(alerts[0].message.contains("expired 3 day(s) ago"));
+    }
+
+    #[test]
+    fn test_tls_severity_follows_the_worst_certificate() {
+        let mut manager = AlertManager::new();
+        let alerts = manager.process_tls_certificates(
+            "srv-1",
+            "alemanha8",
+            &[
+                ("healthy.example".to_string(), 80),
+                ("urgent.example".to_string(), 2),
+                ("soon.example".to_string(), 15),
+            ],
+            None,
+        );
+
+        assert_eq!(alerts[0].severity, AlertSeverity::Critical);
+        assert!(alerts[0].message.contains("urgent.example"));
+        assert!(
+            alerts[0].message.contains("2 of 3"),
+            "the message should say how many are within the window: {}",
+            alerts[0].message
+        );
+    }
+
+    #[test]
+    fn test_tls_alert_does_not_repeat() {
+        let mut manager = AlertManager::new();
+        let certs = [("example.com".to_string(), 10)];
+
+        assert_eq!(
+            manager
+                .process_tls_certificates("srv-1", "srv", &certs, None)
+                .len(),
+            1
+        );
+        assert!(manager
+            .process_tls_certificates("srv-1", "srv", &certs, None)
+            .is_empty());
+    }
+
+    #[test]
+    fn test_tls_alert_resolves_after_renewal() {
+        let mut manager = AlertManager::new();
+
+        manager.process_tls_certificates("srv-1", "srv", &[("example.com".to_string(), 5)], None);
+        // Renewed: back to a full 90 day certificate
+        manager.process_tls_certificates("srv-1", "srv", &[("example.com".to_string(), 89)], None);
+
+        assert!(manager.get_active_alerts()[0].is_resolved());
+    }
+
+    #[test]
+    fn test_broken_renewal_alerts_even_with_healthy_certificates() {
+        // The fleet's actual state: 97 certificates all perfectly valid, and
+        // certbot.service dead on three hosts. This is the leading indicator.
+        let mut manager = AlertManager::new();
+        let alerts = manager.process_tls_certificates(
+            "srv-1",
+            "alemanha8",
+            &[("a.example".to_string(), 75), ("b.example".to_string(), 80)],
+            Some(("certbot.service", "failed")),
+        );
+
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].alert_type, AlertType::TlsRenewalBroken);
+        assert!(alerts[0].message.contains("certbot.service"));
+        assert!(alerts[0].message.contains('2'));
+    }
+
+    #[test]
+    fn test_healthy_renewal_does_not_alert() {
+        let mut manager = AlertManager::new();
+        let alerts = manager.process_tls_certificates(
+            "srv-1",
+            "srv",
+            &[("a.example".to_string(), 75)],
+            Some(("certbot.timer", "active")),
+        );
+        assert!(alerts.is_empty());
+    }
+
+    #[test]
+    fn test_renewal_alert_resolves_when_fixed() {
+        let mut manager = AlertManager::new();
+        let certs = [("a.example".to_string(), 75)];
+
+        manager.process_tls_certificates(
+            "srv-1",
+            "srv",
+            &certs,
+            Some(("certbot.service", "failed")),
+        );
+        manager.process_tls_certificates(
+            "srv-1",
+            "srv",
+            &certs,
+            Some(("certbot.service", "active")),
+        );
+
+        assert!(manager.get_active_alerts()[0].is_resolved());
+    }
+
+    #[test]
+    fn test_expiry_and_renewal_alert_independently() {
+        // Both broken at once must produce both alerts, not one
+        let mut manager = AlertManager::new();
+        let alerts = manager.process_tls_certificates(
+            "srv-1",
+            "srv",
+            &[("a.example".to_string(), 3)],
+            Some(("certbot.service", "failed")),
+        );
+
+        assert_eq!(alerts.len(), 2);
+        let types: Vec<AlertType> = alerts.iter().map(|a| a.alert_type).collect();
+        assert!(types.contains(&AlertType::TlsCertificateExpiring));
+        assert!(types.contains(&AlertType::TlsRenewalBroken));
+    }
+
+    #[test]
+    fn test_tls_with_no_certificates_still_checks_renewal() {
+        let mut manager = AlertManager::new();
+        let alerts = manager.process_tls_certificates(
+            "srv-1",
+            "srv",
+            &[],
+            Some(("certbot.service", "failed")),
+        );
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].alert_type, AlertType::TlsRenewalBroken);
+    }
 
     // ─────────────────────────────────────────
     // Container restarts

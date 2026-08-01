@@ -31,6 +31,7 @@ pub(super) async fn fetch_server_data(app: &mut DashboardApp, server_id: uuid::U
             let postgres = client.get_postgres_info().await.ok();
             let mariadb = client.get_mariadb_info().await.ok();
             let systemd = client.get_systemd_info().await.ok();
+            let tls = client.get_tls_info().await.ok();
             Some((
                 system_info,
                 services,
@@ -40,6 +41,7 @@ pub(super) async fn fetch_server_data(app: &mut DashboardApp, server_id: uuid::U
                 postgres,
                 mariadb,
                 systemd,
+                tls,
             ))
         } else {
             None
@@ -56,6 +58,7 @@ pub(super) async fn fetch_server_data(app: &mut DashboardApp, server_id: uuid::U
         postgres,
         mariadb,
         systemd,
+        tls,
     )) = data
     {
         if let Some(ref info) = system_info {
@@ -180,6 +183,33 @@ pub(super) async fn fetch_server_data(app: &mut DashboardApp, server_id: uuid::U
             app.systemd_cache.insert(server_id, systemd.units);
             app.systemd_failed_cache
                 .insert(server_id, systemd.failed_units);
+        }
+        if let Some(tls) = tls {
+            let server_name = app
+                .servers
+                .iter()
+                .find(|s| s.id == server_id)
+                .map(|s| s.name.clone())
+                .unwrap_or_else(|| "Unknown".to_string());
+
+            let certificates: Vec<(String, i64)> = tls
+                .certificates
+                .iter()
+                .map(|c| (c.name.clone(), c.days_until_expiry))
+                .collect();
+
+            for alert in app.alert_manager.process_tls_certificates(
+                &server_id.to_string(),
+                &server_name,
+                &certificates,
+                tls.renewal_unit_name
+                    .as_deref()
+                    .zip(tls.renewal_unit_status.as_deref()),
+            ) {
+                let _ = app.notification_dispatcher.dispatch(&alert).await;
+            }
+
+            app.tls_cache.insert(server_id, tls);
         }
     }
     Ok(())

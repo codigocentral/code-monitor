@@ -1034,6 +1034,173 @@ fn draw_systemd_units<B: tui::backend::Backend>(f: &mut Frame<B>, app: &Dashboar
     }
 }
 
+/// How a certificate's remaining validity should be shown.
+///
+/// Let's Encrypt renews at 30 days, so 21 means renewal has already had a week
+/// and has not worked.
+fn certificate_style(days_until_expiry: i64) -> Style {
+    if days_until_expiry <= 7 {
+        Style::default()
+            .fg(Theme::ERROR)
+            .add_modifier(Modifier::BOLD)
+    } else if days_until_expiry <= 21 {
+        Style::default().fg(Theme::WARNING)
+    } else {
+        Style::default().fg(Theme::SUCCESS)
+    }
+}
+
+/// Render remaining validity, saying plainly when it is already gone.
+fn format_days_remaining(days: i64) -> String {
+    match days {
+        d if d < 0 => format!("expired {}d ago", -d),
+        0 => "today".to_string(),
+        d => format!("{}d", d),
+    }
+}
+
+/// Describe the renewal unit, which is the leading indicator: certificates all
+/// look fine right until a whole batch expires together.
+fn format_renewal_status(name: Option<&str>, status: Option<&str>) -> (String, Style) {
+    match (name, status) {
+        (Some(unit), Some(state)) if state.contains("failed") => (
+            format!("{} is {} — renewal is broken", unit, state),
+            Style::default()
+                .fg(Theme::ERROR)
+                .add_modifier(Modifier::BOLD),
+        ),
+        (Some(unit), Some(state)) => (
+            format!("{}: {}", unit, state),
+            Style::default().fg(Theme::SUCCESS),
+        ),
+        _ => (
+            "no renewal unit detected".to_string(),
+            Style::default().fg(Theme::MUTED),
+        ),
+    }
+}
+
+pub(super) fn draw_tls_tab<B: tui::backend::Backend>(
+    f: &mut Frame<B>,
+    app: &DashboardApp,
+    area: Rect,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Theme::BORDER))
+        .title(Span::styled(
+            " 󰌾 TLS Certificates ",
+            Style::default()
+                .fg(Theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let Some(server) = app.get_selected_server() else {
+        let no_server = Paragraph::new("No server selected.")
+            .style(Style::default().fg(Theme::MUTED))
+            .alignment(Alignment::Center)
+            .block(block);
+        f.render_widget(no_server, area);
+        return;
+    };
+
+    let Some(snapshot) = app.tls_cache.get(&server.id) else {
+        let not_connected = Paragraph::new("󰅛 Not connected. Press Enter to connect.")
+            .style(Style::default().fg(Theme::MUTED))
+            .alignment(Alignment::Center)
+            .block(block);
+        f.render_widget(not_connected, area);
+        return;
+    };
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(3)])
+        .split(inner);
+
+    let (renewal_text, renewal_style) = format_renewal_status(
+        snapshot.renewal_unit_name.as_deref(),
+        snapshot.renewal_unit_status.as_deref(),
+    );
+    f.render_widget(
+        Paragraph::new(Spans::from(vec![
+            Span::styled(" 󰑐 ", renewal_style),
+            Span::styled(renewal_text, renewal_style),
+        ])),
+        chunks[0],
+    );
+
+    if snapshot.certificates.is_empty() {
+        let empty = Paragraph::new("No certificates found on this host.")
+            .style(Style::default().fg(Theme::MUTED))
+            .alignment(Alignment::Center);
+        f.render_widget(empty, chunks[1]);
+        return;
+    }
+
+    let rows: Vec<Row> = snapshot
+        .certificates
+        .iter()
+        .map(|c| {
+            let style = certificate_style(c.days_until_expiry);
+            Row::new(vec![
+                Cell::from(Span::styled(&c.name, Style::default().fg(Theme::TEXT))),
+                Cell::from(Span::styled(
+                    format_days_remaining(c.days_until_expiry),
+                    style,
+                )),
+                Cell::from(Span::styled(
+                    c.not_after
+                        .map(|d| d.format("%Y-%m-%d").to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    Style::default().fg(Theme::MUTED),
+                )),
+                Cell::from(Span::styled(
+                    c.domains.len().to_string(),
+                    Style::default().fg(Theme::TEXT),
+                )),
+                Cell::from(Span::styled(&c.issuer, Style::default().fg(Theme::MUTED))),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(rows)
+        .header(
+            Row::new(vec![
+                "Certificate",
+                "Remaining",
+                "Expires",
+                "SANs",
+                "Issuer",
+            ])
+            .style(
+                Style::default()
+                    .fg(Theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        )
+        .widths(&[
+            Constraint::Percentage(30),
+            Constraint::Percentage(16),
+            Constraint::Percentage(14),
+            Constraint::Percentage(8),
+            Constraint::Percentage(26),
+        ])
+        .highlight_style(
+            Style::default()
+                .bg(Theme::HIGHLIGHT_BG)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▶ ");
+
+    let mut state = app.table_state.clone();
+    f.render_stateful_widget(table, chunks[1], &mut state);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1629,6 +1796,112 @@ mod tests {
 
         let buffer = render_app_to_buffer(&app, draw_overview_tab);
         assert!(!buffer_contains(&buffer, "systemd unit"));
+    }
+
+    // ─────────────────────────────────────────
+    // TLS tab
+    // ─────────────────────────────────────────
+
+    fn certificate(name: &str, days: i64) -> TlsCertificateInfo {
+        TlsCertificateInfo {
+            name: name.to_string(),
+            domains: vec![name.to_string(), format!("www.{}", name)],
+            issuer: "R3".to_string(),
+            not_after: Some(Utc::now() + chrono::Duration::days(days)),
+            days_until_expiry: days,
+            source: format!("/etc/letsencrypt/live/{}/cert.pem", name),
+            orphaned: false,
+        }
+    }
+
+    #[test]
+    fn test_format_days_remaining() {
+        assert_eq!(format_days_remaining(45), "45d");
+        assert_eq!(format_days_remaining(0), "today");
+        assert_eq!(format_days_remaining(-3), "expired 3d ago");
+    }
+
+    #[test]
+    fn test_certificate_style_escalates() {
+        // Distinct styling at each band, so severity reads at a glance
+        let healthy = certificate_style(60);
+        let warning = certificate_style(21);
+        let critical = certificate_style(7);
+
+        assert_ne!(healthy, warning);
+        assert_ne!(warning, critical);
+    }
+
+    #[test]
+    fn test_renewal_status_flags_a_failed_unit() {
+        let (text, _) = format_renewal_status(Some("certbot.service"), Some("failed"));
+        assert!(text.contains("renewal is broken"));
+    }
+
+    #[test]
+    fn test_renewal_status_healthy() {
+        let (text, _) = format_renewal_status(Some("certbot.timer"), Some("active"));
+        assert!(text.contains("certbot.timer"));
+        assert!(!text.contains("broken"));
+    }
+
+    #[test]
+    fn test_renewal_status_absent() {
+        let (text, _) = format_renewal_status(None, None);
+        assert!(text.contains("no renewal unit"));
+    }
+
+    #[test]
+    fn test_tls_tab_lists_certificates_and_renewal() {
+        let mut app = create_test_app();
+        let server_id = app.servers[0].id;
+        app.tls_cache.insert(
+            server_id,
+            TlsSnapshot {
+                certificates: vec![certificate("example.com", 12)],
+                renewal_unit_name: Some("certbot.service".to_string()),
+                renewal_unit_status: Some("failed".to_string()),
+            },
+        );
+
+        let buffer = render_app_to_buffer(&app, draw_tls_tab);
+        assert!(buffer_contains(&buffer, "example.com"));
+        assert!(buffer_contains(&buffer, "12d"));
+        assert!(buffer_contains(&buffer, "renewal is broken"));
+    }
+
+    #[test]
+    fn test_tls_tab_reports_expired_certificate() {
+        let mut app = create_test_app();
+        let server_id = app.servers[0].id;
+        app.tls_cache.insert(
+            server_id,
+            TlsSnapshot {
+                certificates: vec![certificate("dead.example", -5)],
+                renewal_unit_name: None,
+                renewal_unit_status: None,
+            },
+        );
+
+        let buffer = render_app_to_buffer(&app, draw_tls_tab);
+        assert!(buffer_contains(&buffer, "expired 5d ago"));
+    }
+
+    #[test]
+    fn test_tls_tab_without_certificates() {
+        let mut app = create_test_app();
+        let server_id = app.servers[0].id;
+        app.tls_cache.insert(server_id, TlsSnapshot::default());
+
+        let buffer = render_app_to_buffer(&app, draw_tls_tab);
+        assert!(buffer_contains(&buffer, "No certificates found"));
+    }
+
+    #[test]
+    fn test_tls_tab_not_connected() {
+        let app = create_test_app();
+        let buffer = render_app_to_buffer(&app, draw_tls_tab);
+        assert!(buffer_contains(&buffer, "Not connected"));
     }
 
     fn container_fixture(name: &str) -> ContainerInfo {

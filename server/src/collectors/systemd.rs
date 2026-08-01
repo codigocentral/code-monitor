@@ -189,6 +189,26 @@ impl SystemdCollector {
         }
     }
 
+    /// Status of a single unit, regardless of whether it is configured for
+    /// monitoring.
+    ///
+    /// Used to answer questions about a specific unit that another collector
+    /// cares about — the certificate inventory needs to know whether renewal
+    /// still runs, since a healthy certificate with a broken timer is an
+    /// outage on a schedule.
+    pub async fn unit_status(&self, unit: &str) -> Option<String> {
+        #[cfg(target_os = "linux")]
+        {
+            self.collect_unit(unit).await.ok().map(|info| info.status)
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = unit;
+            None
+        }
+    }
+
     /// Scan the whole host for units in the `failed` state.
     ///
     /// Deliberately independent of the configured unit list: a failed unit

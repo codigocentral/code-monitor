@@ -16,6 +16,7 @@ pub enum Tab {
     Postgres,
     MariaDB,
     Systemd,
+    Tls,
 }
 
 impl Tab {
@@ -29,6 +30,7 @@ impl Tab {
         Tab::Postgres,
         Tab::MariaDB,
         Tab::Systemd,
+        Tab::Tls,
     ];
 
     /// Title shown in the tab bar
@@ -42,6 +44,7 @@ impl Tab {
             Tab::Postgres => "🐘 Postgres",
             Tab::MariaDB => "🗄️ MariaDB",
             Tab::Systemd => "⚙️ Systemd",
+            Tab::Tls => "󰌾 TLS",
         }
     }
 
@@ -59,6 +62,9 @@ impl Tab {
     }
 
     /// Tab bound to a number key, where `1` selects the first tab
+    ///
+    /// Only the first nine tabs are reachable this way, since there are no
+    /// further single digits. Tab and Shift-Tab reach the rest.
     pub fn from_hotkey(key: char) -> Option<Tab> {
         let digit = key.to_digit(10)? as usize;
         if digit == 0 {
@@ -112,13 +118,17 @@ mod tests {
     #[test]
     fn test_next_wraps_around() {
         assert_eq!(Tab::Overview.next(), Tab::Services);
-        assert_eq!(Tab::Systemd.next(), Tab::Overview);
+        assert_eq!(Tab::ALL[Tab::ALL.len() - 1].next(), Tab::Overview);
     }
 
     #[test]
     fn test_previous_wraps_around() {
         assert_eq!(Tab::Services.previous(), Tab::Overview);
-        assert_eq!(Tab::Overview.previous(), Tab::Systemd);
+        assert_eq!(
+            Tab::Overview.previous(),
+            Tab::ALL[Tab::ALL.len() - 1],
+            "wrapping backwards must land on the last tab, whatever it is"
+        );
     }
 
     #[test]
@@ -132,13 +142,32 @@ mod tests {
     fn test_hotkeys_are_one_based() {
         assert_eq!(Tab::from_hotkey('1'), Some(Tab::Overview));
         assert_eq!(Tab::from_hotkey('8'), Some(Tab::Systemd));
+        assert_eq!(Tab::from_hotkey('9'), Some(Tab::Tls));
     }
 
     #[test]
-    fn test_hotkey_zero_and_out_of_range() {
+    fn test_hotkey_zero_and_non_digit() {
         assert_eq!(Tab::from_hotkey('0'), None);
-        assert_eq!(Tab::from_hotkey('9'), None);
         assert_eq!(Tab::from_hotkey('a'), None);
+        assert_eq!(Tab::from_hotkey(' '), None);
+    }
+
+    #[test]
+    fn test_hotkey_past_the_last_tab() {
+        // Only meaningful while there are fewer than nine tabs; past that the
+        // digits run out and Tab/Shift-Tab are the only way through.
+        if let Some(digit) = char::from_digit(Tab::ALL.len() as u32 + 1, 10) {
+            assert_eq!(Tab::from_hotkey(digit), None);
+        }
+    }
+
+    #[test]
+    fn test_hotkeys_cover_as_many_tabs_as_digits_allow() {
+        let reachable = Tab::ALL.len().min(9);
+        for position in 0..reachable {
+            let digit = char::from_digit(position as u32 + 1, 10).unwrap();
+            assert_eq!(Tab::from_hotkey(digit), Some(Tab::ALL[position]));
+        }
     }
 
     #[test]

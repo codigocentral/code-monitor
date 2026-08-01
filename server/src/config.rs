@@ -35,6 +35,11 @@ pub struct Config {
     /// Systemd units to monitor
     #[serde(default)]
     pub systemd_units: Vec<String>,
+    /// Directories holding TLS certificate lineages
+    ///
+    /// Empty means the Let's Encrypt default, `/etc/letsencrypt/live`.
+    #[serde(default)]
+    pub tls_certificate_dirs: Vec<String>,
     /// TLS configuration
     #[serde(default)]
     pub tls: Option<TlsConfig>,
@@ -168,6 +173,7 @@ impl Default for Config {
             postgres_clusters: Vec::new(),
             mariadb_clusters: Vec::new(),
             systemd_units: Vec::new(),
+            tls_certificate_dirs: Vec::new(),
             tls: None,
         }
     }
@@ -359,6 +365,7 @@ mod tests {
             postgres_clusters: Vec::new(),
             mariadb_clusters: Vec::new(),
             systemd_units: Vec::new(),
+            tls_certificate_dirs: Vec::new(),
             tls: None,
         };
 
@@ -585,6 +592,7 @@ mod tests {
                 "nginx.service".to_string(),
                 "postgresql.service".to_string(),
             ],
+            tls_certificate_dirs: vec!["/etc/letsencrypt/live".to_string()],
             tls: Some(TlsConfig {
                 cert_path: "/etc/ssl/server.crt".to_string(),
                 key_path: "/etc/ssl/server.key".to_string(),

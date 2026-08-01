@@ -60,6 +60,8 @@ pub struct DashboardApp {
     systemd_cache: HashMap<uuid::Uuid, Vec<shared::types::SystemdUnitInfo>>,
     /// Cached systemd units in the `failed` state by server ID
     systemd_failed_cache: HashMap<uuid::Uuid, Vec<shared::types::SystemdFailedUnit>>,
+    /// Cached TLS certificate inventory by server ID
+    tls_cache: HashMap<uuid::Uuid, shared::types::TlsSnapshot>,
     /// CPU history for sparkline (last 60 values)
     cpu_history: HashMap<uuid::Uuid, Vec<u64>>,
     /// Memory history for sparkline (last 60 values)
@@ -222,6 +224,7 @@ impl DashboardApp {
             mariadb_cache: HashMap::new(),
             systemd_cache: HashMap::new(),
             systemd_failed_cache: HashMap::new(),
+            tls_cache: HashMap::new(),
             selected_item_idx: 0,
             table_state: TableState::default(),
             running: true,
@@ -469,6 +472,11 @@ impl DashboardApp {
                     .systemd_cache
                     .get(&server_id)
                     .map(|c| c.len())
+                    .unwrap_or(0),
+                Tab::Tls => self
+                    .tls_cache
+                    .get(&server_id)
+                    .map(|s| s.certificates.len())
                     .unwrap_or(0),
             }
         } else {
@@ -1476,7 +1484,7 @@ mod tests {
     #[test]
     fn test_next_tab_wrap() {
         let mut app = create_test_app();
-        app.current_tab = Tab::Systemd;
+        app.current_tab = *Tab::ALL.last().unwrap();
         app.next_tab();
         assert_eq!(app.current_tab, Tab::Overview);
     }
@@ -1494,7 +1502,7 @@ mod tests {
         let mut app = create_test_app();
         app.current_tab = Tab::Overview;
         app.previous_tab();
-        assert_eq!(app.current_tab, Tab::Systemd);
+        assert_eq!(app.current_tab, *Tab::ALL.last().unwrap());
     }
 
     #[test]

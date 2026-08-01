@@ -18,6 +18,7 @@ use popups::{draw_alerts_popup, draw_command_input, draw_help_popup, draw_settin
 use processes::draw_processes_tab;
 use tabs::{
     draw_containers_tab, draw_network_tab, draw_overview_tab, draw_services_tab, draw_systemd_tab,
+    draw_tls_tab,
 };
 
 /// Theme colors for a modern look
@@ -108,7 +109,7 @@ fn draw_help_bar<B: tui::backend::Backend>(f: &mut Frame<B>, app: &DashboardApp,
             }
             Tab::Network => "Up/Down:Navigate  s:Settings  ?:Help  q:Quit",
             Tab::Containers => "Up/Down:Navigate  o:Sort  s:Settings  ?:Help  q:Quit",
-            Tab::Postgres | Tab::MariaDB | Tab::Systemd => {
+            Tab::Postgres | Tab::MariaDB | Tab::Systemd | Tab::Tls => {
                 "Up/Down:Navigate  s:Settings  ?:Help  q:Quit"
             }
         },
@@ -198,6 +199,7 @@ fn draw_main_content<B: tui::backend::Backend>(f: &mut Frame<B>, app: &Dashboard
         Tab::Postgres => draw_postgres_tab(f, app, chunks[1]),
         Tab::MariaDB => draw_mariadb_tab(f, app, chunks[1]),
         Tab::Systemd => draw_systemd_tab(f, app, chunks[1]),
+        Tab::Tls => draw_tls_tab(f, app, chunks[1]),
     }
 }
 
