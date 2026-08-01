@@ -18,53 +18,65 @@ use crate::collectors::postgres::PostgresCollector;
 use crate::collectors::systemd::SystemdCollector;
 use crate::config::{MariaDBClusterConfig, PostgresClusterConfig};
 
-/// Get IP addresses for all network interfaces using /proc/net (Linux) or platform-specific methods
-fn get_interface_ips() -> HashMap<String, String> {
-    let ips = HashMap::new();
+/// Parse the output of `ip addr show` into a map of interface name to IPv4 address.
+///
+/// Only IPv4 (`inet`) addresses are collected; `inet6` lines are ignored. When an
+/// interface carries several addresses, the last one listed wins.
+///
+/// This is pure string parsing and stays platform-independent so it can be unit
+/// tested on any host, even though only Linux feeds it real output.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_ip_addr_output(stdout: &str) -> HashMap<String, String> {
+    let mut ips = HashMap::new();
+    let mut current_iface = String::new();
 
-    // Try to read from /proc/net/fib_trie or use ifaddrs
-    #[cfg(target_os = "linux")]
-    {
-        use std::process::Command;
-        // Use 'ip addr' command as a reliable way to get IPs
-        if let Ok(output) = Command::new("ip").args(["addr", "show"]).output() {
-            if let Ok(stdout) = String::from_utf8(output.stdout) {
-                let mut current_iface = String::new();
-                for line in stdout.lines() {
-                    let line = line.trim();
-                    // Line like "2: eth0: <BROADCAST..."
-                    if line
-                        .chars()
-                        .next()
-                        .map(|c| c.is_ascii_digit())
-                        .unwrap_or(false)
-                        && line.contains(": ")
-                    {
-                        if let Some(iface) = line.split(": ").nth(1) {
-                            current_iface = iface.split(':').next().unwrap_or(iface).to_string();
-                        }
-                    }
-                    // Line like "inet 192.168.0.31/24..."
-                    if line.starts_with("inet ") && !current_iface.is_empty() {
-                        if let Some(ip_part) = line.strip_prefix("inet ") {
-                            if let Some(ip) = ip_part.split('/').next() {
-                                if let Some(ip) = ip.split_whitespace().next() {
-                                    ips.insert(current_iface.clone(), ip.to_string());
-                                }
-                            }
-                        }
+    for line in stdout.lines() {
+        let line = line.trim();
+        // Line like "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 ..."
+        if line
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false)
+            && line.contains(": ")
+        {
+            if let Some(iface) = line.split(": ").nth(1) {
+                current_iface = iface.split(':').next().unwrap_or(iface).to_string();
+            }
+        }
+        // Line like "inet 192.168.0.31/24 brd 192.168.0.255 scope global eth0"
+        if line.starts_with("inet ") && !current_iface.is_empty() {
+            if let Some(ip_part) = line.strip_prefix("inet ") {
+                if let Some(ip) = ip_part.split('/').next() {
+                    if let Some(ip) = ip.split_whitespace().next() {
+                        ips.insert(current_iface.clone(), ip.to_string());
                     }
                 }
             }
         }
     }
 
-    #[cfg(not(target_os = "linux"))]
+    ips
+}
+
+/// Get IP addresses for all network interfaces using `ip addr` (Linux) or
+/// platform-specific methods.
+///
+/// Returns an empty map on non-Linux platforms, or when `ip` is unavailable;
+/// callers render those interfaces as N/A.
+fn get_interface_ips() -> HashMap<String, String> {
+    #[cfg(target_os = "linux")]
     {
-        // On Windows/Mac, leave empty for now - use N/A
+        use std::process::Command;
+        // Use 'ip addr' command as a reliable way to get IPs
+        if let Ok(output) = Command::new("ip").args(["addr", "show"]).output() {
+            if let Ok(stdout) = String::from_utf8(output.stdout) {
+                return parse_ip_addr_output(&stdout);
+            }
+        }
     }
 
-    ips
+    HashMap::new()
 }
 
 pub struct SystemMonitor {
@@ -783,6 +795,84 @@ mod tests {
         // On Linux we expect at least loopback or some interface; on other platforms it may be empty.
         // We just ensure it returns a HashMap.
         let _ = ips.len();
+    }
+
+    /// Realistic `ip addr show` output covering loopback, an ethernet interface
+    /// with both IPv4 and IPv6, and a docker bridge.
+    const IP_ADDR_SAMPLE: &str = r#"1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host
+       valid_lft forever preferred_lft forever
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP group default qlen 1000
+    link/ether 96:00:02:d1:1a:8c brd ff:ff:ff:ff:ff:ff
+    inet 192.168.0.31/24 brd 192.168.0.255 scope global eth0
+       valid_lft forever preferred_lft forever
+    inet6 fe80::9400:2ff:fed1:1a8c/64 scope link
+       valid_lft forever preferred_lft forever
+3: docker0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN group default
+    link/ether 02:42:9a:1f:2c:31 brd ff:ff:ff:ff:ff:ff
+    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0
+       valid_lft forever preferred_lft forever
+"#;
+
+    #[test]
+    fn test_parse_ip_addr_output_maps_each_interface() {
+        let ips = parse_ip_addr_output(IP_ADDR_SAMPLE);
+
+        assert_eq!(ips.len(), 3);
+        assert_eq!(ips.get("lo").map(String::as_str), Some("127.0.0.1"));
+        assert_eq!(ips.get("eth0").map(String::as_str), Some("192.168.0.31"));
+        assert_eq!(ips.get("docker0").map(String::as_str), Some("172.17.0.1"));
+    }
+
+    #[test]
+    fn test_parse_ip_addr_output_strips_cidr_suffix() {
+        let ips = parse_ip_addr_output(IP_ADDR_SAMPLE);
+        // The mask must not leak into the address.
+        for ip in ips.values() {
+            assert!(!ip.contains('/'), "address should not carry a mask: {}", ip);
+        }
+    }
+
+    #[test]
+    fn test_parse_ip_addr_output_ignores_ipv6_only_interface() {
+        let sample = r#"4: tun0: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> mtu 1420 qdisc noqueue state UNKNOWN group default
+    link/none
+    inet6 fd00::1/64 scope global
+       valid_lft forever preferred_lft forever
+"#;
+        let ips = parse_ip_addr_output(sample);
+        assert!(
+            ips.is_empty(),
+            "an interface with only inet6 should yield no IPv4 entry"
+        );
+    }
+
+    #[test]
+    fn test_parse_ip_addr_output_empty_input() {
+        assert!(parse_ip_addr_output("").is_empty());
+    }
+
+    #[test]
+    fn test_parse_ip_addr_output_last_address_wins() {
+        let sample = r#"2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP group default qlen 1000
+    inet 10.10.0.9/24 brd 10.10.0.255 scope global eth0
+       valid_lft forever preferred_lft forever
+    inet 10.10.0.99/24 brd 10.10.0.255 scope global secondary eth0
+       valid_lft forever preferred_lft forever
+"#;
+        let ips = parse_ip_addr_output(sample);
+        assert_eq!(ips.get("eth0").map(String::as_str), Some("10.10.0.99"));
+    }
+
+    #[test]
+    fn test_parse_ip_addr_output_ignores_orphan_inet_line() {
+        // An `inet` line before any interface header must be dropped, not
+        // attributed to an empty interface name.
+        let sample = "    inet 192.168.1.1/24 scope global\n";
+        assert!(parse_ip_addr_output(sample).is_empty());
     }
 
     #[tokio::test]

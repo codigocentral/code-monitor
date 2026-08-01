@@ -6,6 +6,10 @@
 
 use anyhow::Result;
 use shared::types::SystemdUnitInfo;
+#[cfg(target_os = "linux")]
+use std::collections::HashMap;
+#[cfg(target_os = "linux")]
+use tracing::warn;
 
 /// Collector for systemd unit status
 pub struct SystemdCollector {
