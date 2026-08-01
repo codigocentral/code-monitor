@@ -24,6 +24,65 @@ pub(super) fn truncate_query(query: &str, max_len: usize) -> String {
     }
 }
 
+/// Describe a database's activity, marking what cannot be known.
+///
+/// "No transactions since the counters reset" is a fact; "abandoned" is a
+/// conclusion the tool has no business drawing. The distinction matters
+/// because acting on it means dropping a database.
+fn format_database_activity(db: &shared::types::PostgresDatabaseInfo) -> (String, Style) {
+    if db.num_backends > 0 {
+        return (
+            format!("{} client(s)", db.num_backends),
+            Style::default().fg(Theme::SUCCESS),
+        );
+    }
+
+    if db.transactions == 0 {
+        return (
+            "no activity".to_string(),
+            Style::default().fg(Theme::WARNING),
+        );
+    }
+
+    (
+        format!("{} txn", format_count(db.transactions)),
+        Style::default().fg(Theme::MUTED),
+    )
+}
+
+/// Abbreviate a transaction count so it fits a narrow column.
+fn format_count(count: u64) -> String {
+    match count {
+        n if n < 1_000 => n.to_string(),
+        n if n < 1_000_000 => format!("{:.1}k", n as f64 / 1_000.0),
+        n if n < 1_000_000_000 => format!("{:.1}M", n as f64 / 1_000_000.0),
+        n => format!("{:.1}B", n as f64 / 1_000_000_000.0),
+    }
+}
+
+/// Describe a MariaDB schema's last write, distinguishing "no writes" from
+/// "the engine will not say".
+///
+/// InnoDB leaves `update_time` NULL for every table, so an absent value proves
+/// nothing at all. Rendering it as "never" would be an invitation to delete a
+/// live database.
+fn format_schema_write_time(schema: &shared::types::MariaDBSchemaInfo) -> (String, Style) {
+    if schema.is_empty() {
+        return ("no tables".to_string(), Style::default().fg(Theme::WARNING));
+    }
+
+    match (schema.write_time_available, schema.last_write_at) {
+        (true, Some(when)) => (
+            when.format("%Y-%m-%d").to_string(),
+            Style::default().fg(Theme::MUTED),
+        ),
+        _ => (
+            "unknown (InnoDB)".to_string(),
+            Style::default().fg(Theme::MUTED),
+        ),
+    }
+}
+
 /// Abbreviate a settings source file to what an operator needs to tell them
 /// apart: the filename.
 fn setting_source_label(setting: &shared::types::PostgresSetting) -> String {
@@ -161,7 +220,18 @@ pub(super) fn draw_postgres_tab<B: tui::backend::Backend>(
                     } else {
                         c.databases
                             .iter()
-                            .map(|d| format!("{} ({})", d.name, format_db_size_mb(d.size_bytes)))
+                            .map(|d| {
+                                // An operator scanning this list is looking for
+                                // what can be removed, so activity belongs next
+                                // to the size.
+                                let (activity, _) = format_database_activity(d);
+                                format!(
+                                    "{} ({}, {})",
+                                    d.name,
+                                    format_db_size_mb(d.size_bytes),
+                                    activity
+                                )
+                            })
                             .collect::<Vec<_>>()
                             .join(", ")
                     };
@@ -365,17 +435,21 @@ pub(super) fn draw_mariadb_tab<B: tui::backend::Backend>(
             let cluster_rows: Vec<Row> = clusters
                 .iter()
                 .map(|c| {
-                    let schema_summary = if c.schemas.is_empty() {
-                        "No schemas".to_string()
+                    let schema_summary = if c.has_no_application_schemas() {
+                        // The alemanha8 case: an instance holding nothing but
+                        // system schemas, still costing its full memory
+                        "No application schemas — instance may be removable".to_string()
                     } else {
                         c.schemas
                             .iter()
                             .map(|s| {
+                                let (write_time, _) = format_schema_write_time(s);
                                 format!(
-                                    "{} ({:.1} MB, {} tables)",
+                                    "{} ({:.1} MB, {} tables, last write {})",
                                     s.name,
                                     s.size_bytes as f64 / 1_048_576.0,
-                                    s.table_count
+                                    s.table_count,
+                                    write_time
                                 )
                             })
                             .collect::<Vec<_>>()
@@ -545,6 +619,84 @@ mod tests {
             source_file: file.map(str::to_string),
             source_line: file.map(|_| 1),
         }
+    }
+
+    use shared::types::{MariaDBSchemaInfo, PostgresDatabaseInfo};
+
+    fn db(name: &str, transactions: u64, backends: u32) -> PostgresDatabaseInfo {
+        PostgresDatabaseInfo {
+            name: name.to_string(),
+            size_bytes: 69_000_000,
+            num_backends: backends,
+            cache_hit_ratio: 99.0,
+            transactions,
+            stats_reset_at: None,
+        }
+    }
+
+    fn schema(tables: u32, last_write: Option<&str>, available: bool) -> MariaDBSchemaInfo {
+        MariaDBSchemaInfo {
+            name: "app".to_string(),
+            size_bytes: 1024,
+            table_count: tables,
+            last_write_at: last_write.map(|_| chrono::Utc::now()),
+            write_time_available: available,
+        }
+    }
+
+    #[test]
+    fn test_activity_marks_a_dormant_database() {
+        let (text, _) = format_database_activity(&db("agathachristie", 0, 0));
+        assert_eq!(text, "no activity");
+    }
+
+    #[test]
+    fn test_activity_reports_connected_clients_first() {
+        // A client connected but not yet committing is still a sign of life
+        let (text, _) = format_database_activity(&db("app", 0, 3));
+        assert!(text.contains("3 client"));
+    }
+
+    #[test]
+    fn test_activity_reports_transaction_counts() {
+        let (text, _) = format_database_activity(&db("app", 45_231, 0));
+        assert!(text.contains("45.2k"));
+    }
+
+    #[test]
+    fn test_activity_styles_differ_between_live_and_dormant() {
+        let live = format_database_activity(&db("app", 1_000, 1));
+        let dormant = format_database_activity(&db("old", 0, 0));
+        assert_ne!(live.1, dormant.1);
+    }
+
+    #[test]
+    fn test_format_count_abbreviates() {
+        assert_eq!(format_count(999), "999");
+        assert_eq!(format_count(45_231), "45.2k");
+        assert_eq!(format_count(2_500_000), "2.5M");
+        assert_eq!(format_count(3_100_000_000), "3.1B");
+    }
+
+    #[test]
+    fn test_innodb_write_time_is_reported_as_unknown() {
+        // Not "never": InnoDB simply does not record it, and treating the
+        // absence as proof of disuse is how a live database gets dropped
+        let (text, _) = format_schema_write_time(&schema(42, None, false));
+        assert!(text.contains("unknown"));
+        assert!(!text.contains("never"));
+    }
+
+    #[test]
+    fn test_empty_schema_is_stated_plainly() {
+        let (text, _) = format_schema_write_time(&schema(0, None, false));
+        assert_eq!(text, "no tables");
+    }
+
+    #[test]
+    fn test_known_write_time_is_shown() {
+        let (text, _) = format_schema_write_time(&schema(5, Some("now"), true));
+        assert!(text.contains(&chrono::Utc::now().format("%Y").to_string()));
     }
 
     #[test]

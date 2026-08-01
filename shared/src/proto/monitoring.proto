@@ -200,6 +200,14 @@ message PostgresDatabaseInfo {
     uint64 size_bytes = 2;
     uint32 num_backends = 3;
     double cache_hit_ratio = 4;
+
+    // Transactions since the statistics were last reset. Unlike a table's
+    // update time — NULL on InnoDB and unavailable here — this is a reliable
+    // proxy for whether anything still uses the database.
+    uint64 transactions = 5;
+    // When the counters were last reset, so "zero transactions" can be read
+    // against how long it has been zero
+    google.protobuf.Timestamp stats_reset_at = 6;
 }
 
 // Connection state count
@@ -256,6 +264,13 @@ message MariaDBSchemaInfo {
     string name = 1;
     uint64 size_bytes = 2;
     uint32 table_count = 3;
+
+    // Latest write across the schema's tables, when the engine reports one.
+    // InnoDB leaves update_time NULL, so its absence proves nothing and must
+    // not be read as "never written".
+    google.protobuf.Timestamp last_write_at = 4;
+    // Whether any table could report a write time at all
+    bool write_time_available = 5;
 }
 
 // MariaDB process info

@@ -562,6 +562,8 @@ impl MonitorService for MonitorServiceImpl {
                     .databases
                     .iter()
                     .map(|d| ProtoPostgresDatabaseInfo {
+                        transactions: d.transactions,
+                        stats_reset_at: d.stats_reset_at.map(datetime_to_timestamp),
                         name: d.name.clone(),
                         size_bytes: d.size_bytes,
                         num_backends: d.num_backends,
@@ -635,6 +637,8 @@ impl MonitorService for MonitorServiceImpl {
                     .schemas
                     .iter()
                     .map(|s| ProtoMariaDBSchemaInfo {
+                        last_write_at: s.last_write_at.map(datetime_to_timestamp),
+                        write_time_available: s.write_time_available,
                         name: s.name.clone(),
                         size_bytes: s.size_bytes,
                         table_count: s.table_count,

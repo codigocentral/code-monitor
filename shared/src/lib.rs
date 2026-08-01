@@ -528,6 +528,28 @@ pub mod types {
         pub size_bytes: u64,
         pub num_backends: u32,
         pub cache_hit_ratio: f64,
+        /// Transactions since the statistics were last reset
+        ///
+        /// The reliable signal of life. A table's update time is NULL on
+        /// InnoDB and unavailable here, so transaction counters are what
+        /// actually distinguish a live database from an abandoned one.
+        #[serde(default)]
+        pub transactions: u64,
+        /// When the counters were last reset, so zero can be read against how
+        /// long it has been zero
+        #[serde(default)]
+        pub stats_reset_at: Option<DateTime<Utc>>,
+    }
+
+    impl PostgresDatabaseInfo {
+        /// Whether nothing has touched this database since the counters reset.
+        ///
+        /// Deliberately not called "abandoned": statistics can be reset, and a
+        /// database quiet since this morning is not the same as one quiet
+        /// since March. The caller decides what the window means.
+        pub fn is_idle(&self) -> bool {
+            self.transactions == 0 && self.num_backends == 0
+        }
     }
 
     /// Connection state count
@@ -566,6 +588,35 @@ pub mod types {
         pub name: String,
         pub size_bytes: u64,
         pub table_count: u32,
+        /// Latest write across the schema's tables, when the engine reports one
+        #[serde(default)]
+        pub last_write_at: Option<DateTime<Utc>>,
+        /// Whether any table could report a write time at all
+        ///
+        /// InnoDB leaves `update_time` NULL, so a missing value proves nothing.
+        /// Treating it as "never written" is how a live database gets deleted.
+        #[serde(default)]
+        pub write_time_available: bool,
+    }
+
+    impl MariaDBSchemaInfo {
+        /// Whether the schema has no tables at all.
+        ///
+        /// The one unambiguous signal available for MariaDB: an empty schema
+        /// is empty regardless of what the engine will admit about writes.
+        pub fn is_empty(&self) -> bool {
+            self.table_count == 0
+        }
+    }
+
+    impl MariaDBClusterInfo {
+        /// Whether this instance carries no application schema at all.
+        ///
+        /// The alemanha8 case: a mysqld holding nothing but system schemas,
+        /// costing 470MB of RAM on the fleet's tightest host.
+        pub fn has_no_application_schemas(&self) -> bool {
+            self.schemas.is_empty()
+        }
     }
 
     /// MariaDB process information
@@ -866,6 +917,8 @@ mod tests {
                 size_bytes: 1_000_000,
                 num_backends: 5,
                 cache_hit_ratio: 99.5,
+                transactions: 0,
+                stats_reset_at: None,
             }],
             connections_total: 10,
             connections_by_state: vec![ConnectionStateCount {
@@ -899,6 +952,8 @@ mod tests {
                 name: "app".to_string(),
                 size_bytes: 1_000_000,
                 table_count: 10,
+                last_write_at: None,
+                write_time_available: false,
             }],
             connections_active: 5,
             connections_total: 10,
@@ -1264,6 +1319,77 @@ mod tests {
             !c.would_exceed_limit_on_swapoff(),
             "unknown swap must not be reported as a predicted OOM"
         );
+    }
+
+    // ─────────────────────────────────────────
+    // Signs of life
+    // ─────────────────────────────────────────
+
+    fn database(name: &str, transactions: u64, backends: u32) -> PostgresDatabaseInfo {
+        PostgresDatabaseInfo {
+            name: name.to_string(),
+            size_bytes: 69_000_000,
+            num_backends: backends,
+            cache_hit_ratio: 99.0,
+            transactions,
+            stats_reset_at: None,
+        }
+    }
+
+    #[test]
+    fn test_database_with_no_activity_is_idle() {
+        // agathachristie_com_br: 69MB, docroot long gone, nothing connecting
+        assert!(database("agathachristie", 0, 0).is_idle());
+    }
+
+    #[test]
+    fn test_database_with_transactions_is_not_idle() {
+        assert!(!database("app", 1_234, 0).is_idle());
+    }
+
+    #[test]
+    fn test_database_with_a_client_is_not_idle() {
+        // A connected client counts even before it commits anything
+        assert!(!database("app", 0, 1).is_idle());
+    }
+
+    #[test]
+    fn test_instance_without_application_schemas() {
+        // The alemanha8 mysqld: nothing but system schemas, 470MB of RAM
+        let cluster = MariaDBClusterInfo {
+            name: "mdb".to_string(),
+            host: "localhost".to_string(),
+            port: 3306,
+            schemas: vec![],
+            connections_active: 0,
+            connections_total: 0,
+            innodb_status: None,
+            processes: vec![],
+            timestamp: Utc::now(),
+        };
+        assert!(cluster.has_no_application_schemas());
+    }
+
+    #[test]
+    fn test_instance_with_schemas_is_in_use() {
+        let cluster = MariaDBClusterInfo {
+            name: "mdb".to_string(),
+            host: "localhost".to_string(),
+            port: 3306,
+            schemas: vec![MariaDBSchemaInfo {
+                name: "app".to_string(),
+                size_bytes: 1024,
+                table_count: 10,
+                last_write_at: None,
+                write_time_available: false,
+            }],
+            connections_active: 0,
+            connections_total: 0,
+            innodb_status: None,
+            processes: vec![],
+            timestamp: Utc::now(),
+        };
+        assert!(!cluster.has_no_application_schemas());
     }
 
     // ─────────────────────────────────────────

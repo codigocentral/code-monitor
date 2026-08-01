@@ -180,12 +180,18 @@ impl PostgresCollector {
         size_bytes: i64,
         num_backends: i32,
         cache_hit_ratio: f64,
+        transactions: i64,
+        stats_reset_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> PostgresDatabaseInfo {
         PostgresDatabaseInfo {
             name,
             size_bytes: size_bytes as u64,
             num_backends: num_backends as u32,
             cache_hit_ratio,
+            // Counters are non-negative; a negative would mean a driver bug,
+            // and reporting it as a huge unsigned number would be worse
+            transactions: transactions.max(0) as u64,
+            stats_reset_at,
         }
     }
 
@@ -199,7 +205,9 @@ impl PostgresCollector {
                         CASE WHEN blks_hit + blks_read > 0
                              THEN blks_hit * 100.0 / (blks_hit + blks_read)
                              ELSE 100.0
-                        END as cache_hit
+                        END as cache_hit,
+                        xact_commit + xact_rollback as transactions,
+                        stats_reset
                  FROM pg_stat_database
                  WHERE datname NOT LIKE 'template%' AND datname <> 'postgres'",
                 &[],
@@ -214,6 +222,9 @@ impl PostgresCollector {
                 row.try_get::<_, i64>(1).unwrap_or(0),
                 row.try_get::<_, i32>(2).unwrap_or(0),
                 row.try_get::<_, f64>(3).unwrap_or(100.0),
+                row.try_get::<_, i64>(4).unwrap_or(0),
+                row.try_get::<_, Option<chrono::DateTime<chrono::Utc>>>(5)
+                    .unwrap_or(None),
             ));
         }
 
@@ -368,7 +379,8 @@ mod tests {
 
     #[test]
     fn test_parse_database_info() {
-        let info = PostgresCollector::parse_database_info("mydb".to_string(), 1_048_576, 5, 99.5);
+        let info =
+            PostgresCollector::parse_database_info("mydb".to_string(), 1_048_576, 5, 99.5, 0, None);
         assert_eq!(info.name, "mydb");
         assert_eq!(info.size_bytes, 1_048_576);
         assert_eq!(info.num_backends, 5);
@@ -378,13 +390,14 @@ mod tests {
     #[test]
     fn test_parse_database_info_negative_size() {
         // Edge case: negative size from DB should be cast to large u64
-        let info = PostgresCollector::parse_database_info("test".to_string(), -1, 0, 100.0);
+        let info =
+            PostgresCollector::parse_database_info("test".to_string(), -1, 0, 100.0, 0, None);
         assert_eq!(info.size_bytes, u64::MAX); // -1 as i64 cast to u64
     }
 
     #[test]
     fn test_parse_database_info_zero() {
-        let info = PostgresCollector::parse_database_info("".to_string(), 0, 0, 0.0);
+        let info = PostgresCollector::parse_database_info("".to_string(), 0, 0, 0.0, 0, None);
         assert_eq!(info.name, "");
         assert_eq!(info.size_bytes, 0);
         assert_eq!(info.num_backends, 0);
@@ -437,6 +450,8 @@ mod tests {
             i64::MAX,
             i32::MAX,
             f64::MAX,
+            0,
+            None,
         );
         assert_eq!(info.name, "maxdb");
         assert_eq!(info.size_bytes, i64::MAX as u64);
@@ -451,6 +466,8 @@ mod tests {
             i64::MIN,
             i32::MIN,
             f64::MIN,
+            0,
+            None,
         );
         assert_eq!(info.name, "mindb");
         // i64::MIN as u64 wraps to 2^63
@@ -460,15 +477,22 @@ mod tests {
 
     #[test]
     fn test_parse_database_info_nan_cache_hit() {
-        let info = PostgresCollector::parse_database_info("nandb".to_string(), 100, 1, f64::NAN);
+        let info =
+            PostgresCollector::parse_database_info("nandb".to_string(), 100, 1, f64::NAN, 0, None);
         assert_eq!(info.name, "nandb");
         assert!(info.cache_hit_ratio.is_nan());
     }
 
     #[test]
     fn test_parse_database_info_infinite_cache_hit() {
-        let info =
-            PostgresCollector::parse_database_info("infdb".to_string(), 100, 1, f64::INFINITY);
+        let info = PostgresCollector::parse_database_info(
+            "infdb".to_string(),
+            100,
+            1,
+            f64::INFINITY,
+            0,
+            None,
+        );
         assert!(info.cache_hit_ratio.is_infinite());
     }
 }

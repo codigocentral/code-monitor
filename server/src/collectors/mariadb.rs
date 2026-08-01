@@ -15,6 +15,22 @@ pub struct MariaDBCollector {
     config: MariaDBClusterConfig,
 }
 
+/// Parse a `DATETIME` as MariaDB renders it, `2026-07-31 13:39:13`.
+///
+/// The server stores these without a zone; they are read as UTC, which is what
+/// the fleet's hosts run on. A value that cannot be parsed is reported as
+/// unknown rather than guessed at.
+fn parse_mysql_datetime(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.starts_with("0000-00-00") {
+        return None;
+    }
+
+    chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S")
+        .ok()
+        .map(|naive| chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(naive, chrono::Utc))
+}
+
 impl MariaDBCollector {
     pub fn new(config: MariaDBClusterConfig) -> Self {
         Self { config }
@@ -72,20 +88,35 @@ impl MariaDBCollector {
         })
     }
 
-    fn parse_schema_info(name: String, size_bytes: u64, table_count: u64) -> MariaDBSchemaInfo {
+    fn parse_schema_info(
+        name: String,
+        size_bytes: u64,
+        table_count: u64,
+        last_write_at: Option<chrono::DateTime<chrono::Utc>>,
+        write_time_available: bool,
+    ) -> MariaDBSchemaInfo {
         MariaDBSchemaInfo {
             name,
             size_bytes,
             table_count: table_count as u32,
+            last_write_at,
+            write_time_available,
         }
     }
 
     async fn collect_schemas(&self, conn: &mut Conn) -> Result<Vec<MariaDBSchemaInfo>> {
-        let rows: Vec<(String, u64, u64)> = conn
+        // update_time is NULL for every InnoDB table, so MAX over it is only
+        // meaningful where some table is on an engine that reports it. The
+        // count of non-null values is carried alongside so a missing time can
+        // be reported as unknown rather than as "never written" — reading it
+        // the other way is how a live database gets deleted.
+        let rows: Vec<(String, u64, u64, Option<String>, u64)> = conn
             .query(
                 "SELECT table_schema,
                         CAST(SUM(data_length + index_length) AS UNSIGNED) AS size_bytes,
-                        COUNT(*) AS table_count
+                        COUNT(*) AS table_count,
+                        CAST(MAX(update_time) AS CHAR) AS last_write,
+                        SUM(update_time IS NOT NULL) AS with_write_time
                  FROM information_schema.tables
                  WHERE table_schema NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
                  GROUP BY table_schema
@@ -96,9 +127,17 @@ impl MariaDBCollector {
 
         Ok(rows
             .into_iter()
-            .map(|(name, size_bytes, table_count)| {
-                Self::parse_schema_info(name, size_bytes, table_count)
-            })
+            .map(
+                |(name, size_bytes, table_count, last_write, with_write_time)| {
+                    Self::parse_schema_info(
+                        name,
+                        size_bytes,
+                        table_count,
+                        last_write.as_deref().and_then(parse_mysql_datetime),
+                        with_write_time > 0,
+                    )
+                },
+            )
             .collect())
     }
 
@@ -253,8 +292,60 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_mysql_datetime() {
+        let parsed = parse_mysql_datetime("2026-07-31 13:39:13").unwrap();
+        assert_eq!(parsed.to_rfc3339(), "2026-07-31T13:39:13+00:00");
+    }
+
+    #[test]
+    fn test_parse_mysql_datetime_rejects_zero_date() {
+        // MariaDB's zero date means "no value", not the year zero
+        assert!(parse_mysql_datetime("0000-00-00 00:00:00").is_none());
+    }
+
+    #[test]
+    fn test_parse_mysql_datetime_rejects_garbage() {
+        assert!(parse_mysql_datetime("").is_none());
+        assert!(parse_mysql_datetime("   ").is_none());
+        assert!(parse_mysql_datetime("not a date").is_none());
+    }
+
+    #[test]
+    fn test_schema_without_write_time_is_not_reported_as_never_written() {
+        // Every InnoDB table leaves update_time NULL. Reading that as "never
+        // written" is how a live database gets deleted.
+        let info = MariaDBCollector::parse_schema_info("app".to_string(), 1024, 5, None, false);
+
+        assert!(info.last_write_at.is_none());
+        assert!(
+            !info.write_time_available,
+            "the absence must be marked as unknown, not as absence of writes"
+        );
+        assert!(!info.is_empty(), "it still has tables");
+    }
+
+    #[test]
+    fn test_schema_with_write_time() {
+        let when = chrono::Utc::now();
+        let info =
+            MariaDBCollector::parse_schema_info("legacy".to_string(), 1024, 3, Some(when), true);
+
+        assert!(info.write_time_available);
+        assert_eq!(info.last_write_at, Some(when));
+    }
+
+    #[test]
+    fn test_empty_schema_is_unambiguous() {
+        // academiadotenista_com_br and mautic on alemanha8: no tables at all,
+        // which needs no engine cooperation to establish
+        let info = MariaDBCollector::parse_schema_info("empty_db".to_string(), 0, 0, None, false);
+        assert!(info.is_empty());
+    }
+
+    #[test]
     fn test_parse_schema_info() {
-        let info = MariaDBCollector::parse_schema_info("app_db".to_string(), 10_485_760, 42);
+        let info =
+            MariaDBCollector::parse_schema_info("app_db".to_string(), 10_485_760, 42, None, false);
         assert_eq!(info.name, "app_db");
         assert_eq!(info.size_bytes, 10_485_760);
         assert_eq!(info.table_count, 42);
@@ -262,7 +353,7 @@ mod tests {
 
     #[test]
     fn test_parse_schema_info_empty() {
-        let info = MariaDBCollector::parse_schema_info("".to_string(), 0, 0);
+        let info = MariaDBCollector::parse_schema_info("".to_string(), 0, 0, None, false);
         assert_eq!(info.name, "");
         assert_eq!(info.size_bytes, 0);
         assert_eq!(info.table_count, 0);
@@ -270,7 +361,13 @@ mod tests {
 
     #[test]
     fn test_parse_schema_info_large_table_count() {
-        let info = MariaDBCollector::parse_schema_info("big_db".to_string(), u64::MAX, u64::MAX);
+        let info = MariaDBCollector::parse_schema_info(
+            "big_db".to_string(),
+            u64::MAX,
+            u64::MAX,
+            None,
+            false,
+        );
         assert_eq!(info.name, "big_db");
         assert_eq!(info.size_bytes, u64::MAX);
         // u64::MAX as u32 wraps around
@@ -322,14 +419,15 @@ mod tests {
 
     #[test]
     fn test_parse_schema_info_max_size() {
-        let info = MariaDBCollector::parse_schema_info("huge".to_string(), u64::MAX, 1);
+        let info =
+            MariaDBCollector::parse_schema_info("huge".to_string(), u64::MAX, 1, None, false);
         assert_eq!(info.size_bytes, u64::MAX);
         assert_eq!(info.table_count, 1);
     }
 
     #[test]
     fn test_parse_schema_info_zero_table_count() {
-        let info = MariaDBCollector::parse_schema_info("empty".to_string(), 0, 0);
+        let info = MariaDBCollector::parse_schema_info("empty".to_string(), 0, 0, None, false);
         assert_eq!(info.size_bytes, 0);
         assert_eq!(info.table_count, 0);
     }

@@ -367,6 +367,8 @@ impl MonitorClient {
                     .databases
                     .into_iter()
                     .map(|d| PostgresDatabaseInfo {
+                        transactions: d.transactions,
+                        stats_reset_at: d.stats_reset_at.map(timestamp_to_datetime),
                         name: d.name,
                         size_bytes: d.size_bytes,
                         num_backends: d.num_backends,
@@ -441,6 +443,8 @@ impl MonitorClient {
                     .schemas
                     .into_iter()
                     .map(|s| MariaDBSchemaInfo {
+                        last_write_at: s.last_write_at.map(timestamp_to_datetime),
+                        write_time_available: s.write_time_available,
                         name: s.name,
                         size_bytes: s.size_bytes,
                         table_count: s.table_count,
