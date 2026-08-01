@@ -17,7 +17,13 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 
 # Async traits and HTTP
 async-trait = "0.1"
-reqwest = { version = "0.11", features = ["json"] }
+# rustls rather than the default native-tls, so nothing pulls in openssl-sys.
+# That keeps the whole workspace free of a system OpenSSL and lets the server
+# link statically against musl.
+reqwest = { version = "0.11", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
 tracing = "0.1"
 
 [dev-dependencies]
