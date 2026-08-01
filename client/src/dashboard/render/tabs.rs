@@ -566,6 +566,125 @@ pub(super) fn draw_services_tab<B: tui::backend::Backend>(
     }
 }
 
+/// Label a bind scope in the terms an operator reasons about.
+fn bind_scope_label(scope: shared::types::BindScope) -> (&'static str, Style) {
+    use shared::types::BindScope;
+
+    match scope {
+        BindScope::AllInterfaces => (
+            "all interfaces",
+            Style::default()
+                .fg(Theme::ERROR)
+                .add_modifier(Modifier::BOLD),
+        ),
+        BindScope::Public => (
+            "public",
+            Style::default()
+                .fg(Theme::ERROR)
+                .add_modifier(Modifier::BOLD),
+        ),
+        BindScope::Private => ("private", Style::default().fg(Theme::SUCCESS)),
+        BindScope::Loopback => ("loopback", Style::default().fg(Theme::SUCCESS)),
+        BindScope::Unknown => ("unknown", Style::default().fg(Theme::MUTED)),
+    }
+}
+
+/// Count the exposed data stores, which is the headline finding.
+fn count_exposed_datastores(ports: &[shared::types::ListeningPortInfo]) -> usize {
+    ports.iter().filter(|p| p.is_exposed_datastore()).count()
+}
+
+/// Render the listening sockets and how widely each is bound.
+fn draw_listening_ports<B: tui::backend::Backend>(
+    f: &mut Frame<B>,
+    ports: &[shared::types::ListeningPortInfo],
+    area: Rect,
+) {
+    let exposed = count_exposed_datastores(ports);
+    let (title, title_style) = if exposed > 0 {
+        (
+            format!(" 󰦯 Listening Ports — {} exposed data store(s) ", exposed),
+            Style::default()
+                .fg(Theme::ERROR)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        (
+            format!(" 󰦯 Listening Ports ({}) ", ports.len()),
+            Style::default()
+                .fg(Theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        )
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(if exposed > 0 {
+            Theme::ERROR
+        } else {
+            Theme::BORDER
+        }))
+        .title(Span::styled(title, title_style));
+
+    let rows: Vec<Row> = ports
+        .iter()
+        .map(|p| {
+            let (scope_text, scope_style) = bind_scope_label(p.bind_scope);
+            let port_style = if p.is_exposed_datastore() {
+                Style::default()
+                    .fg(Theme::ERROR)
+                    .add_modifier(Modifier::BOLD)
+            } else if p.sensitive {
+                Style::default().fg(Theme::WARNING)
+            } else {
+                Style::default().fg(Theme::TEXT)
+            };
+
+            Row::new(vec![
+                Cell::from(Span::styled(p.port.to_string(), port_style)),
+                Cell::from(Span::styled(&p.address, Style::default().fg(Theme::TEXT))),
+                Cell::from(Span::styled(scope_text, scope_style)),
+                Cell::from(Span::styled(&p.protocol, Style::default().fg(Theme::MUTED))),
+                Cell::from(Span::styled(
+                    if p.process_name.is_empty() {
+                        "—".to_string()
+                    } else {
+                        p.process_name.clone()
+                    },
+                    Style::default().fg(Theme::TEXT),
+                )),
+                Cell::from(Span::styled(
+                    p.pid
+                        .map(|p| p.to_string())
+                        .unwrap_or_else(|| "—".to_string()),
+                    Style::default().fg(Theme::MUTED),
+                )),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(rows)
+        .header(
+            Row::new(vec!["Port", "Address", "Scope", "Proto", "Process", "PID"]).style(
+                Style::default()
+                    .fg(Theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        )
+        .block(block)
+        .widths(&[
+            Constraint::Percentage(10),
+            Constraint::Percentage(22),
+            Constraint::Percentage(18),
+            Constraint::Percentage(10),
+            Constraint::Percentage(22),
+            Constraint::Percentage(10),
+        ]);
+
+    f.render_widget(table, area);
+}
+
 pub(super) fn draw_network_tab<B: tui::backend::Backend>(
     f: &mut Frame<B>,
     app: &DashboardApp,
@@ -584,6 +703,23 @@ pub(super) fn draw_network_tab<B: tui::backend::Backend>(
 
     if let Some(server) = app.get_selected_server() {
         if let Some(networks) = app.network_cache.get(&server.id) {
+            // Listening sockets share the tab: an interface is only half the
+            // story, and what is bound to it is the half that matters.
+            let ports = app
+                .ports_cache
+                .get(&server.id)
+                .map(|p| p.as_slice())
+                .unwrap_or(&[]);
+            let (interfaces_area, ports_area) = if ports.is_empty() {
+                (area, None)
+            } else {
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+                    .split(area);
+                (chunks[0], Some(chunks[1]))
+            };
+
             let rows: Vec<Row> = networks
                 .iter()
                 .map(|net| {
@@ -655,7 +791,11 @@ pub(super) fn draw_network_tab<B: tui::backend::Backend>(
                 .highlight_symbol("▶ ");
 
             let mut state = app.table_state.clone();
-            f.render_stateful_widget(table, area, &mut state);
+            f.render_stateful_widget(table, interfaces_area, &mut state);
+
+            if let Some(ports_area) = ports_area {
+                draw_listening_ports(f, ports, ports_area);
+            }
         } else {
             let not_connected = Paragraph::new("󰅛 Not connected. Press Enter to connect.")
                 .style(Style::default().fg(Theme::MUTED))
@@ -1796,6 +1936,107 @@ mod tests {
 
         let buffer = render_app_to_buffer(&app, draw_overview_tab);
         assert!(!buffer_contains(&buffer, "systemd unit"));
+    }
+
+    // ─────────────────────────────────────────
+    // Listening ports
+    // ─────────────────────────────────────────
+
+    fn listening_port(port: u16, address: &str, process: &str) -> ListeningPortInfo {
+        ListeningPortInfo {
+            address: address.to_string(),
+            port,
+            protocol: "tcp".to_string(),
+            bind_scope: BindScope::classify(address),
+            pid: Some(4242),
+            process_name: process.to_string(),
+            sensitive: ListeningPortInfo::is_sensitive_port(port),
+        }
+    }
+
+    #[test]
+    fn test_bind_scope_labels_are_distinct() {
+        let exposed = bind_scope_label(BindScope::AllInterfaces);
+        let private = bind_scope_label(BindScope::Private);
+        let loopback = bind_scope_label(BindScope::Loopback);
+
+        assert_eq!(exposed.0, "all interfaces");
+        assert_ne!(exposed.1, private.1, "exposure must not look like safety");
+        assert_eq!(private.1, loopback.1);
+    }
+
+    #[test]
+    fn test_public_bind_is_styled_like_a_wildcard_bind() {
+        // Both reach beyond the host, so both must read as exposure
+        assert_eq!(
+            bind_scope_label(BindScope::Public).1,
+            bind_scope_label(BindScope::AllInterfaces).1
+        );
+    }
+
+    #[test]
+    fn test_count_exposed_datastores() {
+        let ports = vec![
+            listening_port(5432, "0.0.0.0", "postgres"),
+            listening_port(5432, "127.0.0.1", "postgres"),
+            listening_port(443, "0.0.0.0", "nginx"),
+            listening_port(6379, "0.0.0.0", "redis-server"),
+        ];
+
+        assert_eq!(
+            count_exposed_datastores(&ports),
+            2,
+            "only the exposed data stores count, not every exposed port"
+        );
+    }
+
+    #[test]
+    fn test_network_tab_lists_listening_ports() {
+        let mut app = create_test_app();
+        let server_id = app.servers[0].id;
+        app.network_cache.insert(server_id, vec![]);
+        app.ports_cache.insert(
+            server_id,
+            vec![
+                listening_port(5432, "0.0.0.0", "postgres"),
+                listening_port(53, "127.0.0.1", "systemd-resolve"),
+            ],
+        );
+
+        let buffer = render_app_to_buffer(&app, draw_network_tab);
+        assert!(buffer_contains(&buffer, "5432"));
+        assert!(buffer_contains(&buffer, "all interfaces"));
+        assert!(buffer_contains(&buffer, "postgres"));
+        assert!(buffer_contains(&buffer, "exposed data store"));
+    }
+
+    #[test]
+    fn test_network_tab_without_exposure_has_no_warning() {
+        let mut app = create_test_app();
+        let server_id = app.servers[0].id;
+        app.network_cache.insert(server_id, vec![]);
+        app.ports_cache.insert(
+            server_id,
+            vec![listening_port(5432, "127.0.0.1", "postgres")],
+        );
+
+        let buffer = render_app_to_buffer(&app, draw_network_tab);
+        assert!(!buffer_contains(&buffer, "exposed data store"));
+        assert!(buffer_contains(&buffer, "loopback"));
+    }
+
+    #[test]
+    fn test_network_tab_shows_dash_for_unknown_process() {
+        let mut app = create_test_app();
+        let server_id = app.servers[0].id;
+        let mut port = listening_port(9200, "0.0.0.0", "");
+        port.pid = None;
+        app.network_cache.insert(server_id, vec![]);
+        app.ports_cache.insert(server_id, vec![port]);
+
+        // A port owned by another user is still reported, just unattributed
+        let buffer = render_app_to_buffer(&app, draw_network_tab);
+        assert!(buffer_contains(&buffer, "9200"));
     }
 
     // ─────────────────────────────────────────

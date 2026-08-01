@@ -62,6 +62,8 @@ pub struct DashboardApp {
     systemd_failed_cache: HashMap<uuid::Uuid, Vec<shared::types::SystemdFailedUnit>>,
     /// Cached TLS certificate inventory by server ID
     tls_cache: HashMap<uuid::Uuid, shared::types::TlsSnapshot>,
+    /// Cached listening sockets by server ID
+    ports_cache: HashMap<uuid::Uuid, Vec<shared::types::ListeningPortInfo>>,
     /// CPU history for sparkline (last 60 values)
     cpu_history: HashMap<uuid::Uuid, Vec<u64>>,
     /// Memory history for sparkline (last 60 values)
@@ -225,6 +227,7 @@ impl DashboardApp {
             systemd_cache: HashMap::new(),
             systemd_failed_cache: HashMap::new(),
             tls_cache: HashMap::new(),
+            ports_cache: HashMap::new(),
             selected_item_idx: 0,
             table_state: TableState::default(),
             running: true,

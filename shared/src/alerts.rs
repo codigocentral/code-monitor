@@ -19,6 +19,7 @@ pub enum AlertType {
     ContainerHealthcheckBroken,
     TlsCertificateExpiring,
     TlsRenewalBroken,
+    ExposedDatastore,
 }
 
 impl std::fmt::Display for AlertType {
@@ -34,6 +35,7 @@ impl std::fmt::Display for AlertType {
             AlertType::ContainerHealthcheckBroken => write!(f, "CONTAINER_HEALTHCHECK_BROKEN"),
             AlertType::TlsCertificateExpiring => write!(f, "TLS_CERTIFICATE_EXPIRING"),
             AlertType::TlsRenewalBroken => write!(f, "TLS_RENEWAL_BROKEN"),
+            AlertType::ExposedDatastore => write!(f, "EXPOSED_DATASTORE"),
         }
     }
 }
@@ -605,6 +607,40 @@ impl AlertManager {
         }
     }
 
+    /// Alert on data stores reachable from outside the host.
+    ///
+    /// A database bound to every interface works exactly as well as one bound
+    /// to loopback, which is why nobody notices: the service is fine, the
+    /// exposure is silent. Raised as a warning rather than critical because
+    /// nothing is broken — the risk is what could happen, not what is
+    /// happening.
+    pub fn process_exposed_datastores(
+        &mut self,
+        server_id: &str,
+        server_name: &str,
+        exposed: &[String],
+    ) -> Option<Alert> {
+        if exposed.is_empty() {
+            self.clear(server_id, AlertType::ExposedDatastore);
+            return None;
+        }
+
+        self.raise_once(
+            server_id,
+            server_name,
+            AlertType::ExposedDatastore,
+            AlertSeverity::Warning,
+            format!(
+                "{} data store port(s) reachable beyond this host: {}",
+                exposed.len(),
+                exposed.join(", ")
+            ),
+            Some(exposed.len() as f64),
+            Some(0.0),
+            Duration::hours(6),
+        )
+    }
+
     /// Alert on containers that are restarting repeatedly.
     ///
     /// Judged as a rate, never as a total: a container that has been up for a
@@ -1114,6 +1150,71 @@ mod tests {
     // ─────────────────────────────────────────
     // systemd failed units
     // ─────────────────────────────────────────
+
+    // ─────────────────────────────────────────
+    // Exposed data stores
+    // ─────────────────────────────────────────
+
+    #[test]
+    fn test_exposed_datastore_alerts() {
+        let mut manager = AlertManager::new();
+        let alert = manager
+            .process_exposed_datastores(
+                "srv-1",
+                "alemanha6",
+                &["0.0.0.0:5432 (postgres)".to_string()],
+            )
+            .expect("an exposed database must alert");
+
+        assert_eq!(alert.alert_type, AlertType::ExposedDatastore);
+        assert_eq!(alert.severity, AlertSeverity::Warning);
+        assert!(alert.message.contains("5432"));
+    }
+
+    #[test]
+    fn test_no_alert_without_exposure() {
+        let mut manager = AlertManager::new();
+        assert!(manager
+            .process_exposed_datastores("srv-1", "srv", &[])
+            .is_none());
+    }
+
+    #[test]
+    fn test_exposed_datastore_alert_does_not_repeat() {
+        let mut manager = AlertManager::new();
+        let exposed = vec!["0.0.0.0:5432".to_string()];
+
+        assert!(manager
+            .process_exposed_datastores("srv-1", "srv", &exposed)
+            .is_some());
+        assert!(manager
+            .process_exposed_datastores("srv-1", "srv", &exposed)
+            .is_none());
+    }
+
+    #[test]
+    fn test_exposed_datastore_alert_resolves_after_rebinding() {
+        let mut manager = AlertManager::new();
+        manager.process_exposed_datastores("srv-1", "srv", &["0.0.0.0:5432".to_string()]);
+        manager.process_exposed_datastores("srv-1", "srv", &[]);
+
+        assert!(manager.get_active_alerts()[0].is_resolved());
+    }
+
+    #[test]
+    fn test_exposed_datastore_message_lists_every_port() {
+        let mut manager = AlertManager::new();
+        let alert = manager
+            .process_exposed_datastores(
+                "srv-1",
+                "alemanha6",
+                &["0.0.0.0:5432".to_string(), "0.0.0.0:5433".to_string()],
+            )
+            .unwrap();
+
+        assert!(alert.message.contains("5432"));
+        assert!(alert.message.contains("5433"));
+    }
 
     // ─────────────────────────────────────────
     // TLS certificates

@@ -32,6 +32,7 @@ pub(super) async fn fetch_server_data(app: &mut DashboardApp, server_id: uuid::U
             let mariadb = client.get_mariadb_info().await.ok();
             let systemd = client.get_systemd_info().await.ok();
             let tls = client.get_tls_info().await.ok();
+            let ports = client.get_listening_ports().await.ok();
             Some((
                 system_info,
                 services,
@@ -42,6 +43,7 @@ pub(super) async fn fetch_server_data(app: &mut DashboardApp, server_id: uuid::U
                 mariadb,
                 systemd,
                 tls,
+                ports,
             ))
         } else {
             None
@@ -59,6 +61,7 @@ pub(super) async fn fetch_server_data(app: &mut DashboardApp, server_id: uuid::U
         mariadb,
         systemd,
         tls,
+        ports,
     )) = data
     {
         if let Some(ref info) = system_info {
@@ -210,6 +213,41 @@ pub(super) async fn fetch_server_data(app: &mut DashboardApp, server_id: uuid::U
             }
 
             app.tls_cache.insert(server_id, tls);
+        }
+        if let Some(ports) = ports {
+            let server_name = app
+                .servers
+                .iter()
+                .find(|s| s.id == server_id)
+                .map(|s| s.name.clone())
+                .unwrap_or_else(|| "Unknown".to_string());
+
+            let exposed: Vec<String> = ports
+                .iter()
+                .filter(|p| p.is_exposed_datastore())
+                .map(|p| {
+                    format!(
+                        "{}:{}{}",
+                        p.address,
+                        p.port,
+                        if p.process_name.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" ({})", p.process_name)
+                        }
+                    )
+                })
+                .collect();
+
+            if let Some(alert) = app.alert_manager.process_exposed_datastores(
+                &server_id.to_string(),
+                &server_name,
+                &exposed,
+            ) {
+                let _ = app.notification_dispatcher.dispatch(&alert).await;
+            }
+
+            app.ports_cache.insert(server_id, ports);
         }
     }
     Ok(())

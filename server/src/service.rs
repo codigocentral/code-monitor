@@ -1317,8 +1317,21 @@ mod tests {
         let response = client.get_listening_ports(Request::new(())).await.unwrap();
         let info = response.into_inner();
 
-        assert!(info.ports.is_empty());
         assert!(info.timestamp.is_some());
+
+        // Contents depend on the host, so only invariants are asserted. The
+        // test server itself is listening, so on Linux there is at least one.
+        for port in &info.ports {
+            assert!(port.port > 0, "a listening socket must carry a port");
+            assert!(
+                !port.address.is_empty(),
+                "a listening socket must carry an address"
+            );
+            assert!(
+                shared::proto::monitoring::BindScope::try_from(port.bind_scope).is_ok(),
+                "bind scope must be a value the client can decode"
+            );
+        }
     }
 
     #[tokio::test]

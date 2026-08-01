@@ -580,6 +580,14 @@ pub mod types {
                     }
                 }
                 Ok(std::net::IpAddr::V6(v6)) => {
+                    // A dual-stack socket reports IPv4 peers as ::ffff:a.b.c.d.
+                    // Judging that by IPv6 rules would report a loopback bind
+                    // as public — a false alarm in the one place false alarms
+                    // are most expensive.
+                    if let Some(mapped) = v6.to_ipv4_mapped() {
+                        return Self::classify(&mapped.to_string());
+                    }
+
                     if v6.is_unspecified() {
                         BindScope::AllInterfaces
                     } else if v6.is_loopback() {
@@ -902,6 +910,24 @@ mod tests {
         // A routable address is bound to one interface but still reachable
         assert_eq!(BindScope::classify("203.0.113.7"), BindScope::Public);
         assert_eq!(BindScope::classify("2001:db8::1"), BindScope::Public);
+    }
+
+    #[test]
+    fn test_bind_scope_ipv4_mapped_addresses_follow_ipv4_rules() {
+        // A dual-stack socket bound to loopback reports ::ffff:127.0.0.1.
+        // Reading that as a public IPv6 address is a false alarm.
+        assert_eq!(BindScope::classify("::ffff:127.0.0.1"), BindScope::Loopback);
+        assert_eq!(BindScope::classify("::ffff:10.10.0.9"), BindScope::Private);
+        assert_eq!(
+            BindScope::classify("::ffff:192.168.1.1"),
+            BindScope::Private
+        );
+        assert_eq!(BindScope::classify("::ffff:203.0.113.7"), BindScope::Public);
+    }
+
+    #[test]
+    fn test_bind_scope_mapped_loopback_is_not_exposed() {
+        assert!(!BindScope::classify("::ffff:127.0.0.1").is_exposed());
     }
 
     #[test]
