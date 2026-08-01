@@ -1060,6 +1060,8 @@ mod tests {
                 usage_percent: 50.0,
             }],
             timestamp: Utc::now(),
+            swap: SwapInfo::default(),
+            memory_pressure: None,
         }
     }
 

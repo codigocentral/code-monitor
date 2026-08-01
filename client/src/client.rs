@@ -8,10 +8,11 @@ use shared::proto::monitoring::{
     monitor_service_client::MonitorServiceClient, ProcessesRequest, SystemUpdate, UpdatesRequest,
 };
 use shared::types::{
-    ConnectionStateCount, ContainerInfo, DiskInfo, MariaDBClusterInfo, MariaDBProcessInfo,
-    MariaDBSchemaInfo, NetworkInfo, PostgresClusterInfo, PostgresDatabaseInfo, ProcessInfo,
-    ServiceInfo, ServiceStatus, SystemInfo, SystemdFailedUnit, SystemdSnapshot, SystemdUnitInfo,
-    TopQuery,
+    BindScope, ConnectionStateCount, ContainerHealthDetail, ContainerInfo, DiskInfo,
+    ListeningPortInfo, MariaDBClusterInfo, MariaDBProcessInfo, MariaDBSchemaInfo, MemoryPressure,
+    NetworkInfo, PostgresClusterInfo, PostgresDatabaseInfo, ProcessInfo, ServiceInfo,
+    ServiceStatus, SwapInfo, SystemInfo, SystemdFailedUnit, SystemdSnapshot, SystemdUnitInfo,
+    TlsCertificateInfo, TlsSnapshot, TopQuery,
 };
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
@@ -160,6 +161,28 @@ impl MonitorClient {
                 .timestamp
                 .map(timestamp_to_datetime)
                 .unwrap_or_else(Utc::now),
+            swap: SwapInfo {
+                total_bytes: resp.swap_total_bytes,
+                used_bytes: resp.swap_used_bytes,
+                in_pages_per_sec: resp.swap_in_pages_per_sec,
+                out_pages_per_sec: resp.swap_out_pages_per_sec,
+            },
+            // PSI is only present when the server's kernel reports it; all
+            // three fields travel together.
+            memory_pressure: match (
+                resp.psi_memory_some_avg60,
+                resp.psi_memory_full_avg60,
+                resp.psi_memory_full_total_seconds,
+            ) {
+                (Some(some_avg60), Some(full_avg60), Some(full_total_seconds)) => {
+                    Some(MemoryPressure {
+                        some_avg60,
+                        full_avg60,
+                        full_total_seconds,
+                    })
+                }
+                _ => None,
+            },
         };
 
         Ok(system_info)
@@ -199,6 +222,7 @@ impl MonitorClient {
                     .map(timestamp_to_datetime)
                     .unwrap_or_else(Utc::now),
                 status: proc.status,
+                swap_bytes: proc.swap_bytes,
             })
             .collect();
 
@@ -306,6 +330,15 @@ impl MonitorClient {
                 network_rx_bytes: c.network_rx_bytes,
                 network_tx_bytes: c.network_tx_bytes,
                 networks: c.networks,
+                memory_limit_set: c.memory_limit_set,
+                health_detail: Some(ContainerHealthDetail {
+                    failing_streak: c.failing_streak,
+                    last_output: c.last_health_output,
+                    last_exit_code: c.last_health_exit_code,
+                    last_checked_at: c.last_health_checked_at.map(timestamp_to_datetime),
+                })
+                .filter(|h| h.failing_streak > 0 || !h.last_output.is_empty()),
+                swap_bytes: c.swap_bytes,
             })
             .collect();
 
@@ -470,6 +503,67 @@ impl MonitorClient {
             units,
             failed_units,
         })
+    }
+
+    #[allow(dead_code)] // Consumed once the TLS tab lands
+    pub async fn get_tls_info(&mut self) -> Result<TlsSnapshot> {
+        let mut client = self.grpc_client();
+
+        let request = self.create_request(());
+        let response = client
+            .get_tls_info(request)
+            .await
+            .context("Failed to get TLS info")?;
+
+        let resp = response.into_inner();
+
+        let certificates: Vec<TlsCertificateInfo> = resp
+            .certificates
+            .into_iter()
+            .map(|c| TlsCertificateInfo {
+                name: c.name,
+                domains: c.domains,
+                issuer: c.issuer,
+                not_after: c.not_after.map(timestamp_to_datetime),
+                days_until_expiry: c.days_until_expiry,
+                source: c.source,
+                orphaned: c.orphaned,
+            })
+            .collect();
+
+        Ok(TlsSnapshot {
+            certificates,
+            renewal_unit_name: resp.renewal_unit_name,
+            renewal_unit_status: resp.renewal_unit_status,
+        })
+    }
+
+    #[allow(dead_code)] // Consumed once the network exposure view lands
+    pub async fn get_listening_ports(&mut self) -> Result<Vec<ListeningPortInfo>> {
+        let mut client = self.grpc_client();
+
+        let request = self.create_request(());
+        let response = client
+            .get_listening_ports(request)
+            .await
+            .context("Failed to get listening ports")?;
+
+        let ports: Vec<ListeningPortInfo> = response
+            .into_inner()
+            .ports
+            .into_iter()
+            .map(|p| ListeningPortInfo {
+                address: p.address,
+                port: p.port as u16,
+                protocol: p.protocol,
+                bind_scope: BindScope::from_wire(p.bind_scope),
+                pid: if p.pid > 0 { Some(p.pid) } else { None },
+                process_name: p.process_name,
+                sensitive: p.sensitive,
+            })
+            .collect();
+
+        Ok(ports)
     }
 
     #[allow(dead_code)]

@@ -190,11 +190,17 @@ impl DockerCollector {
                 cpu_percent,
                 memory_usage_bytes: memory_usage,
                 memory_limit_bytes: memory_limit,
-                memory_percent,
+                // Reported unconditionally for now. Once inspect lands, this
+                // must be None whenever no limit is set, since Docker fills the
+                // limit with the host's total RAM in that case.
+                memory_percent: Some(memory_percent),
                 restart_count: 0, // Would need container inspect for this
                 network_rx_bytes: network_rx,
                 network_tx_bytes: network_tx,
                 networks,
+                memory_limit_set: false, // Requires inspect
+                health_detail: None,     // Requires inspect
+                swap_bytes: None,        // Requires per-process cgroup lookup
             });
         }
 

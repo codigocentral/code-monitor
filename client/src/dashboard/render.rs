@@ -6,7 +6,7 @@ use tui::{
     Frame,
 };
 
-use super::{ConnectionStatus, DashboardApp, InputMode};
+use super::{ConnectionStatus, DashboardApp, InputMode, Tab};
 
 mod databases;
 mod popups;
@@ -99,12 +99,18 @@ fn draw_help_bar<B: tui::backend::Backend>(f: &mut Frame<B>, app: &DashboardApp,
         InputMode::ConfirmDisconnect => "Press Y to confirm disconnect, N or Esc to cancel.",
         InputMode::Settings => "Up/Down:Navigate  Enter:Toggle  Esc:Close",
         InputMode::Normal => match app.current_tab {
-            0 => "Enter:Connect  a:Add  t:Token  Del:Remove  A:Alerts  s:Settings  o:Sort  ?:Help  q:Quit",
-            1 => "Up/Down:Navigate  o:Sort  O:Reverse  s:Settings  ?:Help  q:Quit",
-            2 => "Up/Down:Navigate  /:Filter  x:Clear  o:Sort  s:Settings  ?:Help  q:Quit",
-            3 => "Up/Down:Navigate  s:Settings  ?:Help  q:Quit",
-            4 => "Up/Down:Navigate  o:Sort  s:Settings  ?:Help  q:Quit",
-            _ => "",
+            Tab::Overview => {
+                "Enter:Connect  a:Add  t:Token  Del:Remove  A:Alerts  s:Settings  o:Sort  ?:Help  q:Quit"
+            }
+            Tab::Services => "Up/Down:Navigate  o:Sort  O:Reverse  s:Settings  ?:Help  q:Quit",
+            Tab::Processes => {
+                "Up/Down:Navigate  /:Filter  x:Clear  o:Sort  s:Settings  ?:Help  q:Quit"
+            }
+            Tab::Network => "Up/Down:Navigate  s:Settings  ?:Help  q:Quit",
+            Tab::Containers => "Up/Down:Navigate  o:Sort  s:Settings  ?:Help  q:Quit",
+            Tab::Postgres | Tab::MariaDB | Tab::Systemd => {
+                "Up/Down:Navigate  s:Settings  ?:Help  q:Quit"
+            }
         },
     };
 
@@ -117,21 +123,12 @@ fn draw_help_bar<B: tui::backend::Backend>(f: &mut Frame<B>, app: &DashboardApp,
 }
 
 fn draw_header<B: tui::backend::Backend>(f: &mut Frame<B>, app: &DashboardApp, area: Rect) {
-    let tab_titles = [
-        "󰍹 Overview",
-        "󰒍 Services",
-        "󰓁 Processes",
-        "󰛳 Network",
-        "󰡨 Containers",
-        "🐘 Postgres",
-        "🗄️ MariaDB",
-        "⚙️ Systemd",
-    ];
-    let titles: Vec<Spans> = tab_titles
+    let titles: Vec<Spans> = Tab::ALL
         .iter()
         .enumerate()
-        .map(|(i, t)| {
-            let style = if i == app.current_tab {
+        .map(|(i, tab)| {
+            let t = tab.title();
+            let style = if *tab == app.current_tab {
                 Style::default()
                     .fg(Theme::ACCENT)
                     .add_modifier(Modifier::BOLD)
@@ -161,7 +158,7 @@ fn draw_header<B: tui::backend::Backend>(f: &mut Frame<B>, app: &DashboardApp, a
                 ))
                 .title_alignment(Alignment::Left),
         )
-        .select(app.current_tab)
+        .select(app.current_tab.index())
         .style(Style::default().fg(Theme::MUTED))
         .divider(Span::styled(" │ ", Style::default().fg(Theme::BORDER)));
 
@@ -193,15 +190,14 @@ fn draw_main_content<B: tui::backend::Backend>(f: &mut Frame<B>, app: &Dashboard
 
     // Draw content panel based on tab
     match app.current_tab {
-        0 => draw_overview_tab(f, app, chunks[1]),
-        1 => draw_services_tab(f, app, chunks[1]),
-        2 => draw_processes_tab(f, app, chunks[1]),
-        3 => draw_network_tab(f, app, chunks[1]),
-        4 => draw_containers_tab(f, app, chunks[1]),
-        5 => draw_postgres_tab(f, app, chunks[1]),
-        6 => draw_mariadb_tab(f, app, chunks[1]),
-        7 => draw_systemd_tab(f, app, chunks[1]),
-        _ => {}
+        Tab::Overview => draw_overview_tab(f, app, chunks[1]),
+        Tab::Services => draw_services_tab(f, app, chunks[1]),
+        Tab::Processes => draw_processes_tab(f, app, chunks[1]),
+        Tab::Network => draw_network_tab(f, app, chunks[1]),
+        Tab::Containers => draw_containers_tab(f, app, chunks[1]),
+        Tab::Postgres => draw_postgres_tab(f, app, chunks[1]),
+        Tab::MariaDB => draw_mariadb_tab(f, app, chunks[1]),
+        Tab::Systemd => draw_systemd_tab(f, app, chunks[1]),
     }
 }
 

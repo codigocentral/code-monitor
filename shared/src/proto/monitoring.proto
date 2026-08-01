@@ -30,7 +30,13 @@ service MonitorService {
     
     // Get systemd units info
     rpc GetSystemdInfo(google.protobuf.Empty) returns (SystemdInfoResponse);
-    
+
+    // Get TLS certificate inventory and renewal health
+    rpc GetTlsInfo(google.protobuf.Empty) returns (TlsInfoResponse);
+
+    // Get sockets in the listening state and how widely they are bound
+    rpc GetListeningPorts(google.protobuf.Empty) returns (ListeningPortsResponse);
+
     // Stream system updates
     rpc StreamSystemUpdates(UpdatesRequest) returns (stream SystemUpdate);
     
@@ -49,6 +55,21 @@ message SystemInfoResponse {
     uint64 memory_available_bytes = 9;
     repeated DiskInfo disk_info = 10;
     google.protobuf.Timestamp timestamp = 11;
+
+    uint64 swap_total_bytes = 12;
+    uint64 swap_used_bytes = 13;
+
+    // Paging rate, derived from /proc/vmstat. Unlike swap occupancy — which is
+    // a historical high-water mark — this measures pressure happening now.
+    double swap_in_pages_per_sec = 14;
+    double swap_out_pages_per_sec = 15;
+
+    // Memory pressure from /proc/pressure/memory. Absent on kernels built
+    // without CONFIG_PSI.
+    optional double psi_memory_some_avg60 = 16;
+    optional double psi_memory_full_avg60 = 17;
+    // Cumulative stall time, the fairest way to compare two hosts
+    optional double psi_memory_full_total_seconds = 18;
 }
 
 // Disk information
@@ -84,6 +105,9 @@ message ProcessInfo {
     string command_line = 6;
     google.protobuf.Timestamp start_time = 7;
     string status = 8;
+    // VmSwap from /proc/[pid]/status. Absent where the platform cannot report
+    // it, which is not the same as zero.
+    optional uint64 swap_bytes = 9;
 }
 
 // Services response
@@ -137,11 +161,26 @@ message ContainerInfo {
     double cpu_percent = 7;
     uint64 memory_usage_bytes = 8;
     uint64 memory_limit_bytes = 9;
-    double memory_percent = 10;
+    // Absent when the container has no memory limit. Docker reports the host's
+    // total RAM as the limit in that case, which makes an unprotected container
+    // look comfortable; a missing value says so honestly.
+    optional double memory_percent = 10;
     uint32 restart_count = 11;
     uint64 network_rx_bytes = 12;
     uint64 network_tx_bytes = 13;
     repeated string networks = 14;
+
+    // Whether HostConfig.Memory is actually set
+    bool memory_limit_set = 15;
+
+    // Health check detail, needed to tell a sick app from a broken healthcheck
+    uint32 failing_streak = 16;
+    string last_health_output = 17;
+    int32 last_health_exit_code = 18;
+    google.protobuf.Timestamp last_health_checked_at = 19;
+
+    // Swap held by the container's processes. Absent where unavailable.
+    optional uint64 swap_bytes = 20;
 }
 
 // Containers request
@@ -260,6 +299,66 @@ message SystemdInfoResponse {
     repeated SystemdUnitInfo units = 1;
     google.protobuf.Timestamp timestamp = 2;
     repeated SystemdFailedUnit failed_units = 3;
+}
+
+// A TLS certificate found on the host
+message TlsCertificateInfo {
+    // Certificate name, typically the lineage or the probed endpoint
+    string name = 1;
+    // Subject Alternative Names
+    repeated string domains = 2;
+    string issuer = 3;
+    google.protobuf.Timestamp not_after = 4;
+    // Negative once expired
+    int64 days_until_expiry = 5;
+    // Where it came from: a file path, or host:port when probed over TLS
+    string source = 6;
+    // Renewed forever although no active vhost serves it
+    bool orphaned = 7;
+}
+
+// TLS info response
+message TlsInfoResponse {
+    repeated TlsCertificateInfo certificates = 1;
+    google.protobuf.Timestamp timestamp = 2;
+    // State of the renewal unit (certbot.timer/service), when one is present.
+    // A broken renewal is what turns a healthy certificate into an outage.
+    optional string renewal_unit_name = 3;
+    optional string renewal_unit_status = 4;
+}
+
+// How widely a listening socket is bound
+enum BindScope {
+    BIND_SCOPE_UNSPECIFIED = 0;
+    // 127.0.0.0/8 or ::1 — reachable only from the host
+    BIND_SCOPE_LOOPBACK = 1;
+    // RFC1918 or other private address, such as a VPN interface
+    BIND_SCOPE_PRIVATE = 2;
+    // 0.0.0.0 or :: — every interface, including any public one
+    BIND_SCOPE_ALL_INTERFACES = 3;
+    // A specific routable address: bound to one interface, but still reachable
+    // from outside the host
+    BIND_SCOPE_PUBLIC = 4;
+}
+
+// A socket in the listening state
+message ListeningPortInfo {
+    string address = 1;
+    uint32 port = 2;
+    // tcp or tcp6
+    string protocol = 3;
+    BindScope bind_scope = 4;
+    uint32 pid = 5;
+    string process_name = 6;
+    // A well-known database, cache or search port, which has no business
+    // listening on every interface
+    bool sensitive = 7;
+}
+
+// Listening ports response
+message ListeningPortsResponse {
+    repeated ListeningPortInfo ports = 1;
+    google.protobuf.Timestamp timestamp = 2;
 }
 
 // System update (for streaming)

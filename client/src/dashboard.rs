@@ -26,9 +26,11 @@ use shared::alerts::{AlertManager, AlertRule, AlertSeverity, AlertType};
 
 mod data;
 mod render;
+mod tabs;
 
 use data::{connect_to_server, fetch_server_data, handle_command};
 use render::draw_ui;
+pub use tabs::Tab;
 
 /// Application state for the dashboard
 pub struct DashboardApp {
@@ -62,8 +64,8 @@ pub struct DashboardApp {
     cpu_history: HashMap<uuid::Uuid, Vec<u64>>,
     /// Memory history for sparkline (last 60 values)
     mem_history: HashMap<uuid::Uuid, Vec<u64>>,
-    /// Current tab (0: Overview, 1: Services, 2: Processes, 3: Network, 4: Containers, 5: Postgres, 6: MariaDB, 7: Systemd)
-    current_tab: usize,
+    /// Currently selected tab
+    current_tab: Tab,
     /// Selected service/process index
     selected_item_idx: usize,
     /// Table state for services/processes
@@ -214,7 +216,7 @@ impl DashboardApp {
             network_cache: HashMap::new(),
             cpu_history: HashMap::new(),
             mem_history: HashMap::new(),
-            current_tab: 0,
+            current_tab: Tab::default(),
             containers_cache: HashMap::new(),
             postgres_cache: HashMap::new(),
             mariadb_cache: HashMap::new(),
@@ -399,17 +401,16 @@ impl DashboardApp {
     }
 
     fn next_tab(&mut self) {
-        self.current_tab = (self.current_tab + 1) % 8;
-        self.selected_item_idx = 0;
-        self.table_state.select(Some(0));
+        self.select_tab(self.current_tab.next());
     }
 
     fn previous_tab(&mut self) {
-        if self.current_tab == 0 {
-            self.current_tab = 7;
-        } else {
-            self.current_tab -= 1;
-        }
+        self.select_tab(self.current_tab.previous());
+    }
+
+    /// Move to a tab, resetting the item cursor that belonged to the old one.
+    fn select_tab(&mut self, tab: Tab) {
+        self.current_tab = tab;
         self.selected_item_idx = 0;
         self.table_state.select(Some(0));
     }
@@ -437,38 +438,38 @@ impl DashboardApp {
     fn get_current_list_len(&self) -> usize {
         if let Some(server_id) = self.get_selected_server_id() {
             match self.current_tab {
-                1 => self
+                Tab::Overview => 0,
+                Tab::Services => self
                     .services_cache
                     .get(&server_id)
                     .map(|s| s.len())
                     .unwrap_or(0),
-                2 => self.get_filtered_processes().len(),
-                3 => self
+                Tab::Processes => self.get_filtered_processes().len(),
+                Tab::Network => self
                     .network_cache
                     .get(&server_id)
                     .map(|n| n.len())
                     .unwrap_or(0),
-                4 => self
+                Tab::Containers => self
                     .containers_cache
                     .get(&server_id)
                     .map(|c| c.len())
                     .unwrap_or(0),
-                5 => self
+                Tab::Postgres => self
                     .postgres_cache
                     .get(&server_id)
                     .map(|c| c.len())
                     .unwrap_or(0),
-                6 => self
+                Tab::MariaDB => self
                     .mariadb_cache
                     .get(&server_id)
                     .map(|c| c.len())
                     .unwrap_or(0),
-                7 => self
+                Tab::Systemd => self
                     .systemd_cache
                     .get(&server_id)
                     .map(|c| c.len())
                     .unwrap_or(0),
-                _ => 0,
             }
         } else {
             0
@@ -713,7 +714,7 @@ async fn run_app<B: tui::backend::Backend>(
                             }
                             // Sort by column (in Services/Processes tabs)
                             KeyCode::Char('o') => {
-                                if app.current_tab == 1 || app.current_tab == 2 {
+                                if matches!(app.current_tab, Tab::Services | Tab::Processes) {
                                     // Cycle through sort columns
                                     app.sort_column = match app.sort_column {
                                         SortColumn::Name => SortColumn::Cpu,
@@ -726,7 +727,7 @@ async fn run_app<B: tui::backend::Backend>(
                             }
                             // Reverse sort order
                             KeyCode::Char('O') => {
-                                if app.current_tab == 1 || app.current_tab == 2 {
+                                if matches!(app.current_tab, Tab::Services | Tab::Processes) {
                                     app.sort_order = match app.sort_order {
                                         SortOrder::Ascending => SortOrder::Descending,
                                         SortOrder::Descending => SortOrder::Ascending,
@@ -822,49 +823,15 @@ async fn run_app<B: tui::backend::Backend>(
                             KeyCode::BackTab => {
                                 app.previous_tab();
                             }
-                            // Number keys for tabs
-                            KeyCode::Char('1') => {
-                                app.current_tab = 0;
-                                app.selected_item_idx = 0;
-                            }
-                            KeyCode::Char('2') => {
-                                app.current_tab = 1;
-                                app.selected_item_idx = 0;
-                                app.table_state.select(Some(0));
-                            }
-                            KeyCode::Char('3') => {
-                                app.current_tab = 2;
-                                app.selected_item_idx = 0;
-                                app.table_state.select(Some(0));
-                            }
-                            KeyCode::Char('4') => {
-                                app.current_tab = 3;
-                                app.selected_item_idx = 0;
-                                app.table_state.select(Some(0));
-                            }
-                            KeyCode::Char('5') => {
-                                app.current_tab = 4;
-                                app.selected_item_idx = 0;
-                                app.table_state.select(Some(0));
-                            }
-                            KeyCode::Char('6') => {
-                                app.current_tab = 5;
-                                app.selected_item_idx = 0;
-                                app.table_state.select(Some(0));
-                            }
-                            KeyCode::Char('7') => {
-                                app.current_tab = 6;
-                                app.selected_item_idx = 0;
-                                app.table_state.select(Some(0));
-                            }
-                            KeyCode::Char('8') => {
-                                app.current_tab = 7;
-                                app.selected_item_idx = 0;
-                                app.table_state.select(Some(0));
+                            // Number keys select a tab, 1-based
+                            KeyCode::Char(c) if Tab::from_hotkey(c).is_some() => {
+                                if let Some(tab) = Tab::from_hotkey(c) {
+                                    app.select_tab(tab);
+                                }
                             }
                             // Server navigation (j/k or arrows in overview)
                             KeyCode::Char('j') | KeyCode::Down => {
-                                if app.current_tab == 0 {
+                                if app.current_tab == Tab::Overview {
                                     app.next_server();
                                     // Auto-connect to the new selected server
                                     if let Some(server) = app.get_selected_server().cloned() {
@@ -906,7 +873,7 @@ async fn run_app<B: tui::backend::Backend>(
                                 }
                             }
                             KeyCode::Char('k') | KeyCode::Up => {
-                                if app.current_tab == 0 {
+                                if app.current_tab == Tab::Overview {
                                     app.previous_server();
                                     // Auto-connect to the new selected server
                                     if let Some(server) = app.get_selected_server().cloned() {
@@ -1026,7 +993,7 @@ async fn run_app<B: tui::backend::Backend>(
                             }
                             // Filter (in processes tab)
                             KeyCode::Char('/') => {
-                                if app.current_tab == 2 {
+                                if app.current_tab == Tab::Processes {
                                     app.input_mode = InputMode::Command;
                                     app.input_buffer = app.process_filter.clone();
                                     app.status_message =
@@ -1297,7 +1264,7 @@ async fn run_app<B: tui::backend::Backend>(
                                 app.input_buffer.clear();
                                 app.input_mode = InputMode::Normal;
                                 // Check if it's a filter (from / key)
-                                if app.current_tab == 2 && !command.starts_with(':') {
+                                if app.current_tab == Tab::Processes && !command.starts_with(':') {
                                     app.process_filter = command;
                                     app.selected_item_idx = 0;
                                     app.status_message = format!("Filter: {}", app.process_filter);
@@ -1466,7 +1433,7 @@ mod tests {
     fn test_dashboard_app_new() {
         let app = create_test_app();
         assert_eq!(app.servers.len(), 2);
-        assert_eq!(app.current_tab, 0);
+        assert_eq!(app.current_tab, Tab::Overview);
         assert!(app.running);
         assert_eq!(app.update_interval, 5);
         assert_eq!(app.connection_status.len(), 2);
@@ -1499,35 +1466,35 @@ mod tests {
     #[test]
     fn test_next_tab() {
         let mut app = create_test_app();
-        assert_eq!(app.current_tab, 0);
+        assert_eq!(app.current_tab, Tab::Overview);
         app.next_tab();
-        assert_eq!(app.current_tab, 1);
+        assert_eq!(app.current_tab, Tab::Services);
         app.next_tab();
-        assert_eq!(app.current_tab, 2);
+        assert_eq!(app.current_tab, Tab::Processes);
     }
 
     #[test]
     fn test_next_tab_wrap() {
         let mut app = create_test_app();
-        app.current_tab = 7;
+        app.current_tab = Tab::Systemd;
         app.next_tab();
-        assert_eq!(app.current_tab, 0);
+        assert_eq!(app.current_tab, Tab::Overview);
     }
 
     #[test]
     fn test_previous_tab() {
         let mut app = create_test_app();
-        app.current_tab = 1;
+        app.current_tab = Tab::Services;
         app.previous_tab();
-        assert_eq!(app.current_tab, 0);
+        assert_eq!(app.current_tab, Tab::Overview);
     }
 
     #[test]
     fn test_previous_tab_wrap() {
         let mut app = create_test_app();
-        app.current_tab = 0;
+        app.current_tab = Tab::Overview;
         app.previous_tab();
-        assert_eq!(app.current_tab, 7);
+        assert_eq!(app.current_tab, Tab::Systemd);
     }
 
     #[test]
@@ -1622,6 +1589,7 @@ mod tests {
                     command_line: "/usr/sbin/nginx".to_string(),
                     start_time: Utc::now(),
                     status: "Running".to_string(),
+                    swap_bytes: None,
                 },
                 ProcessInfo {
                     pid: 2,
@@ -1632,6 +1600,7 @@ mod tests {
                     command_line: "/usr/bin/postgres".to_string(),
                     start_time: Utc::now(),
                     status: "Running".to_string(),
+                    swap_bytes: None,
                 },
             ],
         );
@@ -1717,6 +1686,7 @@ mod tests {
                 command_line: format!("/usr/bin/process-{}", i),
                 start_time: Utc::now(),
                 status: "Running".to_string(),
+                swap_bytes: None,
             })
             .collect();
 
@@ -1749,7 +1719,7 @@ mod tests {
     #[test]
     fn test_next_item_empty() {
         let mut app = create_test_app();
-        app.current_tab = 1;
+        app.current_tab = Tab::Services;
         app.next_item();
         assert_eq!(app.selected_item_idx, 0);
     }
@@ -1758,7 +1728,7 @@ mod tests {
     fn test_next_item() {
         let mut app = create_test_app();
         let server_id = app.servers[0].id;
-        app.current_tab = 1;
+        app.current_tab = Tab::Services;
         app.services_cache.insert(
             server_id,
             vec![
@@ -1792,7 +1762,7 @@ mod tests {
     fn test_previous_item() {
         let mut app = create_test_app();
         let server_id = app.servers[0].id;
-        app.current_tab = 1;
+        app.current_tab = Tab::Services;
         app.services_cache.insert(
             server_id,
             vec![
@@ -1826,7 +1796,7 @@ mod tests {
     #[test]
     fn test_previous_item_empty() {
         let mut app = create_test_app();
-        app.current_tab = 1;
+        app.current_tab = Tab::Services;
         app.previous_item();
         assert_eq!(app.selected_item_idx, 0);
     }
@@ -1841,7 +1811,7 @@ mod tests {
     fn test_get_current_list_len_services() {
         let mut app = create_test_app();
         let server_id = app.servers[0].id;
-        app.current_tab = 1;
+        app.current_tab = Tab::Services;
         app.services_cache.insert(
             server_id,
             vec![
@@ -1881,7 +1851,7 @@ mod tests {
     fn test_get_current_list_len_processes() {
         let mut app = create_test_app();
         let server_id = app.servers[0].id;
-        app.current_tab = 2;
+        app.current_tab = Tab::Processes;
         app.processes_cache.insert(
             server_id,
             vec![
@@ -1894,6 +1864,7 @@ mod tests {
                     command_line: "".to_string(),
                     start_time: Utc::now(),
                     status: "".to_string(),
+                    swap_bytes: None,
                 },
                 ProcessInfo {
                     pid: 2,
@@ -1904,6 +1875,7 @@ mod tests {
                     command_line: "".to_string(),
                     start_time: Utc::now(),
                     status: "".to_string(),
+                    swap_bytes: None,
                 },
             ],
         );
@@ -1914,7 +1886,7 @@ mod tests {
     fn test_get_current_list_len_network() {
         let mut app = create_test_app();
         let server_id = app.servers[0].id;
-        app.current_tab = 3;
+        app.current_tab = Tab::Network;
         app.network_cache.insert(
             server_id,
             vec![
@@ -1957,7 +1929,7 @@ mod tests {
     fn test_get_current_list_len_containers() {
         let mut app = create_test_app();
         let server_id = app.servers[0].id;
-        app.current_tab = 4;
+        app.current_tab = Tab::Containers;
         app.containers_cache.insert(
             server_id,
             vec![ContainerInfo {
@@ -1970,11 +1942,14 @@ mod tests {
                 cpu_percent: 0.0,
                 memory_usage_bytes: 0,
                 memory_limit_bytes: 0,
-                memory_percent: 0.0,
+                memory_percent: Some(0.0),
                 restart_count: 0,
                 network_rx_bytes: 0,
                 network_tx_bytes: 0,
                 networks: vec![],
+                memory_limit_set: false,
+                health_detail: None,
+                swap_bytes: None,
             }],
         );
         assert_eq!(app.get_current_list_len(), 1);
@@ -1984,7 +1959,7 @@ mod tests {
     fn test_get_current_list_len_postgres() {
         let mut app = create_test_app();
         let server_id = app.servers[0].id;
-        app.current_tab = 5;
+        app.current_tab = Tab::Postgres;
         app.postgres_cache.insert(
             server_id,
             vec![PostgresClusterInfo {
@@ -2006,7 +1981,7 @@ mod tests {
     fn test_get_current_list_len_mariadb() {
         let mut app = create_test_app();
         let server_id = app.servers[0].id;
-        app.current_tab = 6;
+        app.current_tab = Tab::MariaDB;
         app.mariadb_cache.insert(
             server_id,
             vec![MariaDBClusterInfo {
@@ -2028,7 +2003,7 @@ mod tests {
     fn test_get_current_list_len_systemd() {
         let mut app = create_test_app();
         let server_id = app.servers[0].id;
-        app.current_tab = 7;
+        app.current_tab = Tab::Systemd;
         app.systemd_cache.insert(
             server_id,
             vec![
@@ -2057,7 +2032,7 @@ mod tests {
     fn test_get_current_list_len_no_server() {
         let mut app = create_test_app();
         app.servers.clear();
-        app.current_tab = 1;
+        app.current_tab = Tab::Services;
         assert_eq!(app.get_current_list_len(), 0);
     }
 
@@ -2082,6 +2057,7 @@ mod tests {
                 command_line: "".to_string(),
                 start_time: Utc::now(),
                 status: "".to_string(),
+                swap_bytes: None,
             }],
         );
         app.selected_item_idx = 0;

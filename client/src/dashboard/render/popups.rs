@@ -6,7 +6,7 @@ use tui::{
     Frame,
 };
 
-use crate::dashboard::{AddServerStep, DashboardApp, InputMode};
+use crate::dashboard::{AddServerStep, DashboardApp, InputMode, Tab};
 
 use super::Theme;
 
@@ -31,7 +31,7 @@ pub(super) fn draw_command_input<B: tui::backend::Backend>(
         }
         InputMode::EditToken => (" [Key] Enter Access Token ".to_string(), "> ", true),
         InputMode::Command => {
-            if app.current_tab == 2 && !app.input_buffer.starts_with(':') {
+            if app.current_tab == Tab::Processes && !app.input_buffer.starts_with(':') {
                 (" [?] Filter Processes ".to_string(), "? ", true)
             } else {
                 (" [>] Command ".to_string(), ": ", true)
@@ -601,7 +601,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut app = create_test_app();
         app.input_mode = InputMode::Command;
-        app.current_tab = 2;
+        app.current_tab = Tab::Processes;
         app.input_buffer = "nginx".to_string();
 
         terminal
@@ -619,7 +619,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut app = create_test_app();
         app.input_mode = InputMode::Command;
-        app.current_tab = 0;
+        app.current_tab = Tab::Overview;
         app.input_buffer = ":reload".to_string();
 
         terminal

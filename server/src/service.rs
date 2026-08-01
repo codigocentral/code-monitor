@@ -8,6 +8,7 @@ use shared::proto::monitoring::{
     monitor_service_server::MonitorService, system_update::UpdateType,
     ConnectionStateCount as ProtoConnectionStateCount, ContainerInfo as ProtoContainerInfo,
     ContainersRequest, ContainersResponse, DiskInfo as ProtoDiskInfo,
+    ListeningPortInfo as ProtoListeningPortInfo, ListeningPortsResponse,
     MariaDbClusterInfo as ProtoMariaDBClusterInfo, MariaDbInfoResponse,
     MariaDbProcessInfo as ProtoMariaDBProcessInfo, MariaDbSchemaInfo as ProtoMariaDBSchemaInfo,
     NetworkInfo as ProtoNetworkInfo, NetworkInfoResponse,
@@ -16,7 +17,8 @@ use shared::proto::monitoring::{
     ProcessInfo as ProtoProcessInfo, ProcessesRequest, ProcessesResponse,
     ServiceInfo as ProtoServiceInfo, ServicesResponse, SystemInfoResponse, SystemUpdate,
     SystemdFailedUnit as ProtoSystemdFailedUnit, SystemdInfoResponse,
-    SystemdUnitInfo as ProtoSystemdUnitInfo, TopQuery as ProtoTopQuery, UpdatesRequest,
+    SystemdUnitInfo as ProtoSystemdUnitInfo, TlsCertificateInfo as ProtoTlsCertificateInfo,
+    TlsInfoResponse, TopQuery as ProtoTopQuery, UpdatesRequest,
 };
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -204,6 +206,16 @@ impl MonitorService for MonitorServiceImpl {
             memory_available_bytes: system_info.memory_available_bytes,
             disk_info,
             timestamp: Some(datetime_to_timestamp(system_info.timestamp)),
+            swap_total_bytes: system_info.swap.total_bytes,
+            swap_used_bytes: system_info.swap.used_bytes,
+            swap_in_pages_per_sec: system_info.swap.in_pages_per_sec,
+            swap_out_pages_per_sec: system_info.swap.out_pages_per_sec,
+            psi_memory_some_avg60: system_info.memory_pressure.as_ref().map(|p| p.some_avg60),
+            psi_memory_full_avg60: system_info.memory_pressure.as_ref().map(|p| p.full_avg60),
+            psi_memory_full_total_seconds: system_info
+                .memory_pressure
+                .as_ref()
+                .map(|p| p.full_total_seconds),
         };
 
         Ok(Response::new(response))
@@ -249,6 +261,7 @@ impl MonitorService for MonitorServiceImpl {
                 command_line: proc.command_line.clone(),
                 start_time: Some(datetime_to_timestamp(proc.start_time)),
                 status: proc.status.clone(),
+                swap_bytes: proc.swap_bytes,
             })
             .collect();
 
@@ -414,6 +427,22 @@ impl MonitorService for MonitorServiceImpl {
                                 memory_available_bytes: system_info.memory_available_bytes,
                                 disk_info,
                                 timestamp: Some(datetime_to_timestamp(system_info.timestamp)),
+                                swap_total_bytes: system_info.swap.total_bytes,
+                                swap_used_bytes: system_info.swap.used_bytes,
+                                swap_in_pages_per_sec: system_info.swap.in_pages_per_sec,
+                                swap_out_pages_per_sec: system_info.swap.out_pages_per_sec,
+                                psi_memory_some_avg60: system_info
+                                    .memory_pressure
+                                    .as_ref()
+                                    .map(|p| p.some_avg60),
+                                psi_memory_full_avg60: system_info
+                                    .memory_pressure
+                                    .as_ref()
+                                    .map(|p| p.full_avg60),
+                                psi_memory_full_total_seconds: system_info
+                                    .memory_pressure
+                                    .as_ref()
+                                    .map(|p| p.full_total_seconds),
                             })),
                             timestamp: Some(now_timestamp()),
                         };
@@ -477,6 +506,28 @@ impl MonitorService for MonitorServiceImpl {
                 network_rx_bytes: c.network_rx_bytes,
                 network_tx_bytes: c.network_tx_bytes,
                 networks: c.networks.clone(),
+                memory_limit_set: c.memory_limit_set,
+                failing_streak: c
+                    .health_detail
+                    .as_ref()
+                    .map(|h| h.failing_streak)
+                    .unwrap_or(0),
+                last_health_output: c
+                    .health_detail
+                    .as_ref()
+                    .map(|h| h.last_output.clone())
+                    .unwrap_or_default(),
+                last_health_exit_code: c
+                    .health_detail
+                    .as_ref()
+                    .map(|h| h.last_exit_code)
+                    .unwrap_or(0),
+                last_health_checked_at: c
+                    .health_detail
+                    .as_ref()
+                    .and_then(|h| h.last_checked_at)
+                    .map(datetime_to_timestamp),
+                swap_bytes: c.swap_bytes,
             })
             .collect();
 
@@ -652,6 +703,73 @@ impl MonitorService for MonitorServiceImpl {
         };
 
         Ok(Response::new(response))
+    }
+
+    async fn get_tls_info(
+        &self,
+        request: Request<()>,
+    ) -> Result<Response<TlsInfoResponse>, Status> {
+        self.validate_request(&request)?;
+
+        info!("Handling GetTlsInfo request");
+
+        let snapshot = self.monitor.get_tls_info().await.map_err(|e| {
+            error!("Failed to get TLS info: {}", e);
+            Status::internal("Failed to get TLS info")
+        })?;
+
+        let certificates: Vec<ProtoTlsCertificateInfo> = snapshot
+            .certificates
+            .iter()
+            .map(|c| ProtoTlsCertificateInfo {
+                name: c.name.clone(),
+                domains: c.domains.clone(),
+                issuer: c.issuer.clone(),
+                not_after: c.not_after.map(datetime_to_timestamp),
+                days_until_expiry: c.days_until_expiry,
+                source: c.source.clone(),
+                orphaned: c.orphaned,
+            })
+            .collect();
+
+        Ok(Response::new(TlsInfoResponse {
+            certificates,
+            timestamp: Some(now_timestamp()),
+            renewal_unit_name: snapshot.renewal_unit_name,
+            renewal_unit_status: snapshot.renewal_unit_status,
+        }))
+    }
+
+    async fn get_listening_ports(
+        &self,
+        request: Request<()>,
+    ) -> Result<Response<ListeningPortsResponse>, Status> {
+        self.validate_request(&request)?;
+
+        info!("Handling GetListeningPorts request");
+
+        let ports = self.monitor.get_listening_ports().await.map_err(|e| {
+            error!("Failed to get listening ports: {}", e);
+            Status::internal("Failed to get listening ports")
+        })?;
+
+        let ports: Vec<ProtoListeningPortInfo> = ports
+            .iter()
+            .map(|p| ProtoListeningPortInfo {
+                address: p.address.clone(),
+                port: p.port as u32,
+                protocol: p.protocol.clone(),
+                bind_scope: p.bind_scope.to_wire(),
+                pid: p.pid.unwrap_or(0),
+                process_name: p.process_name.clone(),
+                sensitive: p.sensitive,
+            })
+            .collect();
+
+        Ok(Response::new(ListeningPortsResponse {
+            ports,
+            timestamp: Some(now_timestamp()),
+        }))
     }
 }
 
@@ -1132,6 +1250,112 @@ mod tests {
             total,
             names.len(),
             "failed units must not be reported twice"
+        );
+    }
+
+    /// Start a server with authentication disabled and return a connected client.
+    async fn spawn_test_service(
+    ) -> shared::proto::monitoring::monitor_service_client::MonitorServiceClient<
+        tonic::transport::Channel,
+    > {
+        use shared::proto::monitoring::{
+            monitor_service_client::MonitorServiceClient,
+            monitor_service_server::MonitorServiceServer,
+        };
+
+        let monitor = SystemMonitor::new(1, vec![], vec![], vec![])
+            .await
+            .expect("Failed to create monitor");
+
+        let config = Config {
+            enable_authentication: false,
+            ..Default::default()
+        };
+        let service = MonitorServiceImpl::from_arc(Arc::new(monitor), config)
+            .expect("Failed to create service");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("Failed to bind");
+        let port = listener.local_addr().unwrap().port();
+
+        let server = Server::builder().add_service(MonitorServiceServer::new(service));
+        tokio::spawn(async move {
+            let _ = server
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await;
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{}", port))
+            .unwrap()
+            .connect()
+            .await
+            .expect("Failed to connect");
+
+        MonitorServiceClient::new(channel)
+    }
+
+    #[tokio::test]
+    async fn test_integration_get_tls_info() {
+        let mut client = spawn_test_service().await;
+
+        let response = client.get_tls_info(Request::new(())).await.unwrap();
+        let info = response.into_inner();
+
+        // The collector is a passthrough for now, so the contract is what is
+        // under test: the call succeeds and carries a timestamp.
+        assert!(info.certificates.is_empty());
+        assert!(info.timestamp.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_integration_get_listening_ports() {
+        let mut client = spawn_test_service().await;
+
+        let response = client.get_listening_ports(Request::new(())).await.unwrap();
+        let info = response.into_inner();
+
+        assert!(info.ports.is_empty());
+        assert!(info.timestamp.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_new_rpcs_require_authentication() {
+        // A new RPC that forgets validate_request would expose the whole
+        // inventory of a host to anyone who can reach the port.
+        let monitor = SystemMonitor::new(1, vec![], vec![], vec![])
+            .await
+            .expect("Failed to create monitor");
+        let config = Config {
+            enable_authentication: true,
+            ..Default::default()
+        };
+        let service = MonitorServiceImpl::from_arc(Arc::new(monitor), config)
+            .expect("Failed to create service");
+
+        let tls = service.get_tls_info(Request::new(())).await;
+        assert_eq!(tls.unwrap_err().code(), tonic::Code::Unauthenticated);
+
+        let ports = service.get_listening_ports(Request::new(())).await;
+        assert_eq!(ports.unwrap_err().code(), tonic::Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn test_system_info_carries_swap_and_pressure_fields() {
+        let mut client = spawn_test_service().await;
+
+        let response = client.get_system_info(Request::new(())).await.unwrap();
+        let info = response.into_inner();
+
+        // Rates are not collected yet, but the fields must travel so the client
+        // never has to guess whether a zero means idle or unimplemented.
+        assert_eq!(info.swap_in_pages_per_sec, 0.0);
+        assert_eq!(info.swap_out_pages_per_sec, 0.0);
+        assert!(
+            info.swap_used_bytes <= info.swap_total_bytes,
+            "used swap cannot exceed total swap"
         );
     }
 

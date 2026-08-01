@@ -14,8 +14,10 @@ use tracing::{error, info};
 
 use crate::collectors::docker::DockerCollector;
 use crate::collectors::mariadb::MariaDBCollector;
+use crate::collectors::net_ports::NetPortsCollector;
 use crate::collectors::postgres::PostgresCollector;
 use crate::collectors::systemd::SystemdCollector;
+use crate::collectors::tls::TlsCollector;
 use crate::config::{MariaDBClusterConfig, PostgresClusterConfig};
 
 /// Parse the output of `ip addr show` into a map of interface name to IPv4 address.
@@ -88,6 +90,8 @@ pub struct SystemMonitor {
     postgres_collectors: Vec<PostgresCollector>,
     mariadb_collectors: Vec<MariaDBCollector>,
     systemd_collector: SystemdCollector,
+    tls_collector: TlsCollector,
+    net_ports_collector: NetPortsCollector,
 }
 
 impl SystemMonitor {
@@ -137,6 +141,8 @@ impl SystemMonitor {
             postgres_collectors,
             mariadb_collectors,
             systemd_collector,
+            tls_collector: TlsCollector::default(),
+            net_ports_collector: NetPortsCollector::default(),
         };
 
         info!(
@@ -256,6 +262,15 @@ impl SystemMonitor {
                 .last_update
                 .read()
                 .map_err(|e| anyhow::anyhow!("Failed to lock last_update: {}", e))?,
+            // Occupancy is available from sysinfo; the paging rates and PSI are
+            // not collected yet and stay at their neutral values.
+            swap: SwapInfo {
+                total_bytes: sys.total_swap(),
+                used_bytes: sys.used_swap(),
+                in_pages_per_sec: 0.0,
+                out_pages_per_sec: 0.0,
+            },
+            memory_pressure: None,
         };
 
         Ok(system_info)
@@ -286,6 +301,8 @@ impl SystemMonitor {
                     command_line: process.cmd().join(" "),
                     start_time: Utc::now() - chrono::Duration::seconds(process.run_time() as i64),
                     status: format!("{:?}", process.status()),
+                    // VmSwap is not collected yet; None means unknown, not zero
+                    swap_bytes: None,
                 }
             })
             .collect();
@@ -426,6 +443,14 @@ impl SystemMonitor {
     /// precisely the ones nobody configured.
     pub async fn get_systemd_failed_units(&self) -> Result<Vec<shared::types::SystemdFailedUnit>> {
         self.systemd_collector.collect_failed().await
+    }
+
+    pub async fn get_tls_info(&self) -> Result<shared::types::TlsSnapshot> {
+        self.tls_collector.collect().await
+    }
+
+    pub async fn get_listening_ports(&self) -> Result<Vec<shared::types::ListeningPortInfo>> {
+        self.net_ports_collector.collect().await
     }
 
     pub fn get_network_info(&self) -> Result<Vec<NetworkInfo>> {
@@ -1056,6 +1081,8 @@ mod tests {
             postgres_collectors: vec![],
             mariadb_collectors: vec![],
             systemd_collector: SystemdCollector::new(Vec::new()),
+            tls_collector: TlsCollector::default(),
+            net_ports_collector: NetPortsCollector::default(),
         }
     }
 
@@ -1154,6 +1181,8 @@ mod tests {
             postgres_collectors: vec![PostgresCollector::new(pg_config)],
             mariadb_collectors: vec![],
             systemd_collector: SystemdCollector::new(Vec::new()),
+            tls_collector: TlsCollector::default(),
+            net_ports_collector: NetPortsCollector::default(),
         };
 
         let result =
@@ -1186,6 +1215,8 @@ mod tests {
             postgres_collectors: vec![],
             mariadb_collectors: vec![MariaDBCollector::new(maria_config)],
             systemd_collector: SystemdCollector::new(Vec::new()),
+            tls_collector: TlsCollector::default(),
+            net_ports_collector: NetPortsCollector::default(),
         };
 
         let result =

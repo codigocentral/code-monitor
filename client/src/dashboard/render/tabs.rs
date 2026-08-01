@@ -11,6 +11,19 @@ use crate::dashboard::DashboardApp;
 
 use super::{format_bytes, format_uptime, Theme};
 
+/// Format a container's memory usage against its limit.
+///
+/// A container with no limit has no meaningful percentage: Docker reports the
+/// host's total RAM as the limit, so the arithmetic yields a reassuring number
+/// for precisely the container nobody is protecting. Saying "no limit" is the
+/// honest answer.
+fn format_container_memory_percent(percent: Option<f64>) -> String {
+    match percent {
+        Some(p) => format!("{:>5.1}%", p),
+        None => "no limit".to_string(),
+    }
+}
+
 /// Name the failed units on a single line for the overview header.
 ///
 /// Capped so a host with many failures cannot push the rest of the header off
@@ -654,13 +667,14 @@ pub(super) fn draw_containers_tab<B: tui::backend::Backend>(
                             Style::default().fg(Theme::TEXT),
                         )),
                         Cell::from(Span::styled(
-                            format!("{:>5.1}%", c.memory_percent),
-                            if c.memory_percent > 80.0 {
-                                Style::default().fg(Theme::ERROR)
-                            } else if c.memory_percent > 50.0 {
-                                Style::default().fg(Theme::WARNING)
-                            } else {
-                                Style::default().fg(Theme::TEXT)
+                            format_container_memory_percent(c.memory_percent),
+                            match c.memory_percent {
+                                // No limit is not a comfortable 8% — it is a
+                                // container that can take the host down.
+                                None => Style::default().fg(Theme::WARNING),
+                                Some(p) if p > 80.0 => Style::default().fg(Theme::ERROR),
+                                Some(p) if p > 50.0 => Style::default().fg(Theme::WARNING),
+                                Some(_) => Style::default().fg(Theme::TEXT),
                             },
                         )),
                     ])
@@ -957,6 +971,8 @@ mod tests {
                 },
             ],
             timestamp: Utc::now(),
+            swap: SwapInfo::default(),
+            memory_pressure: None,
         }
     }
 
@@ -1231,11 +1247,14 @@ mod tests {
                     cpu_percent: 10.5,
                     memory_usage_bytes: 100_000_000,
                     memory_limit_bytes: 500_000_000,
-                    memory_percent: 20.0,
+                    memory_percent: Some(20.0),
                     restart_count: 0,
                     network_rx_bytes: 1_000_000,
                     network_tx_bytes: 500_000,
                     networks: vec!["bridge".to_string()],
+                    memory_limit_set: false,
+                    health_detail: None,
+                    swap_bytes: None,
                 },
                 ContainerInfo {
                     id: "def456".to_string(),
@@ -1247,11 +1266,14 @@ mod tests {
                     cpu_percent: 75.0,
                     memory_usage_bytes: 200_000_000,
                     memory_limit_bytes: 1_000_000_000,
-                    memory_percent: 85.0,
+                    memory_percent: Some(85.0),
                     restart_count: 1,
                     network_rx_bytes: 0,
                     network_tx_bytes: 0,
                     networks: vec![],
+                    memory_limit_set: false,
+                    health_detail: None,
+                    swap_bytes: None,
                 },
                 ContainerInfo {
                     id: "ghi789".to_string(),
@@ -1263,11 +1285,14 @@ mod tests {
                     cpu_percent: 0.0,
                     memory_usage_bytes: 0,
                     memory_limit_bytes: 100_000_000,
-                    memory_percent: 0.0,
+                    memory_percent: Some(0.0),
                     restart_count: 3,
                     network_rx_bytes: 0,
                     network_tx_bytes: 0,
                     networks: vec![],
+                    memory_limit_set: false,
+                    health_detail: None,
+                    swap_bytes: None,
                 },
             ],
         );
@@ -1295,11 +1320,14 @@ mod tests {
                 cpu_percent: 85.0,
                 memory_usage_bytes: 10_000_000,
                 memory_limit_bytes: 100_000_000,
-                memory_percent: 60.0,
+                memory_percent: Some(60.0),
                 restart_count: 0,
                 network_rx_bytes: 0,
                 network_tx_bytes: 0,
                 networks: vec![],
+                memory_limit_set: false,
+                health_detail: None,
+                swap_bytes: None,
             }],
         );
         let _buffer = render_app_to_buffer(&app, draw_containers_tab);
@@ -1482,6 +1510,21 @@ mod tests {
 
         let buffer = render_app_to_buffer(&app, draw_overview_tab);
         assert!(!buffer_contains(&buffer, "systemd unit"));
+    }
+
+    #[test]
+    fn test_format_container_memory_percent_with_limit() {
+        assert_eq!(format_container_memory_percent(Some(8.16)), "  8.2%");
+        assert_eq!(format_container_memory_percent(Some(100.0)), "100.0%");
+    }
+
+    #[test]
+    fn test_format_container_memory_percent_without_limit() {
+        // Never render a percentage against the host's RAM: it would read as a
+        // comfortable 8% for a container that can take the whole host down.
+        let rendered = format_container_memory_percent(None);
+        assert_eq!(rendered, "no limit");
+        assert!(!rendered.contains('%'));
     }
 
     #[test]

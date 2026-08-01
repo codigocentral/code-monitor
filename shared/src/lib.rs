@@ -12,6 +12,84 @@ pub mod proto {
 pub mod alerts;
 pub mod notifications;
 
+/// Conversions between the wire types and the domain types
+///
+/// Kept here so server and client cannot drift apart in how they map an enum.
+pub mod convert {
+    use crate::proto::monitoring::BindScope as ProtoBindScope;
+    use crate::types::BindScope;
+
+    impl From<BindScope> for ProtoBindScope {
+        fn from(scope: BindScope) -> Self {
+            match scope {
+                BindScope::Loopback => ProtoBindScope::Loopback,
+                BindScope::Private => ProtoBindScope::Private,
+                BindScope::AllInterfaces => ProtoBindScope::AllInterfaces,
+                BindScope::Public => ProtoBindScope::Public,
+                BindScope::Unknown => ProtoBindScope::Unspecified,
+            }
+        }
+    }
+
+    impl From<ProtoBindScope> for BindScope {
+        fn from(scope: ProtoBindScope) -> Self {
+            match scope {
+                ProtoBindScope::Loopback => BindScope::Loopback,
+                ProtoBindScope::Private => BindScope::Private,
+                ProtoBindScope::AllInterfaces => BindScope::AllInterfaces,
+                ProtoBindScope::Public => BindScope::Public,
+                ProtoBindScope::Unspecified => BindScope::Unknown,
+            }
+        }
+    }
+
+    impl BindScope {
+        /// Decode the wire representation, treating an unknown value as
+        /// [`BindScope::Unknown`] rather than failing the whole response.
+        pub fn from_wire(value: i32) -> Self {
+            ProtoBindScope::try_from(value)
+                .map(BindScope::from)
+                .unwrap_or(BindScope::Unknown)
+        }
+
+        /// Encode for the wire.
+        pub fn to_wire(self) -> i32 {
+            ProtoBindScope::from(self) as i32
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn test_bind_scope_round_trip() {
+            for scope in [
+                BindScope::Loopback,
+                BindScope::Private,
+                BindScope::AllInterfaces,
+                BindScope::Public,
+                BindScope::Unknown,
+            ] {
+                assert_eq!(BindScope::from_wire(scope.to_wire()), scope);
+            }
+        }
+
+        #[test]
+        fn test_bind_scope_unknown_wire_value_is_not_fatal() {
+            // A newer server sending a scope this build does not know must not
+            // be read as "loopback", which would hide an exposure.
+            assert_eq!(BindScope::from_wire(9999), BindScope::Unknown);
+            assert!(!BindScope::from_wire(9999).is_exposed());
+        }
+
+        #[test]
+        fn test_bind_scope_unspecified_maps_to_unknown() {
+            assert_eq!(BindScope::from_wire(0), BindScope::Unknown);
+        }
+    }
+}
+
 pub mod error {
     use thiserror::Error;
     use tonic::Status;
@@ -72,6 +150,52 @@ pub mod types {
         pub memory_available_bytes: u64,
         pub disk_info: Vec<DiskInfo>,
         pub timestamp: DateTime<Utc>,
+        #[serde(default)]
+        pub swap: SwapInfo,
+        #[serde(default)]
+        pub memory_pressure: Option<MemoryPressure>,
+    }
+
+    /// Swap usage and, more importantly, swap activity
+    ///
+    /// Occupancy alone says nothing about pressure: pages parked on disk since
+    /// an old spike cost nothing until something touches them. The rates are
+    /// what indicate a host that is paging right now.
+    #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+    pub struct SwapInfo {
+        pub total_bytes: u64,
+        pub used_bytes: u64,
+        pub in_pages_per_sec: f64,
+        pub out_pages_per_sec: f64,
+    }
+
+    impl SwapInfo {
+        /// Fraction of swap occupied, for display only — never for alerting.
+        pub fn used_percent(&self) -> f64 {
+            if self.total_bytes == 0 {
+                0.0
+            } else {
+                (self.used_bytes as f64 / self.total_bytes as f64) * 100.0
+            }
+        }
+
+        /// Combined paging rate, the figure worth alerting on.
+        pub fn activity_pages_per_sec(&self) -> f64 {
+            self.in_pages_per_sec + self.out_pages_per_sec
+        }
+    }
+
+    /// Memory pressure from `/proc/pressure/memory`
+    ///
+    /// Absent on kernels built without `CONFIG_PSI`.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct MemoryPressure {
+        /// Share of the last 60s where at least one task stalled on memory
+        pub some_avg60: f64,
+        /// Share of the last 60s where every task stalled
+        pub full_avg60: f64,
+        /// Cumulative full-stall time since boot, best for comparing hosts
+        pub full_total_seconds: f64,
     }
 
     /// Disk information structure
@@ -97,6 +221,10 @@ pub mod types {
         pub command_line: String,
         pub start_time: DateTime<Utc>,
         pub status: String,
+        /// `VmSwap` from `/proc/[pid]/status`; `None` where unreadable, which is
+        /// not the same as zero
+        #[serde(default)]
+        pub swap_bytes: Option<u64>,
     }
 
     /// Service information structure
@@ -199,11 +327,53 @@ pub mod types {
         pub cpu_percent: f64,
         pub memory_usage_bytes: u64,
         pub memory_limit_bytes: u64,
-        pub memory_percent: f64,
+        /// `None` when the container has no memory limit
+        ///
+        /// Docker reports the host's total RAM as the limit in that case, so a
+        /// percentage computed from it makes an unprotected container look
+        /// comfortable. See [`Self::memory_limit_set`].
+        pub memory_percent: Option<f64>,
         pub restart_count: u32,
         pub network_rx_bytes: u64,
         pub network_tx_bytes: u64,
         pub networks: Vec<String>,
+        /// Whether `HostConfig.Memory` is actually set on the container
+        #[serde(default)]
+        pub memory_limit_set: bool,
+        /// Health check detail, needed to tell a sick app from a healthcheck
+        /// that never worked
+        #[serde(default)]
+        pub health_detail: Option<ContainerHealthDetail>,
+        /// Swap held by the container's processes; `None` where unavailable
+        #[serde(default)]
+        pub swap_bytes: Option<u64>,
+    }
+
+    impl ContainerInfo {
+        /// Whether clearing the host's swap would push this container past its
+        /// limit — the pre-flight check for `swapoff`.
+        ///
+        /// Always false without a limit, since there is nothing to exceed.
+        pub fn would_exceed_limit_on_swapoff(&self) -> bool {
+            match (self.memory_limit_set, self.swap_bytes) {
+                (true, Some(swap)) => {
+                    self.memory_usage_bytes.saturating_add(swap) > self.memory_limit_bytes
+                }
+                _ => false,
+            }
+        }
+    }
+
+    /// Result of a container's last health check
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct ContainerHealthDetail {
+        /// Consecutive failures. A high number with a constant output means the
+        /// check itself is broken, not the application.
+        pub failing_streak: u32,
+        /// Output of the last check, truncated
+        pub last_output: String,
+        pub last_exit_code: i32,
+        pub last_checked_at: Option<DateTime<Utc>>,
     }
 
     /// Authentication token
@@ -288,6 +458,138 @@ pub mod types {
         pub info: Option<String>,
     }
 
+    /// A TLS certificate found on the host
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct TlsCertificateInfo {
+        pub name: String,
+        /// Subject Alternative Names
+        pub domains: Vec<String>,
+        pub issuer: String,
+        pub not_after: Option<DateTime<Utc>>,
+        /// Negative once expired
+        pub days_until_expiry: i64,
+        /// A file path, or `host:port` when probed over TLS
+        pub source: String,
+        /// Renewed forever although no active vhost serves it
+        pub orphaned: bool,
+    }
+
+    /// Certificate inventory plus the health of whatever renews it
+    #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+    pub struct TlsSnapshot {
+        pub certificates: Vec<TlsCertificateInfo>,
+        /// The renewal unit and its state. A certificate is only as safe as the
+        /// timer that renews it.
+        pub renewal_unit_name: Option<String>,
+        pub renewal_unit_status: Option<String>,
+    }
+
+    /// How widely a listening socket is bound
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum BindScope {
+        /// Reachable only from the host itself
+        Loopback,
+        /// A private address, such as RFC1918 or a VPN interface
+        Private,
+        /// `0.0.0.0` or `::` — every interface, including any public one
+        AllInterfaces,
+        /// A specific routable address: one interface, still reachable from
+        /// outside the host
+        Public,
+        /// Could not be classified
+        Unknown,
+    }
+
+    impl BindScope {
+        /// Classify a bind address as printed by the kernel.
+        pub fn classify(address: &str) -> Self {
+            let addr = address.trim();
+
+            // `ss` renders the wildcard as `*`, which is not a parseable address
+            if addr == "*" {
+                return BindScope::AllInterfaces;
+            }
+
+            match addr.parse::<std::net::IpAddr>() {
+                Ok(std::net::IpAddr::V4(v4)) => {
+                    if v4.is_unspecified() {
+                        BindScope::AllInterfaces
+                    } else if v4.is_loopback() {
+                        BindScope::Loopback
+                    } else if v4.is_private() || v4.is_link_local() {
+                        BindScope::Private
+                    } else {
+                        BindScope::Public
+                    }
+                }
+                Ok(std::net::IpAddr::V6(v6)) => {
+                    if v6.is_unspecified() {
+                        BindScope::AllInterfaces
+                    } else if v6.is_loopback() {
+                        BindScope::Loopback
+                    } else if v6.segments()[0] & 0xfe00 == 0xfc00
+                        || v6.segments()[0] & 0xffc0 == 0xfe80
+                    {
+                        // Unique local (fc00::/7) or link local (fe80::/10)
+                        BindScope::Private
+                    } else {
+                        BindScope::Public
+                    }
+                }
+                Err(_) => BindScope::Unknown,
+            }
+        }
+
+        /// Whether this scope reaches beyond the host.
+        ///
+        /// A specific public address counts: binding a database to one routable
+        /// interface is no safer than binding it to all of them.
+        pub fn is_exposed(&self) -> bool {
+            matches!(self, BindScope::AllInterfaces | BindScope::Public)
+        }
+    }
+
+    /// A socket in the listening state
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct ListeningPortInfo {
+        pub address: String,
+        pub port: u16,
+        /// `tcp` or `tcp6`
+        pub protocol: String,
+        pub bind_scope: BindScope,
+        pub pid: Option<u32>,
+        pub process_name: String,
+        /// A well-known database, cache or search port
+        pub sensitive: bool,
+    }
+
+    impl ListeningPortInfo {
+        /// Ports that have no business listening on every interface.
+        pub const SENSITIVE_PORTS: &'static [u16] = &[
+            5432,  // postgres
+            6432,  // pgbouncer
+            3306,  // mysql/mariadb
+            6379,  // redis
+            27017, // mongodb
+            9200,  // elasticsearch
+            11211, // memcached
+            5672,  // rabbitmq
+            9042,  // cassandra
+            2379,  // etcd
+        ];
+
+        /// Whether the port is a well-known data store port.
+        pub fn is_sensitive_port(port: u16) -> bool {
+            Self::SENSITIVE_PORTS.contains(&port)
+        }
+
+        /// A data store reachable from outside the host: the finding that
+        /// matters, as opposed to the same service on loopback.
+        pub fn is_exposed_datastore(&self) -> bool {
+            self.sensitive && self.bind_scope.is_exposed()
+        }
+    }
+
     /// Everything a single `GetSystemdInfo` call returns
     ///
     /// Both lists arrive in one response, so they travel together instead of
@@ -346,6 +648,8 @@ mod tests {
             memory_available_bytes: 8_000_000_000,
             disk_info: vec![],
             timestamp: Utc::now(),
+            swap: SwapInfo::default(),
+            memory_pressure: None,
         };
 
         let json = serde_json::to_string(&info).unwrap();
@@ -383,6 +687,7 @@ mod tests {
             command_line: "/bin/test".to_string(),
             start_time: Utc::now(),
             status: "Running".to_string(),
+            swap_bytes: None,
         };
 
         let json = serde_json::to_string(&proc).unwrap();
@@ -403,11 +708,14 @@ mod tests {
             cpu_percent: 5.0,
             memory_usage_bytes: 1024,
             memory_limit_bytes: 2048,
-            memory_percent: 50.0,
+            memory_percent: Some(50.0),
             restart_count: 0,
             network_rx_bytes: 100,
             network_tx_bytes: 200,
             networks: vec!["bridge".to_string()],
+            memory_limit_set: false,
+            health_detail: None,
+            swap_bytes: None,
         };
 
         let json = serde_json::to_string(&container).unwrap();
@@ -497,6 +805,223 @@ mod tests {
         let deserialized: SystemdUnitInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(unit.name, deserialized.name);
         assert_eq!(unit.is_active, deserialized.is_active);
+    }
+
+    // ─────────────────────────────────────────
+    // Bind scope classification
+    // ─────────────────────────────────────────
+
+    #[test]
+    fn test_bind_scope_wildcard_is_all_interfaces() {
+        assert_eq!(BindScope::classify("0.0.0.0"), BindScope::AllInterfaces);
+        assert_eq!(BindScope::classify("::"), BindScope::AllInterfaces);
+        assert_eq!(BindScope::classify("*"), BindScope::AllInterfaces);
+    }
+
+    #[test]
+    fn test_bind_scope_loopback() {
+        assert_eq!(BindScope::classify("127.0.0.1"), BindScope::Loopback);
+        assert_eq!(BindScope::classify("127.0.0.53"), BindScope::Loopback);
+        assert_eq!(BindScope::classify("::1"), BindScope::Loopback);
+    }
+
+    #[test]
+    fn test_bind_scope_private_ranges() {
+        // The VPN addresses the fleet binds to
+        assert_eq!(BindScope::classify("10.10.0.9"), BindScope::Private);
+        assert_eq!(BindScope::classify("192.168.1.10"), BindScope::Private);
+        assert_eq!(BindScope::classify("172.17.0.1"), BindScope::Private);
+        assert_eq!(BindScope::classify("169.254.1.1"), BindScope::Private);
+    }
+
+    #[test]
+    fn test_bind_scope_private_ipv6() {
+        assert_eq!(BindScope::classify("fd00::1"), BindScope::Private);
+        assert_eq!(BindScope::classify("fe80::1"), BindScope::Private);
+    }
+
+    #[test]
+    fn test_bind_scope_public_address() {
+        // A routable address is bound to one interface but still reachable
+        assert_eq!(BindScope::classify("203.0.113.7"), BindScope::Public);
+        assert_eq!(BindScope::classify("2001:db8::1"), BindScope::Public);
+    }
+
+    #[test]
+    fn test_bind_scope_unparseable_is_unknown() {
+        assert_eq!(BindScope::classify("not-an-address"), BindScope::Unknown);
+        assert_eq!(BindScope::classify(""), BindScope::Unknown);
+    }
+
+    #[test]
+    fn test_bind_scope_trims_whitespace() {
+        assert_eq!(BindScope::classify("  0.0.0.0  "), BindScope::AllInterfaces);
+    }
+
+    #[test]
+    fn test_bind_scope_exposure() {
+        assert!(BindScope::AllInterfaces.is_exposed());
+        assert!(
+            BindScope::Public.is_exposed(),
+            "a database on one routable interface is no safer than on all of them"
+        );
+        assert!(!BindScope::Loopback.is_exposed());
+        assert!(!BindScope::Private.is_exposed());
+        assert!(
+            !BindScope::Unknown.is_exposed(),
+            "an unclassifiable address must not be reported as an exposure"
+        );
+    }
+
+    // ─────────────────────────────────────────
+    // Listening ports
+    // ─────────────────────────────────────────
+
+    fn listening_port(port: u16, address: &str) -> ListeningPortInfo {
+        ListeningPortInfo {
+            address: address.to_string(),
+            port,
+            protocol: "tcp".to_string(),
+            bind_scope: BindScope::classify(address),
+            pid: Some(1234),
+            process_name: "postgres".to_string(),
+            sensitive: ListeningPortInfo::is_sensitive_port(port),
+        }
+    }
+
+    #[test]
+    fn test_sensitive_ports_cover_common_datastores() {
+        assert!(ListeningPortInfo::is_sensitive_port(5432)); // postgres
+        assert!(ListeningPortInfo::is_sensitive_port(3306)); // mysql
+        assert!(ListeningPortInfo::is_sensitive_port(6379)); // redis
+        assert!(ListeningPortInfo::is_sensitive_port(6432)); // pgbouncer
+        assert!(!ListeningPortInfo::is_sensitive_port(443));
+        assert!(!ListeningPortInfo::is_sensitive_port(50051));
+    }
+
+    #[test]
+    fn test_exposed_datastore_detected() {
+        let pg = listening_port(5432, "0.0.0.0");
+        assert!(
+            pg.is_exposed_datastore(),
+            "postgres on 0.0.0.0 is the finding the audit was after"
+        );
+    }
+
+    #[test]
+    fn test_datastore_on_loopback_is_not_a_finding() {
+        assert!(!listening_port(5432, "127.0.0.1").is_exposed_datastore());
+    }
+
+    #[test]
+    fn test_datastore_on_vpn_is_not_a_finding() {
+        assert!(!listening_port(5432, "10.10.0.9").is_exposed_datastore());
+    }
+
+    #[test]
+    fn test_exposed_non_datastore_is_not_flagged() {
+        // The monitor's own gRPC port is exposed but not a datastore; it is
+        // reported, just not as a sensitive-port finding.
+        let port = listening_port(50051, "0.0.0.0");
+        assert!(!port.is_exposed_datastore());
+        assert!(port.bind_scope.is_exposed());
+    }
+
+    // ─────────────────────────────────────────
+    // Swap and memory pressure
+    // ─────────────────────────────────────────
+
+    #[test]
+    fn test_swap_used_percent() {
+        let swap = SwapInfo {
+            total_bytes: 8_000_000_000,
+            used_bytes: 4_000_000_000,
+            ..Default::default()
+        };
+        assert!((swap.used_percent() - 50.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_swap_used_percent_without_swap() {
+        assert_eq!(SwapInfo::default().used_percent(), 0.0);
+    }
+
+    #[test]
+    fn test_swap_activity_is_independent_of_occupancy() {
+        // The audit's central lesson: a host can sit at 65% occupancy with no
+        // paging at all, while another at 55% thrashes.
+        let idle = SwapInfo {
+            total_bytes: 8_000_000_000,
+            used_bytes: 5_200_000_000,
+            in_pages_per_sec: 0.0,
+            out_pages_per_sec: 0.0,
+        };
+        let thrashing = SwapInfo {
+            total_bytes: 8_000_000_000,
+            used_bytes: 4_400_000_000,
+            in_pages_per_sec: 180.0,
+            out_pages_per_sec: 220.0,
+        };
+
+        assert!(idle.used_percent() > thrashing.used_percent());
+        assert_eq!(idle.activity_pages_per_sec(), 0.0);
+        assert_eq!(thrashing.activity_pages_per_sec(), 400.0);
+    }
+
+    // ─────────────────────────────────────────
+    // Container swapoff pre-flight
+    // ─────────────────────────────────────────
+
+    fn container_with(limit_set: bool, limit: u64, usage: u64, swap: Option<u64>) -> ContainerInfo {
+        ContainerInfo {
+            id: "abc".to_string(),
+            name: "sonarqube".to_string(),
+            image: "sonarqube:latest".to_string(),
+            status: "Up".to_string(),
+            state: "running".to_string(),
+            health: "healthy".to_string(),
+            cpu_percent: 1.0,
+            memory_usage_bytes: usage,
+            memory_limit_bytes: limit,
+            memory_percent: None,
+            restart_count: 0,
+            network_rx_bytes: 0,
+            network_tx_bytes: 0,
+            networks: vec![],
+            memory_limit_set: limit_set,
+            health_detail: None,
+            swap_bytes: swap,
+        }
+    }
+
+    #[test]
+    fn test_swapoff_would_exceed_limit() {
+        // The real incident: SonarQube capped at 2000M, holding ~1.1G in swap
+        let c = container_with(true, 2_000_000_000, 1_400_000_000, Some(1_100_000_000));
+        assert!(c.would_exceed_limit_on_swapoff());
+    }
+
+    #[test]
+    fn test_swapoff_within_limit() {
+        let c = container_with(true, 2_000_000_000, 500_000_000, Some(200_000_000));
+        assert!(!c.would_exceed_limit_on_swapoff());
+    }
+
+    #[test]
+    fn test_swapoff_without_limit_cannot_exceed() {
+        // Nothing to exceed: the container is unbounded, so swapoff cannot
+        // trigger a cgroup kill for it
+        let c = container_with(false, 16_000_000_000, 8_000_000_000, Some(4_000_000_000));
+        assert!(!c.would_exceed_limit_on_swapoff());
+    }
+
+    #[test]
+    fn test_swapoff_unknown_swap_is_not_a_prediction() {
+        let c = container_with(true, 2_000_000_000, 1_900_000_000, None);
+        assert!(
+            !c.would_exceed_limit_on_swapoff(),
+            "unknown swap must not be reported as a predicted OOM"
+        );
     }
 
     #[test]

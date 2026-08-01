@@ -290,6 +290,8 @@ mod tests {
             memory_available_bytes: 8_000_000_000,
             disk_info: vec![],
             timestamp: Utc::now(),
+            swap: Default::default(),
+            memory_pressure: None,
         }
     }
 
