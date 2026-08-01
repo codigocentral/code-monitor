@@ -113,6 +113,16 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Whether a server actually has a usable access token.
+///
+/// A configured-but-empty token is not a token. Treating it as one shows a
+/// green tick beside a server that will be refused on connect, which is the
+/// most misleading moment for it to happen: while a rollout is filling these
+/// in one host at a time.
+fn has_token(token: Option<&str>) -> bool {
+    token.map(|t| !t.trim().is_empty()).unwrap_or(false)
+}
+
 async fn init_client(config_manager: &mut ClientConfigManager, force: bool) -> Result<()> {
     use std::io::{self, Write};
 
@@ -326,7 +336,7 @@ async fn add_server(
     println!();
     println!("   Name: {}", name);
     println!("   Address: {}:{}", address, port);
-    if token.is_some() {
+    if has_token(token.as_deref()) {
         println!("   Token: ******* (configured)");
     } else {
         println!("   Token: Not set (use 'set-token' command if needed)");
@@ -483,7 +493,9 @@ async fn list_servers(config_manager: &ClientConfigManager) -> Result<()> {
     println!("📋 Configured Servers:");
     println!();
     for server in &config.servers {
-        let token_status = if server.access_token.is_some() {
+        // An empty string is not a token. Reporting it as configured is
+        // exactly the wrong answer while a rollout is filling these in.
+        let token_status = if has_token(server.access_token.as_deref()) {
             "✓"
         } else {
             "✗"
@@ -1024,6 +1036,22 @@ async fn purge_storage(days: i64) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::has_token;
+
+    #[test]
+    fn test_empty_token_is_not_configured() {
+        // A rollout fills these in one host at a time; a green tick beside a
+        // server that will be refused on connect is the worst possible answer
+        assert!(!has_token(Some("")));
+        assert!(!has_token(Some("   ")));
+        assert!(!has_token(None));
+    }
+
+    #[test]
+    fn test_real_token_is_configured() {
+        assert!(has_token(Some("kJ8s0Xq2vN4pL7mR")));
+    }
+
     use super::*;
     use chrono::Utc;
     use tempfile::TempDir;
