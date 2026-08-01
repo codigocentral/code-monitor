@@ -15,8 +15,8 @@ use shared::proto::monitoring::{
     PostgresDatabaseInfo as ProtoPostgresDatabaseInfo, PostgresInfoResponse,
     ProcessInfo as ProtoProcessInfo, ProcessesRequest, ProcessesResponse,
     ServiceInfo as ProtoServiceInfo, ServicesResponse, SystemInfoResponse, SystemUpdate,
-    SystemdInfoResponse, SystemdUnitInfo as ProtoSystemdUnitInfo, TopQuery as ProtoTopQuery,
-    UpdatesRequest,
+    SystemdFailedUnit as ProtoSystemdFailedUnit, SystemdInfoResponse,
+    SystemdUnitInfo as ProtoSystemdUnitInfo, TopQuery as ProtoTopQuery, UpdatesRequest,
 };
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -631,9 +631,24 @@ impl MonitorService for MonitorServiceImpl {
             })
             .collect();
 
+        let failed = self.monitor.get_systemd_failed_units().await.map_err(|e| {
+            error!("Failed to scan for failed systemd units: {}", e);
+            Status::internal("Failed to get systemd info")
+        })?;
+
+        let failed_units: Vec<ProtoSystemdFailedUnit> = failed
+            .iter()
+            .map(|u| ProtoSystemdFailedUnit {
+                name: u.name.clone(),
+                description: u.description.clone(),
+                since: u.since.map(datetime_to_timestamp),
+            })
+            .collect();
+
         let response = SystemdInfoResponse {
             units: unit_infos,
             timestamp: Some(now_timestamp()),
+            failed_units,
         };
 
         Ok(Response::new(response))
@@ -1095,9 +1110,29 @@ mod tests {
 
         let mut client = MonitorServiceClient::new(channel);
         let response = client.get_systemd_info(Request::new(())).await.unwrap();
-        let units = response.into_inner().units;
+        let info = response.into_inner();
         // systemd may not be available, but call should succeed
-        let _ = units;
+        let _ = info.units;
+
+        // The failed-unit scan travels in the same response and must hold even
+        // with no unit configured. Its contents depend on the host, so only
+        // invariants are asserted here.
+        for unit in &info.failed_units {
+            assert!(
+                !unit.name.is_empty(),
+                "a failed unit must always carry a name"
+            );
+        }
+
+        let mut names: Vec<&str> = info.failed_units.iter().map(|u| u.name.as_str()).collect();
+        names.sort_unstable();
+        let total = names.len();
+        names.dedup();
+        assert_eq!(
+            total,
+            names.len(),
+            "failed units must not be reported twice"
+        );
     }
 
     #[tokio::test]

@@ -10,7 +10,8 @@ use shared::proto::monitoring::{
 use shared::types::{
     ConnectionStateCount, ContainerInfo, DiskInfo, MariaDBClusterInfo, MariaDBProcessInfo,
     MariaDBSchemaInfo, NetworkInfo, PostgresClusterInfo, PostgresDatabaseInfo, ProcessInfo,
-    ServiceInfo, ServiceStatus, SystemInfo, SystemdUnitInfo, TopQuery,
+    ServiceInfo, ServiceStatus, SystemInfo, SystemdFailedUnit, SystemdSnapshot, SystemdUnitInfo,
+    TopQuery,
 };
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
@@ -431,7 +432,7 @@ impl MonitorClient {
         Ok(clusters)
     }
 
-    pub async fn get_systemd_info(&mut self) -> Result<Vec<SystemdUnitInfo>> {
+    pub async fn get_systemd_info(&mut self) -> Result<SystemdSnapshot> {
         let mut client = self.grpc_client();
 
         let request = self.create_request(());
@@ -455,7 +456,20 @@ impl MonitorClient {
             })
             .collect();
 
-        Ok(units)
+        let failed_units: Vec<SystemdFailedUnit> = resp
+            .failed_units
+            .into_iter()
+            .map(|u| SystemdFailedUnit {
+                name: u.name,
+                description: u.description,
+                since: u.since.map(timestamp_to_datetime),
+            })
+            .collect();
+
+        Ok(SystemdSnapshot {
+            units,
+            failed_units,
+        })
     }
 
     #[allow(dead_code)]

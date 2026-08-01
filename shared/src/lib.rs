@@ -288,6 +288,31 @@ pub mod types {
         pub info: Option<String>,
     }
 
+    /// Everything a single `GetSystemdInfo` call returns
+    ///
+    /// Both lists arrive in one response, so they travel together instead of
+    /// costing a second round trip.
+    #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+    pub struct SystemdSnapshot {
+        /// Units explicitly configured for monitoring
+        pub units: Vec<SystemdUnitInfo>,
+        /// Every unit on the host currently in the `failed` state
+        pub failed_units: Vec<SystemdFailedUnit>,
+    }
+
+    /// A systemd unit currently in the `failed` state
+    ///
+    /// Collected by scanning the whole host, independently of the units listed
+    /// in the server configuration: a unit nobody thought to configure is
+    /// exactly the one worth surfacing.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct SystemdFailedUnit {
+        pub name: String,
+        pub description: String,
+        /// When the unit entered its current state, when systemd reports it
+        pub since: Option<DateTime<Utc>>,
+    }
+
     /// systemd unit information
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct SystemdUnitInfo {
@@ -472,6 +497,35 @@ mod tests {
         let deserialized: SystemdUnitInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(unit.name, deserialized.name);
         assert_eq!(unit.is_active, deserialized.is_active);
+    }
+
+    #[test]
+    fn test_systemd_failed_unit_serialization() {
+        let unit = SystemdFailedUnit {
+            name: "certbot.service".to_string(),
+            description: "Certbot".to_string(),
+            since: Some(Utc::now()),
+        };
+
+        let json = serde_json::to_string(&unit).unwrap();
+        let deserialized: SystemdFailedUnit = serde_json::from_str(&json).unwrap();
+        assert_eq!(unit.name, deserialized.name);
+        assert_eq!(unit.description, deserialized.description);
+        assert!(deserialized.since.is_some());
+    }
+
+    #[test]
+    fn test_systemd_failed_unit_serialization_without_since() {
+        let unit = SystemdFailedUnit {
+            name: "networking.service".to_string(),
+            description: "Raise network interfaces".to_string(),
+            since: None,
+        };
+
+        let json = serde_json::to_string(&unit).unwrap();
+        let deserialized: SystemdFailedUnit = serde_json::from_str(&json).unwrap();
+        assert_eq!(unit.name, deserialized.name);
+        assert!(deserialized.since.is_none());
     }
 
     #[test]

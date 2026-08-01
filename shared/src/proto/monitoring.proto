@@ -244,10 +244,22 @@ message SystemdUnitInfo {
     google.protobuf.Timestamp started_at = 6;
 }
 
+// A systemd unit currently in the "failed" state.
+//
+// Reported for every failed unit on the host, independently of the units
+// configured for monitoring.
+message SystemdFailedUnit {
+    string name = 1;
+    string description = 2;
+    // When the unit entered its current state, if systemd reports it
+    google.protobuf.Timestamp since = 3;
+}
+
 // Systemd info response
 message SystemdInfoResponse {
     repeated SystemdUnitInfo units = 1;
     google.protobuf.Timestamp timestamp = 2;
+    repeated SystemdFailedUnit failed_units = 3;
 }
 
 // System update (for streaming)

@@ -56,6 +56,8 @@ pub struct DashboardApp {
     mariadb_cache: HashMap<uuid::Uuid, Vec<shared::types::MariaDBClusterInfo>>,
     /// Cached systemd units by server ID
     systemd_cache: HashMap<uuid::Uuid, Vec<shared::types::SystemdUnitInfo>>,
+    /// Cached systemd units in the `failed` state by server ID
+    systemd_failed_cache: HashMap<uuid::Uuid, Vec<shared::types::SystemdFailedUnit>>,
     /// CPU history for sparkline (last 60 values)
     cpu_history: HashMap<uuid::Uuid, Vec<u64>>,
     /// Memory history for sparkline (last 60 values)
@@ -217,6 +219,7 @@ impl DashboardApp {
             postgres_cache: HashMap::new(),
             mariadb_cache: HashMap::new(),
             systemd_cache: HashMap::new(),
+            systemd_failed_cache: HashMap::new(),
             selected_item_idx: 0,
             table_state: TableState::default(),
             running: true,

@@ -87,7 +87,7 @@ pub struct SystemMonitor {
     docker_collector: DockerCollector,
     postgres_collectors: Vec<PostgresCollector>,
     mariadb_collectors: Vec<MariaDBCollector>,
-    systemd_collector: Option<SystemdCollector>,
+    systemd_collector: SystemdCollector,
 }
 
 impl SystemMonitor {
@@ -112,15 +112,15 @@ impl SystemMonitor {
             .map(MariaDBCollector::new)
             .collect();
 
-        let systemd_collector = if systemd_units.is_empty() {
-            None
-        } else {
+        // Always constructed: even with no unit configured, the collector still
+        // scans the host for units in the `failed` state.
+        if !systemd_units.is_empty() {
             info!(
                 "Initialized systemd collector for {} unit(s)",
                 systemd_units.len()
             );
-            Some(SystemdCollector::new(systemd_units))
-        };
+        }
+        let systemd_collector = SystemdCollector::new(systemd_units);
 
         info!(
             "Initialized {} Postgres collector(s), {} MariaDB collector(s)",
@@ -416,10 +416,16 @@ impl SystemMonitor {
     }
 
     pub async fn get_systemd_units(&self) -> Result<Vec<shared::types::SystemdUnitInfo>> {
-        match &self.systemd_collector {
-            Some(collector) => collector.collect().await,
-            None => Ok(Vec::new()),
-        }
+        self.systemd_collector.collect().await
+    }
+
+    /// Host-wide scan for systemd units in the `failed` state.
+    ///
+    /// Unlike [`Self::get_systemd_units`], this does not depend on any unit
+    /// being configured for monitoring — the failed units worth surfacing are
+    /// precisely the ones nobody configured.
+    pub async fn get_systemd_failed_units(&self) -> Result<Vec<shared::types::SystemdFailedUnit>> {
+        self.systemd_collector.collect_failed().await
     }
 
     pub fn get_network_info(&self) -> Result<Vec<NetworkInfo>> {
@@ -911,7 +917,33 @@ mod tests {
             .await
             .expect("Failed to create monitor");
 
-        assert!(monitor.systemd_collector.is_some());
+        let units = monitor
+            .get_systemd_units()
+            .await
+            .expect("Should return configured units");
+        assert!(
+            units.iter().any(|u| u.name == "nginx.service"),
+            "the configured unit should be collected"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_failed_units_scanned_without_configured_units() {
+        // Regression guard: the failed-unit scan must not depend on any unit
+        // being configured, otherwise a freshly installed host — the very case
+        // worth alerting on — would report nothing.
+        let monitor = SystemMonitor::new(1, vec![], vec![], vec![])
+            .await
+            .expect("Failed to create monitor");
+
+        assert!(
+            monitor.get_systemd_units().await.unwrap().is_empty(),
+            "no unit configured means no per-unit collection"
+        );
+        assert!(
+            monitor.get_systemd_failed_units().await.is_ok(),
+            "the failed scan must still run and never error"
+        );
     }
 
     #[tokio::test]
@@ -1023,7 +1055,7 @@ mod tests {
             docker_collector: DockerCollector::new(),
             postgres_collectors: vec![],
             mariadb_collectors: vec![],
-            systemd_collector: None,
+            systemd_collector: SystemdCollector::new(Vec::new()),
         }
     }
 
@@ -1121,7 +1153,7 @@ mod tests {
             docker_collector: DockerCollector::new(),
             postgres_collectors: vec![PostgresCollector::new(pg_config)],
             mariadb_collectors: vec![],
-            systemd_collector: None,
+            systemd_collector: SystemdCollector::new(Vec::new()),
         };
 
         let result =
@@ -1153,7 +1185,7 @@ mod tests {
             docker_collector: DockerCollector::new(),
             postgres_collectors: vec![],
             mariadb_collectors: vec![MariaDBCollector::new(maria_config)],
-            systemd_collector: None,
+            systemd_collector: SystemdCollector::new(Vec::new()),
         };
 
         let result =

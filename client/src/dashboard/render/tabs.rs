@@ -11,6 +11,27 @@ use crate::dashboard::DashboardApp;
 
 use super::{format_bytes, format_uptime, Theme};
 
+/// Name the failed units on a single line for the overview header.
+///
+/// Capped so a host with many failures cannot push the rest of the header off
+/// screen; the full list stays available on the Systemd tab.
+fn summarize_failed_units(failed: &[shared::types::SystemdFailedUnit]) -> String {
+    const MAX_NAMES: usize = 3;
+
+    let mut summary = failed
+        .iter()
+        .take(MAX_NAMES)
+        .map(|u| u.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    if failed.len() > MAX_NAMES {
+        summary.push_str(&format!(" +{} more", failed.len() - MAX_NAMES));
+    }
+
+    summary
+}
+
 pub(super) fn draw_overview_tab<B: tui::backend::Backend>(
     f: &mut Frame<B>,
     app: &DashboardApp,
@@ -32,19 +53,28 @@ pub(super) fn draw_overview_tab<B: tui::backend::Backend>(
             let inner_area = block.inner(area);
             f.render_widget(block, area);
 
+            let failed_units = app
+                .systemd_failed_cache
+                .get(&server.id)
+                .map(|f| f.as_slice())
+                .unwrap_or(&[]);
+            // The failed-unit line only exists when something is failing, so it
+            // costs no vertical space on a healthy host.
+            let header_height = if failed_units.is_empty() { 3 } else { 4 };
+
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .margin(1)
                 .constraints([
-                    Constraint::Length(3), // System info header
-                    Constraint::Length(4), // CPU gauge + sparkline
-                    Constraint::Length(4), // Memory gauge + sparkline
-                    Constraint::Min(5),    // Disks
+                    Constraint::Length(header_height), // System info header
+                    Constraint::Length(4),             // CPU gauge + sparkline
+                    Constraint::Length(4),             // Memory gauge + sparkline
+                    Constraint::Min(5),                // Disks
                 ])
                 .split(inner_area);
 
             // System info header
-            let sys_info = Paragraph::new(vec![
+            let mut header_lines = vec![
                 Spans::from(vec![
                     Span::styled("󰟀 ", Style::default().fg(Theme::ACCENT)),
                     Span::styled(
@@ -73,7 +103,30 @@ pub(super) fn draw_overview_tab<B: tui::backend::Backend>(
                     Span::styled("󰘚 ", Style::default().fg(Theme::MEM_COLOR)),
                     Span::styled(&info.kernel_version, Style::default().fg(Theme::MUTED)),
                 ]),
-            ]);
+            ];
+
+            if !failed_units.is_empty() {
+                header_lines.push(Spans::from(vec![
+                    Span::styled("󰅙 ", Style::default().fg(Theme::ERROR)),
+                    Span::styled(
+                        format!(
+                            "{} systemd unit{} failed",
+                            failed_units.len(),
+                            if failed_units.len() == 1 { "" } else { "s" }
+                        ),
+                        Style::default()
+                            .fg(Theme::ERROR)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("  │  ", Style::default().fg(Theme::BORDER)),
+                    Span::styled(
+                        summarize_failed_units(failed_units),
+                        Style::default().fg(Theme::MUTED),
+                    ),
+                ]));
+            }
+
+            let sys_info = Paragraph::new(header_lines);
             f.render_widget(sys_info, chunks[0]);
 
             // CPU section with gauge and sparkline
@@ -661,6 +714,92 @@ pub(super) fn draw_systemd_tab<B: tui::backend::Backend>(
     app: &DashboardApp,
     area: Rect,
 ) {
+    let failed = app
+        .get_selected_server()
+        .and_then(|server| app.systemd_failed_cache.get(&server.id))
+        .filter(|failed| !failed.is_empty());
+
+    let Some(failed) = failed else {
+        draw_systemd_units(f, app, area);
+        return;
+    };
+
+    // Failed units come first: they are the reason to open this tab. The block
+    // grows with the list but never takes more than half the panel, so the
+    // configured units stay visible.
+    let wanted = failed.len() as u16 + 3; // header + border
+    let failed_height = wanted.min(area.height / 2).max(4);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(failed_height), Constraint::Min(3)])
+        .split(area);
+
+    draw_systemd_failed_units(f, failed, chunks[0]);
+    draw_systemd_units(f, app, chunks[1]);
+}
+
+/// Render the host-wide list of units in the `failed` state.
+fn draw_systemd_failed_units<B: tui::backend::Backend>(
+    f: &mut Frame<B>,
+    failed: &[shared::types::SystemdFailedUnit],
+    area: Rect,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Theme::ERROR))
+        .title(Span::styled(
+            format!(" 󰅙 Failed Units ({}) ", failed.len()),
+            Style::default()
+                .fg(Theme::ERROR)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let rows: Vec<Row> = failed
+        .iter()
+        .map(|u| {
+            let since = u
+                .since
+                .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| "N/A".to_string());
+
+            Row::new(vec![
+                Cell::from(Span::styled(
+                    &u.name,
+                    Style::default()
+                        .fg(Theme::ERROR)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Cell::from(Span::styled(
+                    &u.description,
+                    Style::default().fg(Theme::TEXT),
+                )),
+                Cell::from(Span::styled(since, Style::default().fg(Theme::MUTED))),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(rows)
+        .header(
+            Row::new(vec!["Unit", "Description", "Since"]).style(
+                Style::default()
+                    .fg(Theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        )
+        .block(block)
+        .widths(&[
+            Constraint::Percentage(35),
+            Constraint::Percentage(45),
+            Constraint::Percentage(20),
+        ]);
+
+    f.render_widget(table, area);
+}
+
+/// Render the units explicitly configured for monitoring.
+fn draw_systemd_units<B: tui::backend::Backend>(f: &mut Frame<B>, app: &DashboardApp, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1234,6 +1373,144 @@ mod tests {
         assert!(buffer_contains(&buffer, "cron.service"));
         assert!(buffer_contains(&buffer, "active (running)"));
         assert!(buffer_contains(&buffer, "failed"));
+    }
+
+    fn failed_unit(name: &str, description: &str) -> SystemdFailedUnit {
+        SystemdFailedUnit {
+            name: name.to_string(),
+            description: description.to_string(),
+            since: None,
+        }
+    }
+
+    #[test]
+    fn test_draw_systemd_lists_failed_units() {
+        let mut app = create_test_app();
+        let server_id = app.servers[0].id;
+        app.systemd_cache.insert(server_id, vec![]);
+        app.systemd_failed_cache.insert(
+            server_id,
+            vec![
+                failed_unit("certbot.service", "Certbot"),
+                failed_unit("cloud-init.service", "Initial cloud-init job"),
+            ],
+        );
+
+        let buffer = render_app_to_buffer(&app, draw_systemd_tab);
+        assert!(buffer_contains(&buffer, "Failed Units (2)"));
+        assert!(buffer_contains(&buffer, "certbot.service"));
+        assert!(buffer_contains(&buffer, "cloud-init.service"));
+        // The configured-units panel must stay visible below
+        assert!(buffer_contains(&buffer, "No systemd units configured"));
+    }
+
+    #[test]
+    fn test_draw_systemd_failed_block_absent_when_healthy() {
+        let mut app = create_test_app();
+        let server_id = app.servers[0].id;
+        app.systemd_cache.insert(server_id, vec![]);
+        app.systemd_failed_cache.insert(server_id, vec![]);
+
+        let buffer = render_app_to_buffer(&app, draw_systemd_tab);
+        assert!(
+            !buffer_contains(&buffer, "Failed Units"),
+            "a healthy host must not show the failed block at all"
+        );
+    }
+
+    #[test]
+    fn test_draw_systemd_failed_shows_since_when_known() {
+        let mut app = create_test_app();
+        let server_id = app.servers[0].id;
+        let since = Utc::now();
+        app.systemd_cache.insert(server_id, vec![]);
+        app.systemd_failed_cache.insert(
+            server_id,
+            vec![SystemdFailedUnit {
+                name: "certbot.service".to_string(),
+                description: "Certbot".to_string(),
+                since: Some(since),
+            }],
+        );
+
+        let buffer = render_app_to_buffer(&app, draw_systemd_tab);
+        assert!(buffer_contains(
+            &buffer,
+            &since.format("%Y-%m-%d").to_string()
+        ));
+    }
+
+    #[test]
+    fn test_overview_reports_failed_unit_count() {
+        let mut app = create_test_app();
+        let server_id = app.servers[0].id;
+        app.system_info_cache
+            .insert(server_id, create_test_system_info());
+        app.systemd_failed_cache.insert(
+            server_id,
+            vec![
+                failed_unit("certbot.service", "Certbot"),
+                failed_unit("networking.service", "Raise network interfaces"),
+            ],
+        );
+
+        let buffer = render_app_to_buffer(&app, draw_overview_tab);
+        assert!(buffer_contains(&buffer, "2 systemd units failed"));
+        assert!(buffer_contains(&buffer, "certbot.service"));
+    }
+
+    #[test]
+    fn test_overview_singular_wording_for_one_failed_unit() {
+        let mut app = create_test_app();
+        let server_id = app.servers[0].id;
+        app.system_info_cache
+            .insert(server_id, create_test_system_info());
+        app.systemd_failed_cache
+            .insert(server_id, vec![failed_unit("certbot.service", "Certbot")]);
+
+        let buffer = render_app_to_buffer(&app, draw_overview_tab);
+        assert!(buffer_contains(&buffer, "1 systemd unit failed"));
+    }
+
+    #[test]
+    fn test_overview_omits_failed_line_when_healthy() {
+        let mut app = create_test_app();
+        let server_id = app.servers[0].id;
+        app.system_info_cache
+            .insert(server_id, create_test_system_info());
+        app.systemd_failed_cache.insert(server_id, vec![]);
+
+        let buffer = render_app_to_buffer(&app, draw_overview_tab);
+        assert!(!buffer_contains(&buffer, "systemd unit"));
+    }
+
+    #[test]
+    fn test_summarize_failed_units_lists_up_to_three() {
+        let units = vec![
+            failed_unit("a.service", ""),
+            failed_unit("b.service", ""),
+            failed_unit("c.service", ""),
+        ];
+        assert_eq!(
+            summarize_failed_units(&units),
+            "a.service, b.service, c.service"
+        );
+    }
+
+    #[test]
+    fn test_summarize_failed_units_truncates_long_lists() {
+        let units: Vec<SystemdFailedUnit> = (0..7)
+            .map(|i| failed_unit(&format!("unit{}.service", i), ""))
+            .collect();
+        assert_eq!(
+            summarize_failed_units(&units),
+            "unit0.service, unit1.service, unit2.service +4 more"
+        );
+    }
+
+    #[test]
+    fn test_summarize_failed_units_empty() {
+        assert_eq!(summarize_failed_units(&[]), "");
     }
 
     #[test]

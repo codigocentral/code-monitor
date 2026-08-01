@@ -119,7 +119,30 @@ pub(super) async fn fetch_server_data(app: &mut DashboardApp, server_id: uuid::U
             app.mariadb_cache.insert(server_id, mariadb);
         }
         if let Some(systemd) = systemd {
-            app.systemd_cache.insert(server_id, systemd);
+            let failed_names: Vec<String> = systemd
+                .failed_units
+                .iter()
+                .map(|u| u.name.clone())
+                .collect();
+
+            let server_name = app
+                .servers
+                .iter()
+                .find(|s| s.id == server_id)
+                .map(|s| s.name.clone())
+                .unwrap_or_else(|| "Unknown".to_string());
+
+            if let Some(alert) = app.alert_manager.process_systemd_failed_units(
+                &server_id.to_string(),
+                &server_name,
+                &failed_names,
+            ) {
+                let _ = app.notification_dispatcher.dispatch(&alert).await;
+            }
+
+            app.systemd_cache.insert(server_id, systemd.units);
+            app.systemd_failed_cache
+                .insert(server_id, systemd.failed_units);
         }
     }
     Ok(())

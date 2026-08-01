@@ -14,6 +14,7 @@ pub enum AlertType {
     DiskHigh,
     ServerDown,
     ProcessDown,
+    SystemdUnitFailed,
 }
 
 impl std::fmt::Display for AlertType {
@@ -24,6 +25,7 @@ impl std::fmt::Display for AlertType {
             AlertType::DiskHigh => write!(f, "DISK_HIGH"),
             AlertType::ServerDown => write!(f, "SERVER_DOWN"),
             AlertType::ProcessDown => write!(f, "PROCESS_DOWN"),
+            AlertType::SystemdUnitFailed => write!(f, "SYSTEMD_UNIT_FAILED"),
         }
     }
 }
@@ -348,6 +350,68 @@ impl AlertManager {
         }
 
         new_alerts
+    }
+
+    /// Raise an alert for systemd units sitting in the `failed` state.
+    ///
+    /// Deliberately separate from [`Self::process_metrics`]: this is not a
+    /// threshold over a sampling window. There is no legitimate steady state in
+    /// which a unit stays failed, so a single observation is enough to alert,
+    /// and the alert clears as soon as the count returns to zero.
+    ///
+    /// Returns the alert only when one is newly raised, so callers can dispatch
+    /// notifications without re-notifying on every poll.
+    pub fn process_systemd_failed_units(
+        &mut self,
+        server_id: &str,
+        server_name: &str,
+        failed_units: &[String],
+    ) -> Option<Alert> {
+        let state_key = (server_id.to_string(), AlertType::SystemdUnitFailed);
+        let state = self.states.entry(state_key).or_default();
+
+        if failed_units.is_empty() {
+            if state.is_triggered() {
+                state.mark_resolved();
+
+                if let Some(active) = self.active_alerts.iter_mut().find(|a| {
+                    a.server_id == server_id
+                        && a.alert_type == AlertType::SystemdUnitFailed
+                        && !a.is_resolved()
+                }) {
+                    active.resolve();
+                }
+            }
+            return None;
+        }
+
+        if state.is_triggered()
+            || state.is_silenced()
+            || !state.can_trigger_again(Duration::minutes(5))
+        {
+            return None;
+        }
+
+        state.mark_triggered();
+
+        let alert = Alert::new(
+            AlertType::SystemdUnitFailed,
+            AlertSeverity::Warning,
+            server_id.to_string(),
+            server_name.to_string(),
+            format!(
+                "{} systemd unit(s) in failed state: {}",
+                failed_units.len(),
+                failed_units.join(", ")
+            ),
+            Some(failed_units.len() as f64),
+            Some(0.0),
+        );
+
+        self.active_alerts.push(alert.clone());
+        self.add_to_history(alert.clone());
+
+        Some(alert)
     }
 
     pub fn acknowledge_alert(&mut self, alert_id: uuid::Uuid, by: String) -> Option<&Alert> {
@@ -692,6 +756,150 @@ mod tests {
         assert_eq!(format!("{}", AlertType::DiskHigh), "DISK_HIGH");
         assert_eq!(format!("{}", AlertType::ServerDown), "SERVER_DOWN");
         assert_eq!(format!("{}", AlertType::ProcessDown), "PROCESS_DOWN");
+        assert_eq!(
+            format!("{}", AlertType::SystemdUnitFailed),
+            "SYSTEMD_UNIT_FAILED"
+        );
+    }
+
+    // ─────────────────────────────────────────
+    // systemd failed units
+    // ─────────────────────────────────────────
+
+    #[test]
+    fn test_systemd_failed_units_raises_warning() {
+        let mut manager = AlertManager::new();
+        let failed = vec!["certbot.service".to_string()];
+
+        let alert = manager
+            .process_systemd_failed_units("srv-1", "alemanha6", &failed)
+            .expect("a failed unit must alert on the first observation");
+
+        assert_eq!(alert.alert_type, AlertType::SystemdUnitFailed);
+        assert_eq!(alert.severity, AlertSeverity::Warning);
+        assert!(alert.message.contains("certbot.service"));
+        assert_eq!(alert.value, Some(1.0));
+        assert_eq!(manager.get_active_alerts().len(), 1);
+    }
+
+    #[test]
+    fn test_systemd_failed_units_needs_no_sampling_window() {
+        // Unlike threshold rules, one observation is enough: there is no
+        // legitimate steady state where a unit stays failed.
+        let mut manager = AlertManager::new();
+        assert!(manager
+            .process_systemd_failed_units("srv-1", "alemanha6", &["a.service".to_string()])
+            .is_some());
+    }
+
+    #[test]
+    fn test_systemd_failed_units_does_not_realert_while_failing() {
+        let mut manager = AlertManager::new();
+        let failed = vec!["certbot.service".to_string()];
+
+        assert!(manager
+            .process_systemd_failed_units("srv-1", "alemanha6", &failed)
+            .is_some());
+        // Polling again must not spam the notification channels
+        assert!(manager
+            .process_systemd_failed_units("srv-1", "alemanha6", &failed)
+            .is_none());
+        assert_eq!(manager.get_active_alerts().len(), 1);
+    }
+
+    #[test]
+    fn test_systemd_failed_units_no_alert_when_healthy() {
+        let mut manager = AlertManager::new();
+        assert!(manager
+            .process_systemd_failed_units("srv-1", "alemanha6", &[])
+            .is_none());
+        assert!(manager.get_active_alerts().is_empty());
+    }
+
+    #[test]
+    fn test_systemd_failed_units_resolves_when_cleared() {
+        let mut manager = AlertManager::new();
+        let failed = vec!["certbot.service".to_string()];
+
+        manager.process_systemd_failed_units("srv-1", "alemanha6", &failed);
+        assert!(!manager.get_active_alerts()[0].is_resolved());
+
+        manager.process_systemd_failed_units("srv-1", "alemanha6", &[]);
+        assert!(
+            manager.get_active_alerts()[0].is_resolved(),
+            "fixing the unit must clear the alert"
+        );
+    }
+
+    #[test]
+    fn test_systemd_failed_units_cooldown_suppresses_flapping() {
+        // A unit in a restart loop flips between failed and active on every
+        // poll. The same five minute cooldown that guards the threshold rules
+        // applies here, so flapping yields one alert, not one per poll.
+        let mut manager = AlertManager::new();
+        let failed = vec!["certbot.service".to_string()];
+
+        assert!(manager
+            .process_systemd_failed_units("srv-1", "alemanha6", &failed)
+            .is_some());
+        manager.process_systemd_failed_units("srv-1", "alemanha6", &[]);
+
+        assert!(
+            manager
+                .process_systemd_failed_units("srv-1", "alemanha6", &failed)
+                .is_none(),
+            "re-failing inside the cooldown must not raise a second alert"
+        );
+        assert_eq!(
+            manager.get_alert_history().len(),
+            1,
+            "the flap must leave a single entry in history"
+        );
+    }
+
+    #[test]
+    fn test_systemd_failed_units_tracked_per_server() {
+        let mut manager = AlertManager::new();
+        let failed = vec!["certbot.service".to_string()];
+
+        assert!(manager
+            .process_systemd_failed_units("srv-1", "alemanha6", &failed)
+            .is_some());
+        assert!(
+            manager
+                .process_systemd_failed_units("srv-2", "alemanha7", &failed)
+                .is_some(),
+            "a second host failing is a separate alert"
+        );
+        assert_eq!(manager.get_active_alerts().len(), 2);
+    }
+
+    #[test]
+    fn test_systemd_failed_units_respects_silence() {
+        let mut manager = AlertManager::new();
+        manager.silence_alert("srv-1", AlertType::SystemdUnitFailed, Duration::minutes(30));
+
+        assert!(manager
+            .process_systemd_failed_units("srv-1", "alemanha6", &["certbot.service".to_string()])
+            .is_none());
+        assert!(manager.get_active_alerts().is_empty());
+    }
+
+    #[test]
+    fn test_systemd_failed_units_message_lists_every_unit() {
+        let mut manager = AlertManager::new();
+        let failed = vec![
+            "certbot.service".to_string(),
+            "cloud-init.service".to_string(),
+        ];
+
+        let alert = manager
+            .process_systemd_failed_units("srv-1", "alemanha6", &failed)
+            .unwrap();
+
+        assert!(alert.message.contains("certbot.service"));
+        assert!(alert.message.contains("cloud-init.service"));
+        assert!(alert.message.contains('2'));
     }
 
     #[test]
