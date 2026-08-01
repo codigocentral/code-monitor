@@ -4,12 +4,27 @@
 //! database sizes, connection counts, cache hit ratios, and top queries.
 
 use anyhow::{Context, Result};
-use shared::types::{ConnectionStateCount, PostgresClusterInfo, PostgresDatabaseInfo, TopQuery};
+use shared::types::{
+    ConnectionStateCount, PostgresClusterInfo, PostgresDatabaseInfo, PostgresSetting, TopQuery,
+};
 use std::sync::Arc;
 use tokio_postgres::{Client, NoTls};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::config::PostgresClusterConfig;
+
+/// Settings worth reporting: the ones that decide how much memory a cluster
+/// can demand, which is what turned a 15.6 GB host into one running at 89%.
+const TRACKED_SETTINGS: &[&str] = &[
+    "shared_buffers",
+    "work_mem",
+    "max_connections",
+    "maintenance_work_mem",
+    "effective_cache_size",
+    "max_parallel_workers_per_gather",
+    "wal_buffers",
+    "autovacuum_max_workers",
+];
 
 /// Collector for a single Postgres cluster
 pub struct PostgresCollector {
@@ -91,6 +106,7 @@ impl PostgresCollector {
         let (connections_total, connections_by_state) = self.collect_connections(&client).await?;
         let cache_hit_ratio = self.collect_cache_hit_ratio(&client).await?;
         let top_queries = self.collect_top_queries(&client).await?;
+        let settings = self.collect_settings(&client).await?;
 
         Ok(PostgresClusterInfo {
             name: self.config.name.clone(),
@@ -102,7 +118,61 @@ impl PostgresCollector {
             cache_hit_ratio,
             top_queries,
             timestamp: chrono::Utc::now(),
+            settings,
         })
+    }
+
+    /// Read the memory and connection settings, with the origin of each.
+    ///
+    /// The origin is the point. `ALTER SYSTEM` writes to
+    /// `postgresql.auto.conf`, which overrides `postgresql.conf`, so a cluster
+    /// can declare `shared_buffers = 128MB` in the file under version control
+    /// while actually running with 4GB. Debugging from the main file alone
+    /// produces a confident wrong answer, and only `pg_settings` shows which
+    /// file won.
+    async fn collect_settings(
+        &self,
+        client: &tokio_postgres::Client,
+    ) -> Result<Vec<PostgresSetting>> {
+        let rows = match client
+            .query(
+                "SELECT name, setting, unit, source, sourcefile, sourceline
+                 FROM pg_settings
+                 WHERE name = ANY($1)
+                 ORDER BY name",
+                &[&TRACKED_SETTINGS
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<String>>()],
+            )
+            .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                warn!(
+                    "Failed to read pg_settings from '{}': {}",
+                    self.config.name, e
+                );
+                return Ok(Vec::new());
+            }
+        };
+
+        Ok(rows
+            .iter()
+            .map(|row| {
+                let unit: Option<String> = row.get(2);
+                let source_file: Option<String> = row.get(4);
+                PostgresSetting {
+                    name: row.get(0),
+                    value: row.get(1),
+                    // Postgres returns an empty string for unitless settings
+                    unit: unit.filter(|u| !u.is_empty()),
+                    source: row.get(3),
+                    source_file: source_file.filter(|f| !f.is_empty()),
+                    source_line: row.get(5),
+                }
+            })
+            .collect())
     }
 
     fn parse_database_info(

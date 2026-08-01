@@ -10,9 +10,9 @@ use shared::proto::monitoring::{
 use shared::types::{
     BindScope, ConnectionStateCount, ContainerHealthDetail, ContainerInfo, DiskInfo,
     ListeningPortInfo, MariaDBClusterInfo, MariaDBProcessInfo, MariaDBSchemaInfo, MemoryPressure,
-    NetworkInfo, PostgresClusterInfo, PostgresDatabaseInfo, ProcessInfo, ServiceInfo,
-    ServiceStatus, SwapInfo, SystemInfo, SystemdFailedUnit, SystemdSnapshot, SystemdUnitInfo,
-    TlsCertificateInfo, TlsSnapshot, TopQuery,
+    NetworkInfo, PostgresClusterInfo, PostgresDatabaseInfo, PostgresSetting, ProcessInfo,
+    ServiceInfo, ServiceStatus, SwapInfo, SystemInfo, SystemdFailedUnit, SystemdSnapshot,
+    SystemdUnitInfo, TlsCertificateInfo, TlsSnapshot, TopQuery,
 };
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
@@ -397,6 +397,22 @@ impl MonitorClient {
                     .timestamp
                     .map(timestamp_to_datetime)
                     .unwrap_or_else(Utc::now),
+                settings: c
+                    .settings
+                    .into_iter()
+                    .map(|setting| PostgresSetting {
+                        name: setting.name,
+                        value: setting.value,
+                        unit: Some(setting.unit).filter(|u| !u.is_empty()),
+                        source: setting.source,
+                        source_file: Some(setting.source_file).filter(|f| !f.is_empty()),
+                        source_line: if setting.source_line > 0 {
+                            Some(setting.source_line)
+                        } else {
+                            None
+                        },
+                    })
+                    .collect(),
             })
             .collect();
 

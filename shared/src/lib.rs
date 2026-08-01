@@ -453,6 +453,71 @@ pub mod types {
         pub cache_hit_ratio: f64,
         pub top_queries: Vec<TopQuery>,
         pub timestamp: DateTime<Utc>,
+        /// Memory and connection settings, with the origin of each
+        #[serde(default)]
+        pub settings: Vec<PostgresSetting>,
+    }
+
+    impl PostgresClusterInfo {
+        /// Whether the settings come from more than one place.
+        ///
+        /// Mixed origins are what make a cluster hard to reason about: half the
+        /// values in the file under version control, half written by
+        /// `ALTER SYSTEM` on some evening nobody remembers.
+        pub fn has_mixed_setting_sources(&self) -> bool {
+            let mut files: Vec<&str> = self
+                .settings
+                .iter()
+                .filter(|s| !s.is_default())
+                .filter_map(|s| s.source_file.as_deref())
+                .collect();
+            files.sort_unstable();
+            files.dedup();
+            files.len() > 1
+        }
+
+        /// Settings written by `ALTER SYSTEM`, which override the main config.
+        pub fn auto_conf_settings(&self) -> Vec<&PostgresSetting> {
+            self.settings
+                .iter()
+                .filter(|s| s.is_from_auto_conf())
+                .collect()
+        }
+    }
+
+    /// A postgres runtime setting and where its value came from
+    ///
+    /// The origin matters as much as the value: `ALTER SYSTEM` writes to
+    /// `postgresql.auto.conf`, which wins over `postgresql.conf`. Debugging by
+    /// reading the main file leads to a confident wrong answer.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct PostgresSetting {
+        pub name: String,
+        pub value: String,
+        pub unit: Option<String>,
+        /// How postgres resolved it: `default`, `configuration file`, ...
+        pub source: String,
+        pub source_file: Option<String>,
+        pub source_line: Option<i32>,
+    }
+
+    impl PostgresSetting {
+        /// File that `ALTER SYSTEM` writes, which overrides the main config
+        pub const AUTO_CONF: &'static str = "postgresql.auto.conf";
+
+        /// Whether this value came from `ALTER SYSTEM` rather than a file
+        /// someone can read in the repository.
+        pub fn is_from_auto_conf(&self) -> bool {
+            self.source_file
+                .as_deref()
+                .map(|f| f.ends_with(Self::AUTO_CONF))
+                .unwrap_or(false)
+        }
+
+        /// Whether postgres is using its built-in default.
+        pub fn is_default(&self) -> bool {
+            self.source == "default"
+        }
     }
 
     /// Postgres database information
@@ -814,6 +879,7 @@ mod tests {
                 mean_exec_time_ms: 10.0,
             }],
             timestamp: Utc::now(),
+            settings: vec![],
         };
 
         let json = serde_json::to_string(&cluster).unwrap();
@@ -1197,6 +1263,141 @@ mod tests {
             !c.would_exceed_limit_on_swapoff(),
             "unknown swap must not be reported as a predicted OOM"
         );
+    }
+
+    // ─────────────────────────────────────────
+    // Postgres settings
+    // ─────────────────────────────────────────
+
+    fn setting(name: &str, value: &str, source: &str, file: Option<&str>) -> PostgresSetting {
+        PostgresSetting {
+            name: name.to_string(),
+            value: value.to_string(),
+            unit: Some("8kB".to_string()),
+            source: source.to_string(),
+            source_file: file.map(str::to_string),
+            source_line: Some(1),
+        }
+    }
+
+    #[test]
+    fn test_setting_from_auto_conf_is_flagged() {
+        // The alemanha6 case: 4GB of shared_buffers written by ALTER SYSTEM
+        // while postgresql.conf still declared 128MB
+        let s = setting(
+            "shared_buffers",
+            "524288",
+            "configuration file",
+            Some("/var/lib/postgresql/data/postgresql.auto.conf"),
+        );
+        assert!(s.is_from_auto_conf());
+        assert!(!s.is_default());
+    }
+
+    #[test]
+    fn test_setting_from_main_conf_is_not_auto_conf() {
+        let s = setting(
+            "shared_buffers",
+            "16384",
+            "configuration file",
+            Some("/etc/postgresql/15/main/postgresql.conf"),
+        );
+        assert!(!s.is_from_auto_conf());
+    }
+
+    #[test]
+    fn test_default_setting_has_no_file() {
+        let s = setting("work_mem", "4096", "default", None);
+        assert!(s.is_default());
+        assert!(!s.is_from_auto_conf());
+    }
+
+    fn cluster_with(settings: Vec<PostgresSetting>) -> PostgresClusterInfo {
+        PostgresClusterInfo {
+            name: "pg-main".to_string(),
+            host: "localhost".to_string(),
+            port: 5432,
+            databases: vec![],
+            connections_total: 0,
+            connections_by_state: vec![],
+            cache_hit_ratio: 99.0,
+            top_queries: vec![],
+            timestamp: Utc::now(),
+            settings,
+        }
+    }
+
+    #[test]
+    fn test_mixed_sources_detected() {
+        // alemanha8:5432 — half from the file, half from ALTER SYSTEM
+        let cluster = cluster_with(vec![
+            setting(
+                "max_connections",
+                "500",
+                "configuration file",
+                Some("/etc/postgresql/postgresql.conf"),
+            ),
+            setting(
+                "work_mem",
+                "2048",
+                "configuration file",
+                Some("/var/lib/postgresql/data/postgresql.auto.conf"),
+            ),
+        ]);
+
+        assert!(cluster.has_mixed_setting_sources());
+        assert_eq!(cluster.auto_conf_settings().len(), 1);
+    }
+
+    #[test]
+    fn test_single_source_is_not_mixed() {
+        let cluster = cluster_with(vec![
+            setting(
+                "max_connections",
+                "100",
+                "configuration file",
+                Some("/etc/postgresql/postgresql.conf"),
+            ),
+            setting(
+                "work_mem",
+                "4096",
+                "configuration file",
+                Some("/etc/postgresql/postgresql.conf"),
+            ),
+        ]);
+
+        assert!(!cluster.has_mixed_setting_sources());
+        assert!(cluster.auto_conf_settings().is_empty());
+    }
+
+    #[test]
+    fn test_defaults_do_not_count_as_a_source() {
+        // A cluster where everything is default plus one file entry is not
+        // "mixed" in the sense that matters
+        let cluster = cluster_with(vec![
+            setting("work_mem", "4096", "default", None),
+            setting(
+                "shared_buffers",
+                "16384",
+                "configuration file",
+                Some("/etc/postgresql/postgresql.conf"),
+            ),
+        ]);
+
+        assert!(!cluster.has_mixed_setting_sources());
+    }
+
+    #[test]
+    fn test_cluster_without_settings_is_not_mixed() {
+        assert!(!cluster_with(vec![]).has_mixed_setting_sources());
+    }
+
+    #[test]
+    fn test_postgres_setting_serialization() {
+        let s = setting("work_mem", "4096", "default", None);
+        let json = serde_json::to_string(&s).unwrap();
+        let back: PostgresSetting = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, back);
     }
 
     #[test]

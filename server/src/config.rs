@@ -349,8 +349,24 @@ mod tests {
     use super::*;
     use tempfile::NamedTempFile;
 
+    /// Serialises every test that touches the process-wide environment.
+    ///
+    /// Cargo runs tests as threads of one process, so a test that sets
+    /// `CODE_MONITOR_*` leaks into any `Config::load` running concurrently —
+    /// `load` applies env overrides. Without this the suite fails
+    /// intermittently, which is worse than failing outright.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Take the environment lock, tolerating a previous test's panic.
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn test_config_save_load() {
+        let _env = env_guard();
         let temp_file = NamedTempFile::new().unwrap();
         let path = temp_file.path();
 
@@ -536,6 +552,7 @@ mod tests {
 
     #[test]
     fn test_config_load_regenerates_empty_token() {
+        let _env = env_guard();
         let temp_file = NamedTempFile::new().unwrap();
         let path = temp_file.path();
 
@@ -554,6 +571,7 @@ mod tests {
 
     #[test]
     fn test_config_full_roundtrip() {
+        let _env = env_guard();
         let temp_file = NamedTempFile::new().unwrap();
         let path = temp_file.path();
 
@@ -639,6 +657,7 @@ mod tests {
 
     #[test]
     fn test_tls_config_roundtrip() {
+        let _env = env_guard();
         let tls = TlsConfig {
             cert_path: "/certs/server.crt".to_string(),
             key_path: "/certs/server.key".to_string(),
@@ -749,7 +768,9 @@ mod tests {
 
     #[test]
     fn test_env_overrides() {
-        // Set/unset env vars inside a single test to avoid races between tests
+        let _env = env_guard();
+        // The lock, not this ordering, is what prevents races: any concurrent
+        // Config::load would otherwise pick these up.
         std::env::set_var("CODE_MONITOR_UPDATE_INTERVAL", "42");
         std::env::set_var("CODE_MONITOR_MAX_CLIENTS", "7");
         std::env::set_var("CODE_MONITOR_LOG_LEVEL", "warn");
@@ -841,6 +862,7 @@ mod tests {
 
     #[test]
     fn test_config_load_rejects_invalid_values() {
+        let _env = env_guard();
         let temp_file = NamedTempFile::new().unwrap();
         let path = temp_file.path();
 

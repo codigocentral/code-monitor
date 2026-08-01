@@ -24,6 +24,97 @@ pub(super) fn truncate_query(query: &str, max_len: usize) -> String {
     }
 }
 
+/// Abbreviate a settings source file to what an operator needs to tell them
+/// apart: the filename.
+fn setting_source_label(setting: &shared::types::PostgresSetting) -> String {
+    match setting.source_file.as_deref() {
+        Some(path) => path.rsplit('/').next().unwrap_or(path).to_string(),
+        None => setting.source.clone(),
+    }
+}
+
+/// Render the cluster's memory and connection settings with their origin.
+///
+/// The origin is highlighted, not the value: a `shared_buffers` of 4GB is only
+/// surprising once you know the config file under version control says 128MB
+/// and `ALTER SYSTEM` quietly won.
+fn draw_postgres_settings<B: tui::backend::Backend>(
+    f: &mut Frame<B>,
+    cluster: &shared::types::PostgresClusterInfo,
+    area: Rect,
+) {
+    let mixed = cluster.has_mixed_setting_sources();
+    let title = if mixed {
+        format!(" Settings — {} (mixed sources) ", cluster.name)
+    } else {
+        format!(" Settings — {} ", cluster.name)
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(if mixed { Theme::WARNING } else { Theme::BORDER }))
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(if mixed { Theme::WARNING } else { Theme::ACCENT })
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let rows: Vec<Row> = cluster
+        .settings
+        .iter()
+        .map(|setting| {
+            let value = match &setting.unit {
+                Some(unit) => format!("{} {}", setting.value, unit),
+                None => setting.value.clone(),
+            };
+
+            let source_style = if setting.is_from_auto_conf() {
+                // The case that misleads whoever debugs from postgresql.conf
+                Style::default()
+                    .fg(Theme::WARNING)
+                    .add_modifier(Modifier::BOLD)
+            } else if setting.is_default() {
+                Style::default().fg(Theme::MUTED)
+            } else {
+                Style::default().fg(Theme::TEXT)
+            };
+
+            Row::new(vec![
+                Cell::from(Span::styled(
+                    &setting.name,
+                    Style::default().fg(Theme::TEXT),
+                )),
+                Cell::from(Span::styled(
+                    value,
+                    Style::default()
+                        .fg(Theme::ACCENT)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Cell::from(Span::styled(setting_source_label(setting), source_style)),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(rows)
+        .header(
+            Row::new(vec!["Setting", "Value", "From"]).style(
+                Style::default()
+                    .fg(Theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        )
+        .widths(&[
+            Constraint::Percentage(42),
+            Constraint::Percentage(26),
+            Constraint::Percentage(30),
+        ])
+        .block(block);
+
+    f.render_widget(table, area);
+}
+
 pub(super) fn draw_postgres_tab<B: tui::backend::Backend>(
     f: &mut Frame<B>,
     app: &DashboardApp,
@@ -137,9 +228,25 @@ pub(super) fn draw_postgres_tab<B: tui::backend::Backend>(
             let mut state = app.table_state.clone();
             f.render_stateful_widget(cluster_table, chunks[0], &mut state);
 
-            // --- Bottom panel: top queries for selected cluster ---
+            // --- Bottom panel: top queries and settings for selected cluster ---
             let selected_idx = app.selected_item_idx.min(clusters.len().saturating_sub(1));
             let selected_cluster = &clusters[selected_idx];
+
+            // Settings share the bottom half. A cluster's memory settings
+            // explain more incidents than its slow queries do.
+            let (queries_area, settings_area) = if selected_cluster.settings.is_empty() {
+                (chunks[1], None)
+            } else {
+                let bottom = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+                    .split(chunks[1]);
+                (bottom[0], Some(bottom[1]))
+            };
+
+            if let Some(settings_area) = settings_area {
+                draw_postgres_settings(f, selected_cluster, settings_area);
+            }
 
             let query_block = Block::default()
                 .borders(Borders::ALL)
@@ -158,7 +265,7 @@ pub(super) fn draw_postgres_tab<B: tui::backend::Backend>(
                         .style(Style::default().fg(Theme::MUTED))
                         .alignment(Alignment::Center)
                         .block(query_block);
-                f.render_widget(no_queries, chunks[1]);
+                f.render_widget(no_queries, queries_area);
             } else {
                 let query_rows: Vec<Row> = selected_cluster
                     .top_queries
@@ -202,7 +309,7 @@ pub(super) fn draw_postgres_tab<B: tui::backend::Backend>(
                     ])
                     .block(query_block);
 
-                f.render_widget(query_table, chunks[1]);
+                f.render_widget(query_table, queries_area);
             }
         } else {
             let not_connected = Paragraph::new("󰅛 Not connected. Press Enter to connect.")
@@ -422,6 +529,45 @@ pub(super) fn draw_mariadb_tab<B: tui::backend::Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use shared::types::PostgresSetting;
+
+    fn pg_setting(name: &str, value: &str, file: Option<&str>) -> PostgresSetting {
+        PostgresSetting {
+            name: name.to_string(),
+            value: value.to_string(),
+            unit: None,
+            source: if file.is_some() {
+                "configuration file".to_string()
+            } else {
+                "default".to_string()
+            },
+            source_file: file.map(str::to_string),
+            source_line: file.map(|_| 1),
+        }
+    }
+
+    #[test]
+    fn test_setting_source_label_uses_the_filename() {
+        let s = pg_setting(
+            "shared_buffers",
+            "524288",
+            Some("/var/lib/postgresql/data/postgresql.auto.conf"),
+        );
+        assert_eq!(setting_source_label(&s), "postgresql.auto.conf");
+    }
+
+    #[test]
+    fn test_setting_source_label_falls_back_to_source() {
+        let s = pg_setting("work_mem", "4096", None);
+        assert_eq!(setting_source_label(&s), "default");
+    }
+
+    #[test]
+    fn test_setting_source_label_handles_a_bare_filename() {
+        let s = pg_setting("work_mem", "4096", Some("postgresql.conf"));
+        assert_eq!(setting_source_label(&s), "postgresql.conf");
+    }
 
     #[test]
     fn test_format_db_size_mb_zero() {

@@ -216,6 +216,21 @@ message TopQuery {
     double mean_exec_time_ms = 4;
 }
 
+// A single postgres runtime setting and where its value came from
+message PostgresSetting {
+    string name = 1;
+    string value = 2;
+    string unit = 3;
+    // How postgres resolved it: default, configuration file, command line,
+    // database, override...
+    string source = 4;
+    // The file that actually supplied it. ALTER SYSTEM writes to
+    // postgresql.auto.conf, which overrides postgresql.conf — reading the
+    // latter alone leads to the wrong conclusion.
+    string source_file = 5;
+    int32 source_line = 6;
+}
+
 // Postgres cluster info
 message PostgresClusterInfo {
     string name = 1;
@@ -227,6 +242,7 @@ message PostgresClusterInfo {
     double cache_hit_ratio = 7;
     repeated TopQuery top_queries = 8;
     google.protobuf.Timestamp timestamp = 9;
+    repeated PostgresSetting settings = 10;
 }
 
 // Postgres info response

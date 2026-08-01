@@ -1983,6 +1983,7 @@ mod tests {
                 cache_hit_ratio: 0.0,
                 top_queries: vec![],
                 timestamp: Utc::now(),
+                settings: vec![],
             }],
         );
         assert_eq!(app.get_current_list_len(), 1);

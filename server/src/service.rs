@@ -14,9 +14,9 @@ use shared::proto::monitoring::{
     NetworkInfo as ProtoNetworkInfo, NetworkInfoResponse,
     PostgresClusterInfo as ProtoPostgresClusterInfo,
     PostgresDatabaseInfo as ProtoPostgresDatabaseInfo, PostgresInfoResponse,
-    ProcessInfo as ProtoProcessInfo, ProcessesRequest, ProcessesResponse,
-    ServiceInfo as ProtoServiceInfo, ServicesResponse, SystemInfoResponse, SystemUpdate,
-    SystemdFailedUnit as ProtoSystemdFailedUnit, SystemdInfoResponse,
+    PostgresSetting as ProtoPostgresSetting, ProcessInfo as ProtoProcessInfo, ProcessesRequest,
+    ProcessesResponse, ServiceInfo as ProtoServiceInfo, ServicesResponse, SystemInfoResponse,
+    SystemUpdate, SystemdFailedUnit as ProtoSystemdFailedUnit, SystemdInfoResponse,
     SystemdUnitInfo as ProtoSystemdUnitInfo, TlsCertificateInfo as ProtoTlsCertificateInfo,
     TlsInfoResponse, TopQuery as ProtoTopQuery, UpdatesRequest,
 };
@@ -589,6 +589,18 @@ impl MonitorService for MonitorServiceImpl {
                     })
                     .collect(),
                 timestamp: Some(datetime_to_timestamp(c.timestamp)),
+                settings: c
+                    .settings
+                    .iter()
+                    .map(|setting| ProtoPostgresSetting {
+                        name: setting.name.clone(),
+                        value: setting.value.clone(),
+                        unit: setting.unit.clone().unwrap_or_default(),
+                        source: setting.source.clone(),
+                        source_file: setting.source_file.clone().unwrap_or_default(),
+                        source_line: setting.source_line.unwrap_or(0),
+                    })
+                    .collect(),
             })
             .collect();
 
