@@ -15,6 +15,8 @@ pub enum AlertType {
     ServerDown,
     ProcessDown,
     SystemdUnitFailed,
+    ContainerCrashLoop,
+    ContainerHealthcheckBroken,
 }
 
 impl std::fmt::Display for AlertType {
@@ -26,6 +28,8 @@ impl std::fmt::Display for AlertType {
             AlertType::ServerDown => write!(f, "SERVER_DOWN"),
             AlertType::ProcessDown => write!(f, "PROCESS_DOWN"),
             AlertType::SystemdUnitFailed => write!(f, "SYSTEMD_UNIT_FAILED"),
+            AlertType::ContainerCrashLoop => write!(f, "CONTAINER_CRASH_LOOP"),
+            AlertType::ContainerHealthcheckBroken => write!(f, "CONTAINER_HEALTHCHECK_BROKEN"),
         }
     }
 }
@@ -228,6 +232,13 @@ impl Default for AlertState {
     }
 }
 
+/// Restart count last seen for a container, and when
+#[derive(Debug, Clone)]
+struct RestartBaseline {
+    count: u32,
+    observed_at: DateTime<Utc>,
+}
+
 /// Alert manager that tracks state and generates alerts
 #[derive(Debug)]
 pub struct AlertManager {
@@ -236,9 +247,19 @@ pub struct AlertManager {
     active_alerts: Vec<Alert>,
     alert_history: Vec<Alert>,
     max_history: usize,
+    /// Restart counts per (server, container), so restarts can be judged as a
+    /// rate rather than a running total
+    restart_baselines: HashMap<(String, String), RestartBaseline>,
 }
 
 impl AlertManager {
+    /// Restarts within [`Self::RESTART_WINDOW_MINUTES`] that constitute a
+    /// crash loop.
+    pub const RESTART_RATE_THRESHOLD: u32 = 3;
+
+    /// Window over which restarts are counted.
+    pub const RESTART_WINDOW_MINUTES: i64 = 10;
+
     pub fn new() -> Self {
         Self {
             rules: Vec::new(),
@@ -246,6 +267,7 @@ impl AlertManager {
             active_alerts: Vec::new(),
             alert_history: Vec::new(),
             max_history: 1000,
+            restart_baselines: HashMap::new(),
         }
     }
 
@@ -405,6 +427,164 @@ impl AlertManager {
                 failed_units.join(", ")
             ),
             Some(failed_units.len() as f64),
+            Some(0.0),
+        );
+
+        self.active_alerts.push(alert.clone());
+        self.add_to_history(alert.clone());
+
+        Some(alert)
+    }
+
+    /// Alert on containers that are restarting repeatedly.
+    ///
+    /// Judged as a rate, never as a total: a container that has been up for a
+    /// year legitimately accumulates restarts across reboots and deploys, and
+    /// alerting on the total would fire once for history nobody can act on.
+    /// What matters is restarting *now*.
+    ///
+    /// The first observation of a container only records a baseline, so
+    /// connecting to a server does not produce a burst of alerts for restarts
+    /// that happened months ago.
+    pub fn process_container_restarts(
+        &mut self,
+        server_id: &str,
+        server_name: &str,
+        containers: &[(String, u32)],
+    ) -> Vec<Alert> {
+        let now = Utc::now();
+        let window = Duration::minutes(Self::RESTART_WINDOW_MINUTES);
+        let mut new_alerts = Vec::new();
+
+        for (name, count) in containers {
+            let key = (server_id.to_string(), name.clone());
+
+            let baseline = match self.restart_baselines.get(&key) {
+                Some(baseline) => baseline.clone(),
+                None => {
+                    // First sighting: record where it stands, judge from here on
+                    self.restart_baselines.insert(
+                        key,
+                        RestartBaseline {
+                            count: *count,
+                            observed_at: now,
+                        },
+                    );
+                    continue;
+                }
+            };
+
+            // A lower count means the container was recreated; start over
+            if *count < baseline.count || now - baseline.observed_at > window {
+                self.restart_baselines.insert(
+                    key,
+                    RestartBaseline {
+                        count: *count,
+                        observed_at: now,
+                    },
+                );
+                continue;
+            }
+
+            let restarts_in_window = count - baseline.count;
+            if restarts_in_window < Self::RESTART_RATE_THRESHOLD {
+                continue;
+            }
+
+            // Reset regardless of whether the alert is emitted, so a silenced
+            // or cooled-down container does not accumulate a stale baseline
+            self.restart_baselines.insert(
+                key,
+                RestartBaseline {
+                    count: *count,
+                    observed_at: now,
+                },
+            );
+
+            let state_key = (
+                format!("{}::{}", server_id, name),
+                AlertType::ContainerCrashLoop,
+            );
+            let state = self.states.entry(state_key).or_default();
+
+            if state.is_silenced() || !state.can_trigger_again(Duration::minutes(15)) {
+                continue;
+            }
+            state.mark_triggered();
+
+            let alert = Alert::new(
+                AlertType::ContainerCrashLoop,
+                AlertSeverity::Warning,
+                server_id.to_string(),
+                server_name.to_string(),
+                format!(
+                    "container '{}' restarted {} times in {} minutes (total {})",
+                    name,
+                    restarts_in_window,
+                    Self::RESTART_WINDOW_MINUTES,
+                    count
+                ),
+                Some(restarts_in_window as f64),
+                Some(Self::RESTART_RATE_THRESHOLD as f64),
+            );
+
+            self.active_alerts.push(alert.clone());
+            self.add_to_history(alert.clone());
+            new_alerts.push(alert);
+        }
+
+        new_alerts
+    }
+
+    /// Report healthchecks that have never worked.
+    ///
+    /// Raised at info severity on purpose: a probe that cannot run is a
+    /// configuration defect to schedule, not an outage to wake someone for. It
+    /// still deserves reporting, because every permanently red container makes
+    /// a genuine failure harder to see.
+    pub fn process_broken_healthchecks(
+        &mut self,
+        server_id: &str,
+        server_name: &str,
+        broken: &[String],
+    ) -> Option<Alert> {
+        let state_key = (server_id.to_string(), AlertType::ContainerHealthcheckBroken);
+        let state = self.states.entry(state_key).or_default();
+
+        if broken.is_empty() {
+            if state.is_triggered() {
+                state.mark_resolved();
+
+                if let Some(active) = self.active_alerts.iter_mut().find(|a| {
+                    a.server_id == server_id
+                        && a.alert_type == AlertType::ContainerHealthcheckBroken
+                        && !a.is_resolved()
+                }) {
+                    active.resolve();
+                }
+            }
+            return None;
+        }
+
+        if state.is_triggered()
+            || state.is_silenced()
+            || !state.can_trigger_again(Duration::hours(6))
+        {
+            return None;
+        }
+        state.mark_triggered();
+
+        let alert = Alert::new(
+            AlertType::ContainerHealthcheckBroken,
+            AlertSeverity::Info,
+            server_id.to_string(),
+            server_name.to_string(),
+            format!(
+                "{} container(s) with a healthcheck that never ran: {}",
+                broken.len(),
+                broken.join(", ")
+            ),
+            Some(broken.len() as f64),
             Some(0.0),
         );
 
@@ -765,6 +945,201 @@ mod tests {
     // ─────────────────────────────────────────
     // systemd failed units
     // ─────────────────────────────────────────
+
+    // ─────────────────────────────────────────
+    // Container restarts
+    // ─────────────────────────────────────────
+
+    #[test]
+    fn test_first_sighting_of_a_container_never_alerts() {
+        // netfilter-mailcow sits at 412,813 restarts accumulated over months.
+        // Connecting to that host must not fire an alert for old history.
+        let mut manager = AlertManager::new();
+        let alerts = manager.process_container_restarts(
+            "srv-1",
+            "alemanha3",
+            &[("netfilter-mailcow".to_string(), 412_813)],
+        );
+        assert!(alerts.is_empty());
+        assert!(manager.get_active_alerts().is_empty());
+    }
+
+    #[test]
+    fn test_restarts_alert_on_rate_not_total() {
+        let mut manager = AlertManager::new();
+        let name = "netfilter-mailcow".to_string();
+
+        // Baseline at a huge total
+        manager.process_container_restarts("srv-1", "alemanha3", &[(name.clone(), 412_813)]);
+        // Three more restarts since: that is the news
+        let alerts =
+            manager.process_container_restarts("srv-1", "alemanha3", &[(name.clone(), 412_816)]);
+
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].alert_type, AlertType::ContainerCrashLoop);
+        assert_eq!(alerts[0].value, Some(3.0));
+        assert!(alerts[0].message.contains("netfilter-mailcow"));
+    }
+
+    #[test]
+    fn test_restarts_below_threshold_do_not_alert() {
+        let mut manager = AlertManager::new();
+        let name = "app".to_string();
+
+        manager.process_container_restarts("srv-1", "srv", &[(name.clone(), 10)]);
+        // Two restarts is a deploy, not a crash loop
+        let alerts = manager.process_container_restarts("srv-1", "srv", &[(name.clone(), 12)]);
+        assert!(alerts.is_empty());
+    }
+
+    #[test]
+    fn test_restart_baseline_accumulates_within_the_window() {
+        let mut manager = AlertManager::new();
+        let name = "app".to_string();
+
+        manager.process_container_restarts("srv-1", "srv", &[(name.clone(), 0)]);
+        assert!(manager
+            .process_container_restarts("srv-1", "srv", &[(name.clone(), 1)])
+            .is_empty());
+        assert!(manager
+            .process_container_restarts("srv-1", "srv", &[(name.clone(), 2)])
+            .is_empty());
+        // Third restart crosses the threshold against the same baseline
+        assert_eq!(
+            manager
+                .process_container_restarts("srv-1", "srv", &[(name.clone(), 3)])
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_recreated_container_resets_the_baseline() {
+        let mut manager = AlertManager::new();
+        let name = "app".to_string();
+
+        manager.process_container_restarts("srv-1", "srv", &[(name.clone(), 50)]);
+        // docker compose up recreates it: the counter starts from zero again
+        let alerts = manager.process_container_restarts("srv-1", "srv", &[(name.clone(), 0)]);
+        assert!(
+            alerts.is_empty(),
+            "a counter going backwards is a new container, not a fix"
+        );
+
+        // And the new baseline is the one used from here on
+        assert!(
+            manager
+                .process_container_restarts("srv-1", "srv", &[(name.clone(), 3)])
+                .len()
+                == 1
+        );
+    }
+
+    #[test]
+    fn test_restarts_tracked_per_container() {
+        let mut manager = AlertManager::new();
+
+        manager.process_container_restarts(
+            "srv-1",
+            "srv",
+            &[("a".to_string(), 0), ("b".to_string(), 0)],
+        );
+        let alerts = manager.process_container_restarts(
+            "srv-1",
+            "srv",
+            &[("a".to_string(), 5), ("b".to_string(), 0)],
+        );
+
+        assert_eq!(alerts.len(), 1);
+        assert!(alerts[0].message.contains("'a'"));
+    }
+
+    #[test]
+    fn test_restarts_tracked_per_server() {
+        let mut manager = AlertManager::new();
+        let name = "app".to_string();
+
+        manager.process_container_restarts("srv-1", "one", &[(name.clone(), 0)]);
+        // Same container name on another host must not inherit the baseline
+        let alerts = manager.process_container_restarts("srv-2", "two", &[(name.clone(), 99)]);
+        assert!(alerts.is_empty());
+    }
+
+    #[test]
+    fn test_crash_loop_alert_respects_cooldown() {
+        let mut manager = AlertManager::new();
+        let name = "app".to_string();
+
+        manager.process_container_restarts("srv-1", "srv", &[(name.clone(), 0)]);
+        assert_eq!(
+            manager
+                .process_container_restarts("srv-1", "srv", &[(name.clone(), 5)])
+                .len(),
+            1
+        );
+        // Still looping, but no second alert inside the cooldown
+        assert!(manager
+            .process_container_restarts("srv-1", "srv", &[(name.clone(), 10)])
+            .is_empty());
+    }
+
+    // ─────────────────────────────────────────
+    // Broken healthchecks
+    // ─────────────────────────────────────────
+
+    #[test]
+    fn test_broken_healthchecks_reported_as_info() {
+        let mut manager = AlertManager::new();
+        let alert = manager
+            .process_broken_healthchecks(
+                "srv-1",
+                "alemanha8",
+                &["app-1".to_string(), "app-2".to_string()],
+            )
+            .expect("broken checks should be reported");
+
+        assert_eq!(alert.alert_type, AlertType::ContainerHealthcheckBroken);
+        assert_eq!(
+            alert.severity,
+            AlertSeverity::Info,
+            "a probe that cannot run is maintenance, not an outage"
+        );
+        assert!(alert.message.contains("app-1"));
+        assert!(alert.message.contains("app-2"));
+    }
+
+    #[test]
+    fn test_broken_healthchecks_no_alert_when_none() {
+        let mut manager = AlertManager::new();
+        assert!(manager
+            .process_broken_healthchecks("srv-1", "srv", &[])
+            .is_none());
+    }
+
+    #[test]
+    fn test_broken_healthchecks_do_not_repeat() {
+        let mut manager = AlertManager::new();
+        let broken = vec!["app-1".to_string()];
+
+        assert!(manager
+            .process_broken_healthchecks("srv-1", "srv", &broken)
+            .is_some());
+        assert!(
+            manager
+                .process_broken_healthchecks("srv-1", "srv", &broken)
+                .is_none(),
+            "a standing configuration defect must not be re-reported every poll"
+        );
+    }
+
+    #[test]
+    fn test_broken_healthchecks_resolve_when_fixed() {
+        let mut manager = AlertManager::new();
+        manager.process_broken_healthchecks("srv-1", "srv", &["app-1".to_string()]);
+        manager.process_broken_healthchecks("srv-1", "srv", &[]);
+
+        assert!(manager.get_active_alerts()[0].is_resolved());
+    }
 
     #[test]
     fn test_systemd_failed_units_raises_warning() {

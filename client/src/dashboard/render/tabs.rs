@@ -11,6 +11,95 @@ use crate::dashboard::DashboardApp;
 
 use super::{format_bytes, format_uptime, Theme};
 
+/// Restarts beyond which a container is shown as crash-looping rather than
+/// merely restarted.
+///
+/// A long-lived container legitimately accumulates a few restarts across
+/// reboots and deploys; hundreds mean it never stays up.
+const CRASH_LOOP_RESTARTS: u32 = 100;
+
+/// Format a container's restart count, abbreviating the large ones.
+///
+/// The fleet's worst offender sat at 412,813 restarts — a figure that has to
+/// fit in a narrow column without pushing the table around.
+fn format_restart_count(restarts: u32) -> String {
+    // The bounds stop just short of the next unit so rounding cannot produce a
+    // four-digit mantissa such as "1000.0k".
+    match restarts {
+        0 => "—".to_string(),
+        n if n < 1_000 => n.to_string(),
+        n if n < 999_950 => format!("{:.1}k", n as f64 / 1_000.0),
+        n if n < 999_950_000 => format!("{:.1}M", n as f64 / 1_000_000.0),
+        n => format!("{:.1}B", n as f64 / 1_000_000_000.0),
+    }
+}
+
+/// Icon and style for a container's health.
+///
+/// A container whose healthcheck never worked is shown differently from one
+/// that started failing: with 21 permanently red containers on a host, a real
+/// failure is invisible.
+fn container_health_icon(
+    container: &shared::types::ContainerInfo,
+) -> Option<(&'static str, Style)> {
+    use shared::types::HealthAssessment;
+
+    if let Some(detail) = &container.health_detail {
+        return match detail.assess() {
+            HealthAssessment::Passing => Some((" 󰄬", Style::default().fg(Theme::SUCCESS))),
+            HealthAssessment::FailingNow => Some((" 󰅙", Style::default().fg(Theme::ERROR))),
+            // Muted on purpose: a broken check is maintenance, not an incident
+            HealthAssessment::BrokenCheck => Some((" 󰋼", Style::default().fg(Theme::MUTED))),
+        };
+    }
+
+    match container.health.as_str() {
+        "healthy" => Some((" 󰄬", Style::default().fg(Theme::SUCCESS))),
+        "unhealthy" => Some((" 󰅙", Style::default().fg(Theme::ERROR))),
+        _ => None,
+    }
+}
+
+/// Summarise what the container fleet on a host is missing.
+///
+/// Returns `None` when there is nothing to report, so a well-configured host
+/// gets no banner at all.
+fn summarize_container_risks(containers: &[shared::types::ContainerInfo]) -> Option<String> {
+    use shared::types::HealthAssessment;
+
+    let unlimited = containers.iter().filter(|c| !c.memory_limit_set).count();
+    let broken_checks = containers
+        .iter()
+        .filter_map(|c| c.health_detail.as_ref())
+        .filter(|h| h.assess() == HealthAssessment::BrokenCheck)
+        .count();
+    let crash_looping = containers
+        .iter()
+        .filter(|c| c.restart_count >= CRASH_LOOP_RESTARTS)
+        .count();
+
+    let mut parts = Vec::new();
+    if unlimited > 0 {
+        parts.push(format!(
+            "{}/{} without mem_limit",
+            unlimited,
+            containers.len()
+        ));
+    }
+    if broken_checks > 0 {
+        parts.push(format!("{} broken healthcheck(s)", broken_checks));
+    }
+    if crash_looping > 0 {
+        parts.push(format!("{} crash-looping", crash_looping));
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("  │  "))
+    }
+}
+
 /// Format a container's memory usage against its limit.
 ///
 /// A container with no limit has no meaningful percentage: Docker reports the
@@ -620,11 +709,7 @@ pub(super) fn draw_containers_tab<B: tui::backend::Backend>(
                         _ => ("󰏠", Style::default().fg(Theme::ERROR)),
                     };
 
-                    let health_icon = match c.health.as_str() {
-                        "healthy" => Some((" 󰄬", Style::default().fg(Theme::SUCCESS))),
-                        "unhealthy" => Some((" 󰅙", Style::default().fg(Theme::ERROR))),
-                        _ => None,
-                    };
+                    let health_icon = container_health_icon(c);
 
                     let status_text = if c.status.is_empty() {
                         c.state.clone()
@@ -677,26 +762,42 @@ pub(super) fn draw_containers_tab<B: tui::backend::Backend>(
                                 Some(_) => Style::default().fg(Theme::TEXT),
                             },
                         )),
+                        Cell::from(Span::styled(
+                            format_restart_count(c.restart_count),
+                            if c.restart_count >= CRASH_LOOP_RESTARTS {
+                                Style::default().fg(Theme::ERROR)
+                            } else if c.restart_count > 0 {
+                                Style::default().fg(Theme::WARNING)
+                            } else {
+                                Style::default().fg(Theme::MUTED)
+                            },
+                        )),
                     ])
                 })
                 .collect();
 
             let table = Table::new(rows)
                 .header(
-                    Row::new(vec!["Name", "Image", "Status", "CPU", "Memory", "MEM %"]).style(
+                    Row::new(vec![
+                        "Name", "Image", "Status", "CPU", "Memory", "MEM %", "Restarts",
+                    ])
+                    .style(
                         Style::default()
                             .fg(Theme::ACCENT)
                             .add_modifier(Modifier::BOLD),
                     ),
                 )
                 .block(block)
+                // Sums to 94%: the table inserts a space between columns, and
+                // claiming the full width would push the last one off screen
                 .widths(&[
-                    Constraint::Percentage(22),
-                    Constraint::Percentage(23),
+                    Constraint::Percentage(19),
                     Constraint::Percentage(18),
-                    Constraint::Percentage(10),
-                    Constraint::Percentage(17),
-                    Constraint::Percentage(10),
+                    Constraint::Percentage(16),
+                    Constraint::Percentage(8),
+                    Constraint::Percentage(15),
+                    Constraint::Percentage(9),
+                    Constraint::Percentage(9),
                 ])
                 .highlight_style(
                     Style::default()
@@ -706,7 +807,25 @@ pub(super) fn draw_containers_tab<B: tui::backend::Backend>(
                 .highlight_symbol("▶ ");
 
             let mut state = app.table_state.clone();
-            f.render_stateful_widget(table, area, &mut state);
+
+            // A summary line, only when there is something to say
+            match summarize_container_risks(containers) {
+                Some(summary) => {
+                    let chunks = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([Constraint::Min(3), Constraint::Length(1)])
+                        .split(area);
+
+                    f.render_stateful_widget(table, chunks[0], &mut state);
+
+                    let banner = Paragraph::new(Spans::from(vec![
+                        Span::styled(" 󰀦 ", Style::default().fg(Theme::WARNING)),
+                        Span::styled(summary, Style::default().fg(Theme::WARNING)),
+                    ]));
+                    f.render_widget(banner, chunks[1]);
+                }
+                None => f.render_stateful_widget(table, area, &mut state),
+            }
         } else {
             let not_connected = Paragraph::new("󰅛 Not connected. Press Enter to connect.")
                 .style(Style::default().fg(Theme::MUTED))
@@ -1510,6 +1629,180 @@ mod tests {
 
         let buffer = render_app_to_buffer(&app, draw_overview_tab);
         assert!(!buffer_contains(&buffer, "systemd unit"));
+    }
+
+    fn container_fixture(name: &str) -> ContainerInfo {
+        ContainerInfo {
+            id: format!("id-{}", name),
+            name: name.to_string(),
+            image: "busybox:latest".to_string(),
+            status: "Up 3 days".to_string(),
+            state: "running".to_string(),
+            health: "none".to_string(),
+            cpu_percent: 1.0,
+            memory_usage_bytes: 100_000_000,
+            memory_limit_bytes: 1_000_000_000,
+            memory_percent: Some(10.0),
+            restart_count: 0,
+            network_rx_bytes: 0,
+            network_tx_bytes: 0,
+            networks: vec![],
+            memory_limit_set: true,
+            health_detail: None,
+            swap_bytes: None,
+        }
+    }
+
+    fn health_detail(streak: u32, output: &str) -> ContainerHealthDetail {
+        ContainerHealthDetail {
+            failing_streak: streak,
+            last_output: output.to_string(),
+            last_exit_code: 1,
+            last_checked_at: None,
+        }
+    }
+
+    // ─────────────────────────────────────────
+    // Restart formatting
+    // ─────────────────────────────────────────
+
+    #[test]
+    fn test_format_restart_count_zero_is_a_dash() {
+        assert_eq!(format_restart_count(0), "—");
+    }
+
+    #[test]
+    fn test_format_restart_count_small_values_are_exact() {
+        assert_eq!(format_restart_count(7), "7");
+        assert_eq!(format_restart_count(999), "999");
+    }
+
+    #[test]
+    fn test_format_restart_count_abbreviates_large_values() {
+        assert_eq!(format_restart_count(60_040), "60.0k");
+        assert_eq!(format_restart_count(412_813), "412.8k");
+        assert_eq!(format_restart_count(1_500_000), "1.5M");
+    }
+
+    #[test]
+    fn test_format_restart_count_stays_narrow() {
+        // The column is 9% of the panel; nothing may blow it up
+        for value in [0, 9, 999, 1_000, 60_040, 412_813, u32::MAX] {
+            assert!(
+                format_restart_count(value).chars().count() <= 6,
+                "too wide for the column: {}",
+                format_restart_count(value)
+            );
+        }
+    }
+
+    // ─────────────────────────────────────────
+    // Health icon
+    // ─────────────────────────────────────────
+
+    #[test]
+    fn test_health_icon_distinguishes_broken_check_from_failure() {
+        let mut failing = container_fixture("sick");
+        failing.health_detail = Some(health_detail(3, "HTTP 503"));
+
+        let mut broken = container_fixture("misconfigured");
+        broken.health_detail = Some(health_detail(1_344, "curl: not found"));
+
+        let failing_icon = container_health_icon(&failing).unwrap();
+        let broken_icon = container_health_icon(&broken).unwrap();
+
+        assert_ne!(
+            failing_icon.0, broken_icon.0,
+            "a broken probe must not look like an outage"
+        );
+    }
+
+    #[test]
+    fn test_health_icon_passing() {
+        let mut healthy = container_fixture("fine");
+        healthy.health_detail = Some(health_detail(0, ""));
+        assert!(container_health_icon(&healthy).is_some());
+    }
+
+    #[test]
+    fn test_health_icon_falls_back_to_status_string() {
+        // A server predating the health detail fields still renders sensibly
+        let mut legacy = container_fixture("legacy");
+        legacy.health_detail = None;
+        legacy.health = "unhealthy".to_string();
+        assert!(container_health_icon(&legacy).is_some());
+
+        legacy.health = "none".to_string();
+        assert!(container_health_icon(&legacy).is_none());
+    }
+
+    // ─────────────────────────────────────────
+    // Risk summary
+    // ─────────────────────────────────────────
+
+    #[test]
+    fn test_risk_summary_absent_for_a_healthy_host() {
+        let containers = vec![container_fixture("a"), container_fixture("b")];
+        assert!(summarize_container_risks(&containers).is_none());
+    }
+
+    #[test]
+    fn test_risk_summary_counts_containers_without_limits() {
+        // alemanha7 ran 20 of 20 containers with no limit
+        let mut containers: Vec<ContainerInfo> = (0..20)
+            .map(|i| container_fixture(&format!("c{}", i)))
+            .collect();
+        for c in containers.iter_mut() {
+            c.memory_limit_set = false;
+        }
+
+        let summary = summarize_container_risks(&containers).unwrap();
+        assert!(summary.contains("20/20 without mem_limit"));
+    }
+
+    #[test]
+    fn test_risk_summary_counts_broken_healthchecks() {
+        let mut containers = vec![container_fixture("a"), container_fixture("b")];
+        containers[0].health_detail = Some(health_detail(5_000, "curl: not found"));
+
+        let summary = summarize_container_risks(&containers).unwrap();
+        assert!(summary.contains("1 broken healthcheck"));
+    }
+
+    #[test]
+    fn test_risk_summary_counts_crash_loops() {
+        let mut containers = vec![container_fixture("a")];
+        containers[0].restart_count = 60_040;
+
+        let summary = summarize_container_risks(&containers).unwrap();
+        assert!(summary.contains("1 crash-looping"));
+    }
+
+    #[test]
+    fn test_risk_summary_ignores_a_handful_of_restarts() {
+        let mut containers = vec![container_fixture("a")];
+        containers[0].restart_count = 4; // reboots and deploys
+        assert!(summarize_container_risks(&containers).is_none());
+    }
+
+    #[test]
+    fn test_containers_tab_shows_restarts_and_risk_summary() {
+        let mut app = create_test_app();
+        let server_id = app.servers[0].id;
+
+        let mut looping = container_fixture("netfilter-mailcow");
+        looping.restart_count = 412_813;
+        looping.memory_limit_set = false;
+        looping.memory_percent = None;
+
+        app.containers_cache
+            .insert(server_id, vec![looping, container_fixture("healthy-app")]);
+
+        let buffer = render_app_to_buffer(&app, draw_containers_tab);
+        assert!(buffer_contains(&buffer, "Restarts"));
+        assert!(buffer_contains(&buffer, "412.8k"));
+        assert!(buffer_contains(&buffer, "no limit"));
+        assert!(buffer_contains(&buffer, "crash-looping"));
     }
 
     #[test]

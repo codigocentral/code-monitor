@@ -110,6 +110,43 @@ pub(super) async fn fetch_server_data(app: &mut DashboardApp, server_id: uuid::U
             app.network_cache.insert(server_id, networks);
         }
         if let Some(containers) = containers {
+            let server_name = app
+                .servers
+                .iter()
+                .find(|s| s.id == server_id)
+                .map(|s| s.name.clone())
+                .unwrap_or_else(|| "Unknown".to_string());
+            let server_key = server_id.to_string();
+
+            let restarts: Vec<(String, u32)> = containers
+                .iter()
+                .map(|c| (c.name.clone(), c.restart_count))
+                .collect();
+            for alert in
+                app.alert_manager
+                    .process_container_restarts(&server_key, &server_name, &restarts)
+            {
+                let _ = app.notification_dispatcher.dispatch(&alert).await;
+            }
+
+            let broken_checks: Vec<String> = containers
+                .iter()
+                .filter(|c| {
+                    c.health_detail
+                        .as_ref()
+                        .map(|h| h.assess() == shared::types::HealthAssessment::BrokenCheck)
+                        .unwrap_or(false)
+                })
+                .map(|c| c.name.clone())
+                .collect();
+            if let Some(alert) = app.alert_manager.process_broken_healthchecks(
+                &server_key,
+                &server_name,
+                &broken_checks,
+            ) {
+                let _ = app.notification_dispatcher.dispatch(&alert).await;
+            }
+
             app.containers_cache.insert(server_id, containers);
         }
         if let Some(postgres) = postgres {

@@ -365,7 +365,7 @@ pub mod types {
     }
 
     /// Result of a container's last health check
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct ContainerHealthDetail {
         /// Consecutive failures. A high number with a constant output means the
         /// check itself is broken, not the application.
@@ -374,6 +374,63 @@ pub mod types {
         pub last_output: String,
         pub last_exit_code: i32,
         pub last_checked_at: Option<DateTime<Utc>>,
+    }
+
+    /// What an unhealthy container is actually telling us
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum HealthAssessment {
+        /// The last check passed
+        Passing,
+        /// Failing recently: worth waking someone
+        FailingNow,
+        /// The check never worked — a configuration defect, not an incident
+        BrokenCheck,
+    }
+
+    impl ContainerHealthDetail {
+        /// Failures beyond which a check is treated as broken rather than
+        /// failing.
+        ///
+        /// At the usual 30s interval this is roughly a day of uninterrupted
+        /// failure. Nothing genuinely sick survives that long untouched, while
+        /// a misconfigured check racks it up quietly — the fleet audit found
+        /// streaks from 1,344 to 162,460.
+        pub const BROKEN_CHECK_STREAK: u32 = 2_500;
+
+        /// Output fragments that mean the probe itself never ran.
+        const BROKEN_CHECK_MARKERS: &'static [&'static str] = &[
+            "not found",
+            "no such file",
+            "executable file not found",
+            "oci runtime exec failed",
+            "permission denied",
+            "cannot exec",
+        ];
+
+        /// Tell a sick application apart from a healthcheck that never worked.
+        ///
+        /// This matters because it is what makes the signal usable: with 21
+        /// containers permanently red for configuration reasons, a container
+        /// that genuinely falls over goes unnoticed.
+        pub fn assess(&self) -> HealthAssessment {
+            if self.failing_streak == 0 {
+                return HealthAssessment::Passing;
+            }
+
+            let output = self.last_output.to_lowercase();
+            if Self::BROKEN_CHECK_MARKERS
+                .iter()
+                .any(|marker| output.contains(marker))
+            {
+                return HealthAssessment::BrokenCheck;
+            }
+
+            if self.failing_streak >= Self::BROKEN_CHECK_STREAK {
+                return HealthAssessment::BrokenCheck;
+            }
+
+            HealthAssessment::FailingNow
+        }
     }
 
     /// Authentication token
@@ -992,6 +1049,98 @@ mod tests {
             health_detail: None,
             swap_bytes: swap,
         }
+    }
+
+    // ─────────────────────────────────────────
+    // Health assessment
+    // ─────────────────────────────────────────
+
+    fn health(streak: u32, output: &str) -> ContainerHealthDetail {
+        ContainerHealthDetail {
+            failing_streak: streak,
+            last_output: output.to_string(),
+            last_exit_code: if streak == 0 { 0 } else { 1 },
+            last_checked_at: None,
+        }
+    }
+
+    #[test]
+    fn test_health_passing_when_streak_is_zero() {
+        assert_eq!(health(0, "").assess(), HealthAssessment::Passing);
+    }
+
+    #[test]
+    fn test_health_failing_now_for_a_short_streak() {
+        assert_eq!(
+            health(3, "HTTP 503 Service Unavailable").assess(),
+            HealthAssessment::FailingNow
+        );
+    }
+
+    #[test]
+    fn test_health_missing_probe_binary_is_a_broken_check() {
+        // The dominant cause across the fleet: the image has no curl
+        assert_eq!(
+            health(1, "curl: not found").assess(),
+            HealthAssessment::BrokenCheck
+        );
+    }
+
+    #[test]
+    fn test_health_broken_check_markers() {
+        for output in [
+            "OCI runtime exec failed: exec failed",
+            "exec: \"wget\": executable file not found in $PATH",
+            "/bin/sh: 1: nc: not found",
+            "permission denied",
+        ] {
+            assert_eq!(
+                health(5, output).assess(),
+                HealthAssessment::BrokenCheck,
+                "should classify as broken: {}",
+                output
+            );
+        }
+    }
+
+    #[test]
+    fn test_health_marker_matching_is_case_insensitive() {
+        assert_eq!(
+            health(2, "CURL: NOT FOUND").assess(),
+            HealthAssessment::BrokenCheck
+        );
+    }
+
+    #[test]
+    fn test_health_enormous_streak_is_a_broken_check() {
+        // 162,460 consecutive failures since April is a configuration defect,
+        // not an outage anyone is about to fix by being paged
+        assert_eq!(
+            health(162_460, "Connection refused").assess(),
+            HealthAssessment::BrokenCheck
+        );
+    }
+
+    #[test]
+    fn test_health_streak_boundary() {
+        let threshold = ContainerHealthDetail::BROKEN_CHECK_STREAK;
+        assert_eq!(
+            health(threshold - 1, "Connection refused").assess(),
+            HealthAssessment::FailingNow
+        );
+        assert_eq!(
+            health(threshold, "Connection refused").assess(),
+            HealthAssessment::BrokenCheck
+        );
+    }
+
+    #[test]
+    fn test_health_genuine_failure_is_not_masked_by_a_long_streak_rule() {
+        // A real outage must stay actionable for as long as it plausibly is one
+        assert_eq!(
+            health(20, "database is starting up").assess(),
+            HealthAssessment::FailingNow
+        );
     }
 
     #[test]
