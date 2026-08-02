@@ -57,7 +57,11 @@ impl PostgresCollector {
         Ok(client)
     }
 
-    async fn connect(&self) -> Result<Client> {
+    /// Build the connection config from the cluster settings.
+    ///
+    /// Kept separate so the socket-versus-TCP wiring can be tested without a
+    /// live server — that is where the port-over-socket bug hid.
+    fn build_connect_config(&self) -> tokio_postgres::Config {
         let mut connect_config = tokio_postgres::Config::new();
         connect_config
             .user(&self.config.user)
@@ -65,16 +69,25 @@ impl PostgresCollector {
             .application_name("code-monitor-agent")
             .options("-c statement_timeout=10s");
 
+        // The port is always needed: over a Unix socket, Postgres names the
+        // socket file .s.PGSQL.<port>, so a cluster on 5433 reached by socket
+        // still has to carry its port or it silently connects to 5432.
+        connect_config.port(self.config.port);
         if let Some(ref socket) = self.config.socket_path {
             connect_config.host(socket);
         } else {
             connect_config.host(&self.config.host);
-            connect_config.port(self.config.port);
         }
 
         if let Some(ref password) = self.config.password {
             connect_config.password(password);
         }
+
+        connect_config
+    }
+
+    async fn connect(&self) -> Result<Client> {
+        let connect_config = self.build_connect_config();
 
         let (client, connection) = connect_config.connect(NoTls).await.with_context(|| {
             format!(
@@ -340,6 +353,50 @@ mod tests {
         };
         let collector = PostgresCollector::new(config);
         assert_eq!(collector.config.name, "test");
+    }
+
+    fn cluster(port: u16, socket: Option<&str>) -> PostgresClusterConfig {
+        PostgresClusterConfig {
+            name: "c".to_string(),
+            host: "localhost".to_string(),
+            port,
+            database: "postgres".to_string(),
+            user: "code-monitor".to_string(),
+            password: None,
+            socket_path: socket.map(str::to_string),
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn test_socket_connection_keeps_its_port() {
+        // The bug this guards: over a socket the port was dropped, so a 5433
+        // cluster silently talked to 5432. Postgres names the socket file
+        // .s.PGSQL.<port>, so the port must survive.
+        let collector = PostgresCollector::new(cluster(5433, Some("/var/run/postgresql")));
+        let cfg = collector.build_connect_config();
+
+        assert_eq!(cfg.get_ports(), [5433]);
+        assert_eq!(
+            cfg.get_hosts().len(),
+            1,
+            "socket path should be the sole host"
+        );
+    }
+
+    #[test]
+    fn test_tcp_connection_uses_host_and_port() {
+        let collector = PostgresCollector::new(cluster(5432, None));
+        let cfg = collector.build_connect_config();
+        assert_eq!(cfg.get_ports(), [5432]);
+    }
+
+    #[test]
+    fn test_connect_config_carries_user_and_dbname() {
+        let collector = PostgresCollector::new(cluster(5432, Some("/var/run/postgresql")));
+        let cfg = collector.build_connect_config();
+        assert_eq!(cfg.get_user(), Some("code-monitor"));
+        assert_eq!(cfg.get_dbname(), Some("postgres"));
     }
 
     #[test]
