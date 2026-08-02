@@ -129,6 +129,68 @@ only. If the client cannot connect but the service is active and listening,
 the firewall is the first place to look — a host with a public interface must
 never expose this port wider than the VPN.
 
+## Hosts outside the VPN: a persistent tunnel
+
+A host with no VPN address — a mail server reached only over the public
+internet, say — should not expose the gRPC port at all. Install with the bind
+address set to loopback:
+
+```bash
+ssh -t admin@HOST 'sudo bash /tmp/install-remote.sh 127.0.0.1'
+```
+
+The agent then listens only on the host's own loopback, and the client reaches
+it through an SSH tunnel. Rather than a hand-run `ssh -L`, keep it up with a
+dedicated key and a user service.
+
+Generate a key with no passphrase and authorize it on the host **restricted to
+this one forward** — it grants no shell and no other forwarding:
+
+```bash
+ssh-keygen -t ed25519 -N '' -f ~/.ssh/code-monitor-tunnel
+
+# On the host, append to ~/.ssh/authorized_keys (one line):
+restrict,command="/bin/false",port-forwarding,permitopen="127.0.0.1:50051" ssh-ed25519 AAAA... code-monitor-tunnel
+```
+
+Both parts matter: `restrict` drops PTY and every forwarding, then
+`port-forwarding` with `permitopen` re-enables just the one destination.
+`restrict` alone does **not** stop command execution — `ssh host 'cmd'` would
+still run — so `command="/bin/false"` is what actually denies a shell. With
+`ssh -N` the forced command is never invoked; the forward still works.
+
+A systemd **user** service keeps it alive and reconnects:
+
+```ini
+# ~/.config/systemd/user/code-monitor-tunnel.service
+[Unit]
+Description=Code Monitor SSH tunnel
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/ssh -N -o BatchMode=yes -o IdentitiesOnly=yes \
+  -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+  -i %h/.ssh/code-monitor-tunnel -L 50057:127.0.0.1:50051 admin@HOST
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now code-monitor-tunnel.service
+```
+
+Point the server's client-config entry at `127.0.0.1:50057`. By default a user
+service stops when you log out of every session; to keep the tunnel up across
+logout and reboot, enable lingering once:
+
+```bash
+sudo loginctl enable-linger "$USER"
+```
+
 ## Rollback
 
 ```bash
