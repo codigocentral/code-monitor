@@ -1,0 +1,31 @@
+# Arquivos e pastas que NÃO vão para o repositório público no GitHub.
+#
+# Um padrão por linha, caminho relativo à raiz do repositório, glob permitido.
+# Consumido por scripts/publish-to-github.sh — que faz cópia filtrada, não espelho.
+#
+# Tudo aqui continua normalmente versionado no GitLab. A exclusão vale só
+# para a publicação.
+
+# --- Guias de sessão e instruções internas -----------------------------------
+CLAUDE.md
+.publishignore
+scripts/publish-to-github.sh
+
+# --- Infraestrutura real -----------------------------------------------------
+# 02-aplicacao-infra.md e 04-deployment-plan.md trazem os IPs da VPN (10.10.0.x),
+# os papéis de cada servidor da frota e o usuário SSH de acesso.
+docsx/00-EXECUCAO
+
+# --- Estratégia comercial ----------------------------------------------------
+# Análise competitiva, preços de mercado, modelo de negócio, go-to-market e
+# roadmap de monetização. Dar isso a um concorrente é dar o mapa inteiro.
+# REVISAR: docsx/05-TECNICO/API-GRPC.md é boa documentação pública e pode ser
+# promovida para doc/ quando quiser publicá-la.
+docsx
+
+PLANO-MESTRE-OPEN-SOURCE.md
+PLANO-DE-ATIVIDADES.md
+
+# --- Documento de origem -----------------------------------------------------
+# Requisitos originais em português. Contém credencial em texto plano.
+necessidade.md
