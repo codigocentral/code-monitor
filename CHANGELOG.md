@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Fleet audit collectors and predictive alerts (#1–#11):
+  - Postgres: `pg_settings` inspection revealing actual source file (`auto.conf` vs `.conf`) (#1)
+  - Docker: true `mem_limit` detection distinguishing unlimited containers from host-RAM allocations (#2)
+  - Docker: inspect-based real `restart_count` tracking crash-looping containers (#3)
+  - Docker: healthcheck failing streak count and last error output classification (#4)
+  - Memory: active swap throughput (`si`/`so` page rates) and Linux PSI pressure gauges instead of raw swap percentage (#5)
+  - Memory: per-process `VmSwap` tracking and pre-flight `would_exceed_limit_on_swapoff` prediction (#6)
+  - systemd: automatic detection and alerting for units in `failed` state (#7)
+  - TLS: automated certificate expiration tracking (21d warning / 7d critical) and certbot renewal service health (#8)
+  - Network: socket listening scan flagging sensitive datastores bound to `0.0.0.0` (#9)
+  - Predictive alerts: machine overcommitment detector comparing promised memory vs actual physical RAM (#10)
+  - Database lifecycle: orphan database detection for PostgreSQL and MariaDB tracking idle instances and lifetime transactions (#11)
+- Static binary compilation using `rustls` throughout to remove glibc dynamic dependencies
+- Remote installation script (`scripts/install-remote.sh`) and database collector provisioning scripts
 - Config validation on load: interval, max clients, log level, cluster ports and TLS paths are checked with descriptive errors
 - Graceful shutdown on SIGINT/SIGTERM for the gRPC server
 - gzip compression for gRPC traffic (server and client)
