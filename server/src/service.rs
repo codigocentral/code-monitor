@@ -8,6 +8,7 @@ use shared::proto::monitoring::{
     monitor_service_server::MonitorService, system_update::UpdateType,
     ConnectionStateCount as ProtoConnectionStateCount, ContainerInfo as ProtoContainerInfo,
     ContainersRequest, ContainersResponse, DiskInfo as ProtoDiskInfo,
+    ImageVersionInfo as ProtoImageVersionInfo, ImageVersionStatus as ProtoImageVersionStatus,
     ListeningPortInfo as ProtoListeningPortInfo, ListeningPortsResponse,
     MariaDbClusterInfo as ProtoMariaDBClusterInfo, MariaDbInfoResponse,
     MariaDbProcessInfo as ProtoMariaDBProcessInfo, MariaDbSchemaInfo as ProtoMariaDBSchemaInfo,
@@ -528,6 +529,30 @@ impl MonitorService for MonitorServiceImpl {
                     .and_then(|h| h.last_checked_at)
                     .map(datetime_to_timestamp),
                 swap_bytes: c.swap_bytes,
+                image_version: c.image_version.as_ref().map(|v| ProtoImageVersionInfo {
+                    image_ref: v.image_ref.clone(),
+                    registry: v.registry.clone(),
+                    repository: v.repository.clone(),
+                    tag: v.tag.clone(),
+                    local_digest: v.local_digest.clone(),
+                    remote_digest: v.remote_digest.clone(),
+                    status: match v.status {
+                        shared::types::VersionStatus::UpToDate => {
+                            ProtoImageVersionStatus::UpToDate as i32
+                        }
+                        shared::types::VersionStatus::Drifted => {
+                            ProtoImageVersionStatus::Drifted as i32
+                        }
+                        shared::types::VersionStatus::LocalBuild => {
+                            ProtoImageVersionStatus::LocalBuild as i32
+                        }
+                        shared::types::VersionStatus::Unknown => {
+                            ProtoImageVersionStatus::Unknown as i32
+                        }
+                    },
+                    checked_at: v.checked_at.map(datetime_to_timestamp),
+                    error: v.error.clone(),
+                }),
             })
             .collect();
 

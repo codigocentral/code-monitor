@@ -12,7 +12,9 @@ use chrono::{DateTime, Utc};
 use futures_util::stream::StreamExt;
 use shared::types::{ContainerHealthDetail, ContainerInfo};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tracing::{debug, info, warn};
+use crate::collectors::versions::VersionsCollector;
 
 /// Cap on the stored healthcheck output.
 ///
@@ -98,9 +100,9 @@ fn extract_inspect_details(inspect: &ContainerInspectResponse) -> InspectDetails
 
 /// Memory usage against the limit, or `None` when there is no limit.
 ///
-/// Without a limit Docker reports the host's total RAM, and dividing by that
-/// produces a reassuring number for the one container that can take the host
-/// down. No percentage is the honest answer.
+/// A container without a limit has no percentage: Docker fills `stats` with the
+/// host's total RAM, which makes a container that could bring the machine down
+/// look like it is using a comfortable fraction. Leaving it empty is honest.
 fn memory_percent(usage: u64, limit: u64, limit_set: bool) -> Option<f64> {
     if !limit_set || limit == 0 {
         return None;
@@ -113,6 +115,7 @@ pub struct DockerCollector {
     docker: Option<Docker>,
     _socket_path: String,
     connection_failed: AtomicBool,
+    versions_collector: Arc<VersionsCollector>,
 }
 
 impl DockerCollector {
@@ -122,6 +125,7 @@ impl DockerCollector {
             docker: None,
             _socket_path: String::new(),
             connection_failed: AtomicBool::new(false),
+            versions_collector: Arc::new(VersionsCollector::default()),
         }
     }
 
@@ -148,6 +152,7 @@ impl DockerCollector {
             docker,
             _socket_path: socket_path,
             connection_failed: AtomicBool::new(false),
+            versions_collector: Arc::new(VersionsCollector::default()),
         }
     }
 
@@ -176,6 +181,7 @@ impl DockerCollector {
             docker,
             _socket_path: socket_path.to_string(),
             connection_failed: AtomicBool::new(false),
+            versions_collector: Arc::new(VersionsCollector::default()),
         }
     }
 
@@ -303,6 +309,12 @@ impl DockerCollector {
                 .map(|n| n.keys().cloned().collect())
                 .unwrap_or_default();
 
+            let image_version = if !image.is_empty() {
+                Some(self.versions_collector.check_image(docker, &image).await)
+            } else {
+                None
+            };
+
             container_infos.push(ContainerInfo {
                 id,
                 name,
@@ -321,6 +333,7 @@ impl DockerCollector {
                 memory_limit_set: details.memory_limit_set,
                 health_detail: details.health_detail,
                 swap_bytes: swap_by_container.get(&id_for_swap).copied(),
+                image_version,
             });
         }
 

@@ -2000,6 +2000,7 @@ mod tests {
                 memory_limit_set: false,
                 health_detail: None,
                 swap_bytes: None,
+                image_version: None,
             }],
         );
         assert_eq!(app.get_current_list_len(), 1);

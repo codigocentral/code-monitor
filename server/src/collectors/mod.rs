@@ -10,6 +10,7 @@ pub mod net_ports;
 pub mod postgres;
 pub mod systemd;
 pub mod tls;
+pub mod versions;
 
 use anyhow::Result;
 use async_trait::async_trait;

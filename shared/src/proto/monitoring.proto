@@ -181,6 +181,30 @@ message ContainerInfo {
 
     // Swap held by the container's processes. Absent where unavailable.
     optional uint64 swap_bytes = 20;
+
+    // Image drift status against remote registry
+    optional ImageVersionInfo image_version = 21;
+}
+
+// Status of image version comparison
+enum ImageVersionStatus {
+    IMAGE_VERSION_STATUS_UNKNOWN = 0;
+    IMAGE_VERSION_STATUS_UP_TO_DATE = 1;
+    IMAGE_VERSION_STATUS_DRIFTED = 2;
+    IMAGE_VERSION_STATUS_LOCAL_BUILD = 3;
+}
+
+// Container image version check info
+message ImageVersionInfo {
+    string image_ref = 1;
+    string registry = 2;
+    string repository = 3;
+    string tag = 4;
+    optional string local_digest = 5;
+    optional string remote_digest = 6;
+    ImageVersionStatus status = 7;
+    google.protobuf.Timestamp checked_at = 8;
+    optional string error = 9;
 }
 
 // Containers request

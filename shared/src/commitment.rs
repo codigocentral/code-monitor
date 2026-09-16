@@ -308,6 +308,7 @@ mod tests {
             memory_limit_set: limit_set,
             health_detail: None,
             swap_bytes: None,
+            image_version: None,
         }
     }
 

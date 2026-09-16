@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Network: socket listening scan flagging sensitive datastores bound to `0.0.0.0` (#9)
   - Predictive alerts: machine overcommitment detector comparing promised memory vs actual physical RAM (#10)
   - Database lifecycle: orphan database detection for PostgreSQL and MariaDB tracking idle instances and lifetime transactions (#11)
+- Versions collector: lightweight detection of container image drift (local digest vs remote registry digest) for floating tags (`latest`), with 24h TTL caching and TUI indicators (`·` up to date, `↑` drifted)
 - Static binary compilation using `rustls` throughout to remove glibc dynamic dependencies
 - Remote installation script (`scripts/install-remote.sh`) and database collector provisioning scripts
 - Config validation on load: interval, max clients, log level, cluster ports and TLS paths are checked with descriptive errors

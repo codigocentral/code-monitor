@@ -5,7 +5,8 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, TimeZone, Utc};
 use shared::proto::monitoring::{
-    monitor_service_client::MonitorServiceClient, ProcessesRequest, SystemUpdate, UpdatesRequest,
+    monitor_service_client::MonitorServiceClient, ImageVersionStatus as ProtoImageVersionStatus,
+    ProcessesRequest, SystemUpdate, UpdatesRequest,
 };
 use shared::types::{
     BindScope, ConnectionStateCount, ContainerHealthDetail, ContainerInfo, DiskInfo,
@@ -339,6 +340,31 @@ impl MonitorClient {
                 })
                 .filter(|h| h.failing_streak > 0 || !h.last_output.is_empty()),
                 swap_bytes: c.swap_bytes,
+                image_version: c.image_version.map(|v| {
+                    let status = match v.status() {
+                        ProtoImageVersionStatus::UpToDate => {
+                            shared::types::VersionStatus::UpToDate
+                        }
+                        ProtoImageVersionStatus::Drifted => {
+                            shared::types::VersionStatus::Drifted
+                        }
+                        ProtoImageVersionStatus::LocalBuild => {
+                            shared::types::VersionStatus::LocalBuild
+                        }
+                        _ => shared::types::VersionStatus::Unknown,
+                    };
+                    shared::types::ImageVersionInfo {
+                        image_ref: v.image_ref,
+                        registry: v.registry,
+                        repository: v.repository,
+                        tag: v.tag,
+                        local_digest: v.local_digest,
+                        remote_digest: v.remote_digest,
+                        status,
+                        checked_at: v.checked_at.map(timestamp_to_datetime),
+                        error: v.error,
+                    }
+                }),
             })
             .collect();
 

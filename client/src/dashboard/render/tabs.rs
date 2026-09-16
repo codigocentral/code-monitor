@@ -216,6 +216,11 @@ fn summarize_container_risks(containers: &[shared::types::ContainerInfo]) -> Opt
         .iter()
         .filter(|c| c.would_exceed_limit_on_swapoff())
         .count();
+    let drifted = containers
+        .iter()
+        .filter_map(|c| c.image_version.as_ref())
+        .filter(|v| v.status == shared::types::VersionStatus::Drifted)
+        .count();
 
     let mut parts = Vec::new();
     if unlimited > 0 {
@@ -233,6 +238,9 @@ fn summarize_container_risks(containers: &[shared::types::ContainerInfo]) -> Opt
     }
     if swapoff_risk > 0 {
         parts.push(format!("{} would OOM on swapoff", swapoff_risk));
+    }
+    if drifted > 0 {
+        parts.push(format!("{} outdated image(s)", drifted));
     }
 
     if parts.is_empty() {
@@ -1041,12 +1049,28 @@ pub(super) fn draw_containers_tab<B: tui::backend::Backend>(
                         status_spans.push(Span::styled(icon, style));
                     }
 
+                    let image_base = c.image.split(':').next().unwrap_or(&c.image);
+                    let mut image_spans = vec![Span::styled(image_base, Style::default().fg(Theme::MUTED))];
+                    if let Some(ver) = &c.image_version {
+                        match ver.status {
+                            shared::types::VersionStatus::Drifted => {
+                                image_spans.push(Span::styled(" ↑", Style::default().fg(Theme::WARNING)));
+                            }
+                            shared::types::VersionStatus::UpToDate => {
+                                image_spans.push(Span::styled(" ·", Style::default().fg(Theme::SUCCESS)));
+                            }
+                            shared::types::VersionStatus::LocalBuild => {
+                                image_spans.push(Span::styled(" (local)", Style::default().fg(Theme::MUTED)));
+                            }
+                            shared::types::VersionStatus::Unknown => {
+                                image_spans.push(Span::styled(" ?", Style::default().fg(Theme::MUTED)));
+                            }
+                        }
+                    }
+
                     Row::new(vec![
                         Cell::from(Span::styled(&c.name, Style::default().fg(Theme::TEXT))),
-                        Cell::from(Span::styled(
-                            c.image.split(':').next().unwrap_or(&c.image).to_string(),
-                            Style::default().fg(Theme::MUTED),
-                        )),
+                        Cell::from(Spans::from(image_spans)),
                         Cell::from(Spans::from(status_spans)),
                         Cell::from(Span::styled(
                             format!("{:>5.1}%", c.cpu_percent),
@@ -1868,6 +1892,7 @@ mod tests {
                     memory_limit_set: false,
                     health_detail: None,
                     swap_bytes: None,
+                    image_version: None,
                 },
                 ContainerInfo {
                     id: "def456".to_string(),
@@ -1887,6 +1912,7 @@ mod tests {
                     memory_limit_set: false,
                     health_detail: None,
                     swap_bytes: None,
+                    image_version: None,
                 },
                 ContainerInfo {
                     id: "ghi789".to_string(),
@@ -1906,6 +1932,7 @@ mod tests {
                     memory_limit_set: false,
                     health_detail: None,
                     swap_bytes: None,
+                    image_version: None,
                 },
             ],
         );
@@ -1941,6 +1968,7 @@ mod tests {
                 memory_limit_set: false,
                 health_detail: None,
                 swap_bytes: None,
+                image_version: None,
             }],
         );
         let _buffer = render_app_to_buffer(&app, draw_containers_tab);
@@ -2550,6 +2578,7 @@ mod tests {
             memory_limit_set: true,
             health_detail: None,
             swap_bytes: None,
+            image_version: None,
         }
     }
 
@@ -2683,6 +2712,25 @@ mod tests {
         let mut containers = vec![container_fixture("a")];
         containers[0].restart_count = 4; // reboots and deploys
         assert!(summarize_container_risks(&containers).is_none());
+    }
+
+    #[test]
+    fn test_risk_summary_counts_drifted_images() {
+        let mut containers = vec![container_fixture("a"), container_fixture("b")];
+        containers[0].image_version = Some(shared::types::ImageVersionInfo {
+            image_ref: "redis:latest".to_string(),
+            registry: "registry-1.docker.io".to_string(),
+            repository: "library/redis".to_string(),
+            tag: "latest".to_string(),
+            local_digest: Some("sha256:111".to_string()),
+            remote_digest: Some("sha256:222".to_string()),
+            status: shared::types::VersionStatus::Drifted,
+            checked_at: None,
+            error: None,
+        });
+
+        let summary = summarize_container_risks(&containers).unwrap();
+        assert!(summary.contains("1 outdated image(s)"));
     }
 
     #[test]

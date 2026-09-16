@@ -3,7 +3,9 @@
 //! This module contains common data structures, error types, and protocol definitions
 //! used by both the server and client components.
 
+#[allow(clippy::all)]
 pub mod proto {
+    #[allow(clippy::all)]
     pub mod monitoring {
         include!(concat!(env!("OUT_DIR"), "/monitoring.rs"));
     }
@@ -348,6 +350,9 @@ pub mod types {
         /// Swap held by the container's processes; `None` where unavailable
         #[serde(default)]
         pub swap_bytes: Option<u64>,
+        /// Status of image drift against the remote registry
+        #[serde(default)]
+        pub image_version: Option<ImageVersionInfo>,
     }
 
     impl ContainerInfo {
@@ -432,6 +437,44 @@ pub mod types {
 
             HealthAssessment::FailingNow
         }
+    }
+
+    /// Status of a container image version check against its registry
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum VersionStatus {
+        /// Local digest matches remote registry digest
+        UpToDate,
+        /// Remote registry has a newer image under the same tag
+        Drifted,
+        /// Image built locally without registry RepoDigests
+        LocalBuild,
+        /// Registry check failed, rate-limited, or unknown
+        Unknown,
+    }
+
+    impl std::fmt::Display for VersionStatus {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::UpToDate => write!(f, "UpToDate"),
+                Self::Drifted => write!(f, "Drifted"),
+                Self::LocalBuild => write!(f, "LocalBuild"),
+                Self::Unknown => write!(f, "Unknown"),
+            }
+        }
+    }
+
+    /// Information about a container's image version and registry status
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct ImageVersionInfo {
+        pub image_ref: String,
+        pub registry: String,
+        pub repository: String,
+        pub tag: String,
+        pub local_digest: Option<String>,
+        pub remote_digest: Option<String>,
+        pub status: VersionStatus,
+        pub checked_at: Option<DateTime<Utc>>,
+        pub error: Option<String>,
     }
 
     /// Authentication token
@@ -898,6 +941,7 @@ mod tests {
             memory_limit_set: false,
             health_detail: None,
             swap_bytes: None,
+            image_version: None,
         };
 
         let json = serde_json::to_string(&container).unwrap();
@@ -1196,6 +1240,7 @@ mod tests {
             memory_limit_set: limit_set,
             health_detail: None,
             swap_bytes: swap,
+            image_version: None,
         }
     }
 
