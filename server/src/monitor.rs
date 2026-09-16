@@ -437,7 +437,7 @@ impl SystemMonitor {
             .collect();
 
         // Sort by memory usage (descending) for better visibility
-        services.sort_by(|a, b| b.memory_usage_bytes.cmp(&a.memory_usage_bytes));
+        services.sort_by_key(|b| std::cmp::Reverse(b.memory_usage_bytes));
 
         // Limit to top 50 services
         services.truncate(50);

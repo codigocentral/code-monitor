@@ -388,7 +388,7 @@ async fn quick_connect(
     io::stdin().read_line(&mut name)?;
     let name = name.trim().to_string();
     let name = if name.is_empty() {
-        format!("Server-{}", &address)
+        format!("Server-{}", address)
     } else {
         name
     };

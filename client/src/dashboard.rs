@@ -1409,25 +1409,25 @@ async fn run_app<B: tui::backend::Backend>(
                                     _ => {}
                                 }
                             }
-                            KeyCode::Right | KeyCode::Char('l') => {
-                                if app.settings_selection == 1 {
-                                    // Increase update interval
-                                    if app.update_interval < 60 {
-                                        app.update_interval += 1;
-                                    }
-                                    app.status_message =
-                                        format!("Update interval: {}s", app.update_interval);
+                            KeyCode::Right | KeyCode::Char('l')
+                                if app.settings_selection == 1 =>
+                            {
+                                // Increase update interval
+                                if app.update_interval < 60 {
+                                    app.update_interval += 1;
                                 }
+                                app.status_message =
+                                    format!("Update interval: {}s", app.update_interval);
                             }
-                            KeyCode::Left | KeyCode::Char('h') => {
-                                if app.settings_selection == 1 {
-                                    // Decrease update interval
-                                    if app.update_interval > 1 {
-                                        app.update_interval -= 1;
-                                    }
-                                    app.status_message =
-                                        format!("Update interval: {}s", app.update_interval);
+                            KeyCode::Left | KeyCode::Char('h')
+                                if app.settings_selection == 1 =>
+                            {
+                                // Decrease update interval
+                                if app.update_interval > 1 {
+                                    app.update_interval -= 1;
                                 }
+                                app.status_message =
+                                    format!("Update interval: {}s", app.update_interval);
                             }
                             _ => {}
                         }

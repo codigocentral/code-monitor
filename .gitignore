@@ -51,4 +51,5 @@ Desktop.ini
 
 # Local Codex/Claude settings
 .claude/
+.codegraph/
 dist/
