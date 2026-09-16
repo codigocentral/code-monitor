@@ -967,13 +967,13 @@ mod tests {
     #[test]
     fn test_parse_ip_addr_output_last_address_wins() {
         let sample = r#"2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP group default qlen 1000
-    inet 10.10.0.9/24 brd 10.10.0.255 scope global eth0
+    inet 10.0.0.9/24 brd 10.0.0.255 scope global eth0
        valid_lft forever preferred_lft forever
-    inet 10.10.0.99/24 brd 10.10.0.255 scope global secondary eth0
+    inet 10.0.0.99/24 brd 10.0.0.255 scope global secondary eth0
        valid_lft forever preferred_lft forever
 "#;
         let ips = parse_ip_addr_output(sample);
-        assert_eq!(ips.get("eth0").map(String::as_str), Some("10.10.0.99"));
+        assert_eq!(ips.get("eth0").map(String::as_str), Some("10.0.0.99"));
     }
 
     #[test]

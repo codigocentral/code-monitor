@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn test_shared_buffers_in_8kb_blocks() {
-        // 524288 blocks of 8kB is the 4GB that sank alemanha6
+        // 524288 blocks of 8kB is 4GB
         let bytes = setting_bytes(&setting("shared_buffers", "524288", Some("8kB"))).unwrap();
         assert_eq!(bytes, 4 * 1024 * 1024 * 1024);
     }
@@ -399,7 +399,7 @@ mod tests {
 
     #[test]
     fn test_postgres_sort_memory_multiplies_by_connections() {
-        // The alemanha8:5433 configuration: 2GB shared, 16MB × 500
+        // Server pg-5433 configuration: 2GB shared, 16MB × 500
         let c = cluster(
             "pg-5433",
             vec![
@@ -465,7 +465,7 @@ mod tests {
 
     #[test]
     fn test_container_commitment_without_limits() {
-        // alemanha7: 20 of 20 containers unlimited
+        // Host with 20 of 20 containers unlimited
         let containers: Vec<ContainerInfo> = (0..20)
             .map(|i| container(&format!("c{}", i), false, 0))
             .collect();
@@ -523,7 +523,7 @@ mod tests {
 
     #[test]
     fn test_postgres_alone_may_not_cross_the_threshold() {
-        // alemanha6's dev instance: 4GB shared plus 32MB × 500 is roughly 21GB
+        // Dev instance: 4GB shared plus 32MB × 500 is roughly 21GB
         // promised against 15.6GB — real overcommit, but 1.35× is still below
         // the warning line. Some overcommit is normal; the rule is about the
         // whole host, not one service.
@@ -546,7 +546,7 @@ mod tests {
     }
 
     #[test]
-    fn test_alemanha6_whole_host_is_overcommitted() {
+    fn test_heavy_host_is_overcommitted() {
         // The host as it actually stood: the dev postgres, the JVMs of
         // SonarQube and its Elasticsearch, and the containers that carried a
         // limit. Together they promise well past what the machine has.

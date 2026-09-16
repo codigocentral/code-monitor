@@ -655,7 +655,7 @@ pub mod types {
     impl MariaDBClusterInfo {
         /// Whether this instance carries no application schema at all.
         ///
-        /// The alemanha8 case: a mysqld holding nothing but system schemas,
+        /// A mysqld holding nothing but system schemas,
         /// costing 470MB of RAM on the fleet's tightest host.
         pub fn has_no_application_schemas(&self) -> bool {
             self.schemas.is_empty()
@@ -1059,7 +1059,7 @@ mod tests {
     #[test]
     fn test_bind_scope_private_ranges() {
         // The VPN addresses the fleet binds to
-        assert_eq!(BindScope::classify("10.10.0.9"), BindScope::Private);
+        assert_eq!(BindScope::classify("10.0.0.9"), BindScope::Private);
         assert_eq!(BindScope::classify("192.168.1.10"), BindScope::Private);
         assert_eq!(BindScope::classify("172.17.0.1"), BindScope::Private);
         assert_eq!(BindScope::classify("169.254.1.1"), BindScope::Private);
@@ -1083,7 +1083,7 @@ mod tests {
         // A dual-stack socket bound to loopback reports ::ffff:127.0.0.1.
         // Reading that as a public IPv6 address is a false alarm.
         assert_eq!(BindScope::classify("::ffff:127.0.0.1"), BindScope::Loopback);
-        assert_eq!(BindScope::classify("::ffff:10.10.0.9"), BindScope::Private);
+        assert_eq!(BindScope::classify("::ffff:10.0.0.9"), BindScope::Private);
         assert_eq!(
             BindScope::classify("::ffff:192.168.1.1"),
             BindScope::Private
@@ -1164,7 +1164,7 @@ mod tests {
 
     #[test]
     fn test_datastore_on_vpn_is_not_a_finding() {
-        assert!(!listening_port(5432, "10.10.0.9").is_exposed_datastore());
+        assert!(!listening_port(5432, "10.0.0.9").is_exposed_datastore());
     }
 
     #[test]
@@ -1400,7 +1400,7 @@ mod tests {
 
     #[test]
     fn test_instance_without_application_schemas() {
-        // The alemanha8 mysqld: nothing but system schemas, 470MB of RAM
+        // Idle mysqld fixture: nothing but system schemas, 470MB of RAM
         let cluster = MariaDBClusterInfo {
             name: "mdb".to_string(),
             host: "localhost".to_string(),
@@ -1454,7 +1454,7 @@ mod tests {
 
     #[test]
     fn test_setting_from_auto_conf_is_flagged() {
-        // The alemanha6 case: 4GB of shared_buffers written by ALTER SYSTEM
+        // Example incident case: 4GB of shared_buffers written by ALTER SYSTEM
         // while postgresql.conf still declared 128MB
         let s = setting(
             "shared_buffers",
@@ -1501,7 +1501,7 @@ mod tests {
 
     #[test]
     fn test_mixed_sources_detected() {
-        // alemanha8:5432 — half from the file, half from ALTER SYSTEM
+        // srv-8:5432 — half from the file, half from ALTER SYSTEM
         let cluster = cluster_with(vec![
             setting(
                 "max_connections",

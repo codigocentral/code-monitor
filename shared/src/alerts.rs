@@ -1323,7 +1323,7 @@ mod tests {
         let alert = manager
             .process_memory_commitment(
                 "srv-1",
-                "alemanha6",
+                "srv-host-6",
                 &commitment(24_000, 15_600, "postgres pg-dev"),
             )
             .expect("a host promising more than it owns should alert");
@@ -1349,7 +1349,7 @@ mod tests {
         let alert = manager
             .process_memory_commitment(
                 "srv-1",
-                "alemanha6",
+                "srv-host-6",
                 &commitment(24_000, 15_600, "postgres pg-dev"),
             )
             .unwrap();
@@ -1401,12 +1401,12 @@ mod tests {
 
     #[test]
     fn test_quiet_host_does_not_alert() {
-        // alemanha8: 65% swap occupancy, zero paging. Occupancy is not an
+        // srv-host-8: 65% swap occupancy, zero paging. Occupancy is not an
         // input here precisely so this host stays quiet.
         let mut manager = AlertManager::new();
         for _ in 0..5 {
             assert!(manager
-                .process_memory_pressure("srv-1", "alemanha8", 0.0, Some(0.0))
+                .process_memory_pressure("srv-1", "srv-host-8", 0.0, Some(0.0))
                 .is_empty());
         }
     }
@@ -1417,13 +1417,13 @@ mod tests {
 
         // A single spike is not enough
         assert!(manager
-            .process_memory_pressure("srv-1", "alemanha6", 400.0, None)
+            .process_memory_pressure("srv-1", "srv-host-6", 400.0, None)
             .is_empty());
         assert!(manager
-            .process_memory_pressure("srv-1", "alemanha6", 400.0, None)
+            .process_memory_pressure("srv-1", "srv-host-6", 400.0, None)
             .is_empty());
 
-        let alerts = manager.process_memory_pressure("srv-1", "alemanha6", 400.0, None);
+        let alerts = manager.process_memory_pressure("srv-1", "srv-host-6", 400.0, None);
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].alert_type, AlertType::SwapThrashing);
     }
@@ -1443,9 +1443,9 @@ mod tests {
     fn test_sustained_psi_alerts() {
         let mut manager = AlertManager::new();
         for _ in 0..2 {
-            manager.process_memory_pressure("srv-1", "alemanha7", 0.0, Some(30.0));
+            manager.process_memory_pressure("srv-1", "srv-host-7", 0.0, Some(30.0));
         }
-        let alerts = manager.process_memory_pressure("srv-1", "alemanha7", 0.0, Some(30.0));
+        let alerts = manager.process_memory_pressure("srv-1", "srv-host-7", 0.0, Some(30.0));
 
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].alert_type, AlertType::MemoryStalled);
@@ -1466,9 +1466,9 @@ mod tests {
     fn test_paging_and_psi_alert_independently() {
         let mut manager = AlertManager::new();
         for _ in 0..2 {
-            manager.process_memory_pressure("srv-1", "alemanha6", 500.0, Some(40.0));
+            manager.process_memory_pressure("srv-1", "srv-host-6", 500.0, Some(40.0));
         }
-        let alerts = manager.process_memory_pressure("srv-1", "alemanha6", 500.0, Some(40.0));
+        let alerts = manager.process_memory_pressure("srv-1", "srv-host-6", 500.0, Some(40.0));
 
         assert_eq!(alerts.len(), 2);
         let types: Vec<AlertType> = alerts.iter().map(|a| a.alert_type).collect();
@@ -1510,7 +1510,7 @@ mod tests {
         let alert = manager
             .process_exposed_datastores(
                 "srv-1",
-                "alemanha6",
+                "srv-host-6",
                 &["0.0.0.0:5432 (postgres)".to_string()],
             )
             .expect("an exposed database must alert");
@@ -1556,7 +1556,7 @@ mod tests {
         let alert = manager
             .process_exposed_datastores(
                 "srv-1",
-                "alemanha6",
+                "srv-host-6",
                 &["0.0.0.0:5432".to_string(), "0.0.0.0:5433".to_string()],
             )
             .unwrap();
@@ -1574,7 +1574,7 @@ mod tests {
         let mut manager = AlertManager::new();
         let alerts = manager.process_tls_certificates(
             "srv-1",
-            "alemanha9",
+            "srv-host-9",
             &[("example.com".to_string(), 60)],
             Some(("certbot.timer", "active")),
         );
@@ -1586,7 +1586,7 @@ mod tests {
         let mut manager = AlertManager::new();
         let alerts = manager.process_tls_certificates(
             "srv-1",
-            "alemanha9",
+            "srv-host-9",
             &[("example.com".to_string(), 21)],
             None,
         );
@@ -1601,7 +1601,7 @@ mod tests {
         let mut manager = AlertManager::new();
         let alerts = manager.process_tls_certificates(
             "srv-1",
-            "alemanha9",
+            "srv-host-9",
             &[("example.com".to_string(), 7)],
             None,
         );
@@ -1614,7 +1614,7 @@ mod tests {
         let mut manager = AlertManager::new();
         let alerts = manager.process_tls_certificates(
             "srv-1",
-            "alemanha9",
+            "srv-host-9",
             &[("example.com".to_string(), -3)],
             None,
         );
@@ -1628,7 +1628,7 @@ mod tests {
         let mut manager = AlertManager::new();
         let alerts = manager.process_tls_certificates(
             "srv-1",
-            "alemanha8",
+            "srv-host-8",
             &[
                 ("healthy.example".to_string(), 80),
                 ("urgent.example".to_string(), 2),
@@ -1680,7 +1680,7 @@ mod tests {
         let mut manager = AlertManager::new();
         let alerts = manager.process_tls_certificates(
             "srv-1",
-            "alemanha8",
+            "srv-host-8",
             &[("a.example".to_string(), 75), ("b.example".to_string(), 80)],
             Some(("certbot.service", "failed")),
         );
@@ -1765,7 +1765,7 @@ mod tests {
         let mut manager = AlertManager::new();
         let alerts = manager.process_container_restarts(
             "srv-1",
-            "alemanha3",
+            "srv-host-3",
             &[("netfilter-mailcow".to_string(), 412_813)],
         );
         assert!(alerts.is_empty());
@@ -1778,10 +1778,10 @@ mod tests {
         let name = "netfilter-mailcow".to_string();
 
         // Baseline at a huge total
-        manager.process_container_restarts("srv-1", "alemanha3", &[(name.clone(), 412_813)]);
+        manager.process_container_restarts("srv-1", "srv-host-3", &[(name.clone(), 412_813)]);
         // Three more restarts since: that is the news
         let alerts =
-            manager.process_container_restarts("srv-1", "alemanha3", &[(name.clone(), 412_816)]);
+            manager.process_container_restarts("srv-1", "srv-host-3", &[(name.clone(), 412_816)]);
 
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].alert_type, AlertType::ContainerCrashLoop);
@@ -1901,7 +1901,7 @@ mod tests {
         let alert = manager
             .process_broken_healthchecks(
                 "srv-1",
-                "alemanha8",
+                "srv-host-8",
                 &["app-1".to_string(), "app-2".to_string()],
             )
             .expect("broken checks should be reported");
@@ -1955,7 +1955,7 @@ mod tests {
         let failed = vec!["certbot.service".to_string()];
 
         let alert = manager
-            .process_systemd_failed_units("srv-1", "alemanha6", &failed)
+            .process_systemd_failed_units("srv-1", "srv-host-6", &failed)
             .expect("a failed unit must alert on the first observation");
 
         assert_eq!(alert.alert_type, AlertType::SystemdUnitFailed);
@@ -1971,7 +1971,7 @@ mod tests {
         // legitimate steady state where a unit stays failed.
         let mut manager = AlertManager::new();
         assert!(manager
-            .process_systemd_failed_units("srv-1", "alemanha6", &["a.service".to_string()])
+            .process_systemd_failed_units("srv-1", "srv-host-6", &["a.service".to_string()])
             .is_some());
     }
 
@@ -1981,11 +1981,11 @@ mod tests {
         let failed = vec!["certbot.service".to_string()];
 
         assert!(manager
-            .process_systemd_failed_units("srv-1", "alemanha6", &failed)
+            .process_systemd_failed_units("srv-1", "srv-host-6", &failed)
             .is_some());
         // Polling again must not spam the notification channels
         assert!(manager
-            .process_systemd_failed_units("srv-1", "alemanha6", &failed)
+            .process_systemd_failed_units("srv-1", "srv-host-6", &failed)
             .is_none());
         assert_eq!(manager.get_active_alerts().len(), 1);
     }
@@ -1994,7 +1994,7 @@ mod tests {
     fn test_systemd_failed_units_no_alert_when_healthy() {
         let mut manager = AlertManager::new();
         assert!(manager
-            .process_systemd_failed_units("srv-1", "alemanha6", &[])
+            .process_systemd_failed_units("srv-1", "srv-host-6", &[])
             .is_none());
         assert!(manager.get_active_alerts().is_empty());
     }
@@ -2004,10 +2004,10 @@ mod tests {
         let mut manager = AlertManager::new();
         let failed = vec!["certbot.service".to_string()];
 
-        manager.process_systemd_failed_units("srv-1", "alemanha6", &failed);
+        manager.process_systemd_failed_units("srv-1", "srv-host-6", &failed);
         assert!(!manager.get_active_alerts()[0].is_resolved());
 
-        manager.process_systemd_failed_units("srv-1", "alemanha6", &[]);
+        manager.process_systemd_failed_units("srv-1", "srv-host-6", &[]);
         assert!(
             manager.get_active_alerts()[0].is_resolved(),
             "fixing the unit must clear the alert"
@@ -2023,13 +2023,13 @@ mod tests {
         let failed = vec!["certbot.service".to_string()];
 
         assert!(manager
-            .process_systemd_failed_units("srv-1", "alemanha6", &failed)
+            .process_systemd_failed_units("srv-1", "srv-host-6", &failed)
             .is_some());
-        manager.process_systemd_failed_units("srv-1", "alemanha6", &[]);
+        manager.process_systemd_failed_units("srv-1", "srv-host-6", &[]);
 
         assert!(
             manager
-                .process_systemd_failed_units("srv-1", "alemanha6", &failed)
+                .process_systemd_failed_units("srv-1", "srv-host-6", &failed)
                 .is_none(),
             "re-failing inside the cooldown must not raise a second alert"
         );
@@ -2046,11 +2046,11 @@ mod tests {
         let failed = vec!["certbot.service".to_string()];
 
         assert!(manager
-            .process_systemd_failed_units("srv-1", "alemanha6", &failed)
+            .process_systemd_failed_units("srv-1", "srv-host-6", &failed)
             .is_some());
         assert!(
             manager
-                .process_systemd_failed_units("srv-2", "alemanha7", &failed)
+                .process_systemd_failed_units("srv-2", "srv-host-7", &failed)
                 .is_some(),
             "a second host failing is a separate alert"
         );
@@ -2063,7 +2063,7 @@ mod tests {
         manager.silence_alert("srv-1", AlertType::SystemdUnitFailed, Duration::minutes(30));
 
         assert!(manager
-            .process_systemd_failed_units("srv-1", "alemanha6", &["certbot.service".to_string()])
+            .process_systemd_failed_units("srv-1", "srv-host-6", &["certbot.service".to_string()])
             .is_none());
         assert!(manager.get_active_alerts().is_empty());
     }
@@ -2077,7 +2077,7 @@ mod tests {
         ];
 
         let alert = manager
-            .process_systemd_failed_units("srv-1", "alemanha6", &failed)
+            .process_systemd_failed_units("srv-1", "srv-host-6", &failed)
             .unwrap();
 
         assert!(alert.message.contains("certbot.service"));

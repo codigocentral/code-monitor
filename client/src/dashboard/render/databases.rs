@@ -436,7 +436,7 @@ pub(super) fn draw_mariadb_tab<B: tui::backend::Backend>(
                 .iter()
                 .map(|c| {
                     let schema_summary = if c.has_no_application_schemas() {
-                        // The alemanha8 case: an instance holding nothing but
+                        // An instance holding nothing but
                         // system schemas, still costing its full memory
                         "No application schemas — instance may be removable".to_string()
                     } else {

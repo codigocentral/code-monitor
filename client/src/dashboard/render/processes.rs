@@ -255,7 +255,7 @@ mod tests {
 
     #[test]
     fn test_format_process_swap_value() {
-        // The redis-server figure from the alemanha6 incident
+        // High swap memory figure from incident
         assert_eq!(format_process_swap(Some(1_218_445_312)), "1.1 GB");
     }
 

@@ -250,10 +250,10 @@ mod tests {
 
     #[test]
     fn test_parse_ipv4_private_address() {
-        // 10.10.0.9, the fleet's VPN range
+        // 10.0.0.9, a private VPN range
         assert_eq!(
-            parse_address_hex("09000A0A"),
-            Some(IpAddr::V4(Ipv4Addr::new(10, 10, 0, 9)))
+            parse_address_hex("0900000A"),
+            Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)))
         );
     }
 

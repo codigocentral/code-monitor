@@ -19,7 +19,7 @@ set -euo pipefail
 BIND_IP="${1:?usage: install-remote.sh <bind-ip> [port]}"
 PORT="${2:-50051}"
 # The VPN subnet allowed to reach the gRPC port through the firewall
-VPN_CIDR="${3:-10.10.0.0/24}"
+VPN_CIDR="${3:-10.0.0.0/24}"
 
 SERVICE_USER="code-monitor"
 BIN_SRC="/tmp/monitor-server"

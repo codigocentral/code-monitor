@@ -336,7 +336,7 @@ mod tests {
 
     #[test]
     fn test_empty_schema_is_unambiguous() {
-        // academiadotenista_com_br and mautic on alemanha8: no tables at all,
+        // An empty schema with no tables at all,
         // which needs no engine cooperation to establish
         let info = MariaDBCollector::parse_schema_info("empty_db".to_string(), 0, 0, None, false);
         assert!(info.is_empty());

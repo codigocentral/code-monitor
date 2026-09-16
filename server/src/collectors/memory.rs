@@ -468,7 +468,7 @@ full avg10=0.00 avg60=0.75 avg300=0.20 total=10507701
 
     #[test]
     fn test_idle_host_reports_zero_rate() {
-        // alemanha8: 65% swap occupancy and no paging at all
+        // A host with 65% swap occupancy and no paging at all
         let mut tracker = SwapActivityTracker::new();
         let counters = PagingCounters {
             pages_in: 4_600_000,

@@ -2213,7 +2213,7 @@ mod tests {
 
     #[test]
     fn test_swap_line_shows_occupancy_without_alerting_on_it() {
-        // alemanha8: 65% occupied, paging nothing. The occupancy must be
+        // Host: 65% occupied, paging nothing. The occupancy must be
         // visible and must not be styled as a problem.
         let parts = format_swap_line(&swap(5_200_000_000, 8_000_000_000, 0.0, 0.0));
 
@@ -2250,7 +2250,7 @@ mod tests {
         let (text, _) = format_pressure_line(&MemoryPressure {
             some_avg60: 12.5,
             full_avg60: 7.25,
-            full_total_seconds: 61_200.0, // 17 hours, the alemanha6 figure
+            full_total_seconds: 61_200.0, // 17 hours stall time
         });
 
         assert!(text.contains("12.50%"));
@@ -2677,7 +2677,7 @@ mod tests {
 
     #[test]
     fn test_risk_summary_counts_containers_without_limits() {
-        // alemanha7 ran 20 of 20 containers with no limit
+        // Host ran 20 of 20 containers with no limit
         let mut containers: Vec<ContainerInfo> = (0..20)
             .map(|i| container_fixture(&format!("c{}", i)))
             .collect();
