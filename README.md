@@ -6,236 +6,170 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)]()
 [![Version](https://img.shields.io/badge/version-0.1.0-green)]()
 
-Code Monitor is a **high-performance system monitoring tool** that combines the simplicity of htop with the power of modern monitoring platforms. Built in Rust for maximum efficiency.
+Code Monitor is a **high-performance, low-overhead system monitoring platform** that combines the immediacy and simplicity of `htop` with the multi-node visibility and alerting of modern observability stacks. Engineered from scratch in pure Rust for maximum efficiency, predictability, and memory safety.
 
-## 🚀 Features
+---
 
-### Core
-- ⚡ **10x lighter** than Python alternatives (1.5% CPU vs 15%)
-- 🖥️ **Terminal-native** TUI - works via SSH, no browser needed  
-- 🔒 **100% on-prem** - your data never leaves your servers
-- 📦 **Single binary** - zero dependencies, 5-minute setup
-- 🔐 **TLS encryption** - secure communication
-- 🚨 **Smart alerts** - threshold-based with multiple channels
+## 🚀 Key Highlights & Capabilities
 
-### Server (`monitor-server`)
-- Real-time metrics: CPU, memory, disk, network, processes, services
-- Docker container monitoring (names, CPU, memory, health)
-- Postgres cluster monitoring (databases, connections, cache hit, top queries)
-- MariaDB cluster monitoring (schemas, processes, InnoDB status)
-- systemd unit monitoring (status, PID, memory, start time)
-- gRPC API with TLS support
-- HTTP health checks (`/health`, `/ready`, `/metrics`)
-- Token-based authentication
-- Prometheus-compatible metrics endpoint
+### Core Values
+- ⚡ **Ultra-lightweight:** Consumes under 1.5% CPU and ~15MB RAM on monitored servers (up to 10x lighter than Python/Go agents).
+- 🖥️ **Terminal-native TUI:** Clean, keyboard-driven dashboard over SSH with zero web browser dependency.
+- 🔒 **100% On-Premise & Privacy-First:** Telemetry and server metrics remain entirely within your private infrastructure.
+- 📦 **Single Static Binary:** Self-contained executable with zero runtime dependencies.
+- 🔐 **Hardened Security:** End-to-end TLS encryption and token-based authentication.
+- 🚨 **Threshold Alerts:** Built-in alerting supporting Discord, Slack, and generic webhooks.
 
-### Client (`monitor-client`)
-- Beautiful TUI dashboard with sparklines
-- Multi-server monitoring from single interface
-- 8 dashboard tabs: Overview, Services, Processes, Network, Containers, Postgres, MariaDB, Systemd
-- Smart alerts with Discord/Slack/webhook notifications
-- Historical data with SQLite storage
-- Alert management and notifications
-- Auto-reconnect and connection pooling
+### Server Agent (`monitor-server`)
+- **System Metrics:** Real-time CPU, RAM, Swap, Disk I/O, Network interfaces, Processes, and systemd units.
+- **Container Telemetry:** Docker container enumeration, resource consumption, and health status.
+- **Database Clusters:** PostgreSQL and MariaDB metrics (connection pools, cache hit ratios, running queries).
+- **Dual Interface:** High-speed streaming gRPC API + HTTP health/readiness endpoints (`/health`, `/ready`, `/metrics` for Prometheus).
 
-## 📦 Installation
+### Client Dashboard (`monitor-client`)
+- Interactive Terminal UI (TUI) powered by `tui-rs` / `crossterm`.
+- Multi-server switching from a single pane of glass.
+- 8 dedicated operational tabs: Overview, Services, Processes, Network, Containers, Postgres, MariaDB, Systemd.
+- Local historical metric caching using embedded SQLite.
 
-### Linux/macOS
+---
+
+## 🏛️ System Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                       ADMIN / WORKSTATION                       │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │  monitor-client (Rust TUI)                              │    │
+│  │  ├── TUI Dashboard (crossterm / tui-rs)                 │    │
+│  │  ├── Local Historical Storage (SQLite / rusqlite)       │    │
+│  │  └── Alert Manager (Discord / Slack / Webhook)          │    │
+│  └─────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────┘
+                               │
+                               │ gRPC streaming over TLS (Tonic / Prost)
+                               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                     MONITORED SERVERS (FLEET)                   │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │  monitor-server (Rust Daemon)                           │    │
+│  │  ├── System Collectors (sysinfo / /proc reader)         │    │
+│  │  ├── Docker & Database Collectors (Postgres / MariaDB)  │    │
+│  │  ├── gRPC Service (Tonic gRPC Server)                   │    │
+│  │  └── Health & Prometheus HTTP Server (Axum)             │    │
+│  └─────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 📂 Repository & Crate Structure
+
+This repository is structured as a Cargo workspace:
+
+```
+code-monitor/
+├── Cargo.toml                         # Workspace definition (members: shared, server, client)
+├── AGENTS.md                          # Comprehensive technical guidelines for AI agents & developers
+├── CLAUDE.md                          # Session guide, sibling repos, and publication rules
+├── BUILD.md / WINDOWS_BUILD.md        # Detailed build, cross-compilation, and platform instructions
+├── CONTRIBUTING.md                    # Guidelines for open-source contributors
+├── PLANO-MESTRE-OPEN-SOURCE.md        # Product roadmap and open-source strategy
+├── scripts/
+│   ├── publish-to-github.sh           # Safe release pipeline (filters internal data via .publishignore)
+│   └── generate-certs.sh              # Script to generate TLS certificates
+├── shared/                            # Shared data types, gRPC protobufs, and utilities
+│   ├── proto/monitor.proto            # gRPC protocol buffer service definitions
+│   └── src/                           # Common models, configuration schemas, and error types
+├── server/                            # monitor-server daemon
+│   └── src/                           # Metric collectors, gRPC endpoints, Axum HTTP server
+└── client/                            # monitor-client TUI application
+    └── src/                           # Terminal UI views, event loop, connection manager, SQLite
+```
+
+---
+
+## 📦 Installation & Quick Start
+
+### 1. Automated Installation (Linux / macOS)
 ```bash
 curl -sSL https://github.com/codigocentral/code-monitor/releases/latest/download/install.sh | sudo bash
 ```
 
-### Windows
-Run PowerShell as Administrator:
-
+### 2. Windows (PowerShell Administrator)
 ```powershell
 iwr https://github.com/codigocentral/code-monitor/releases/latest/download/install.ps1 -UseB | iex
 ```
 
-### Docker
+### 3. Running the Server Daemon
 ```bash
-docker-compose up -d
-```
-
-### From Source
-```bash
-git clone https://github.com/codigocentral/code-monitor
-cd code-monitor
-cargo build --release
-```
-
-## 🚀 Quick Start
-
-### 1. Start the Server
-```bash
-# On each server you want to monitor
+# Initialize default configuration
 sudo monitor-server --config /etc/code-monitor/config.toml init
+
+# Run the server daemon
+sudo systemctl start code-monitor-server
+# Or run directly:
 ./monitor-server --address 0.0.0.0 --port 50051
-
-# IPv6: listen on all IPv6 interfaces (clients connect via [::1] or the host's IPv6 address)
-./monitor-server --address :: --port 50051
 ```
 
-The server will display:
-```
-╔══════════════════════════════════════════════════════════════╗
-║                   🖥️  SYSTEM MONITOR SERVER                   ║
-╠══════════════════════════════════════════════════════════════╣
-║  gRPC:    0.0.0.0:50051                                       ║
-║  HTTP:    0.0.0.0:8080                                        ║
-╠══════════════════════════════════════════════════════════════╣
-║  🔐 Authentication: ENABLED                                   ║
-║  Access Token: xxxxxxxxxxxxxxxxxxx                            ║
-╚══════════════════════════════════════════════════════════════╝
-```
-
-### 2. Connect with Client
+### 4. Running the Client TUI
 ```bash
-# Interactive dashboard
-monitor-client init
-./monitor-client
+# Launch interactive dashboard
+monitor-client
 
-# Or quick connect
-./monitor-client connect 192.168.1.100 --port 50051
+# Or connect directly to a remote host
+monitor-client connect 10.10.0.8 --port 50051
 ```
 
-## 🛠️ Development
+---
 
+## 🛠️ Development & Testing
+
+### Prerequisites
+- **Rust Toolchain:** 1.75+ (`rustup default stable`)
+- **Protocol Buffers Compiler:** `protoc` (required by `prost-build` / `tonic-build`)
+- **OpenSSL / pkg-config:** Required on Linux builds (`sudo apt install pkg-config libssl-dev protobuf-compiler`)
+
+### Commands
 ```bash
-# Build
-make build
+# Build the entire workspace
+cargo build --workspace
 
-# Test
-make test
+# Run all unit and integration tests
+cargo test --workspace
 
-# Lint
-make lint
+# Check lints with Clippy
+cargo clippy --workspace -- -D warnings
 
-# Docker
-make docker-up
+# Build release binaries
+cargo build --release --workspace
 
-# Generate TLS certs
-make certs
+# Run server locally
+cargo run -p server -- --config config.example.toml
+
+# Run client locally
+cargo run -p client
 ```
 
-## 📊 Architecture
+---
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         WORKSTATION                              │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │  monitor-client                                         │    │
-│  │  ├── TUI Dashboard (tui-rs)                            │    │
-│  │  ├── SQLite Storage (rusqlite)                         │    │
-│  │  └── Alert Manager                                     │    │
-│  └─────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────┘
-                              │ gRPC/TLS
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                         SERVERS                                  │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │  monitor-server                                         │    │
-│  │  ├── System Monitor (sysinfo)                          │    │
-│  │  ├── gRPC Service (tonic)                              │    │
-│  │  ├── Health HTTP (axum)                                │    │
-│  │  └── Metrics (/metrics)                                │    │
-│  └─────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────┘
-```
+## 🤖 Guidelines for Developers and AI Agents
 
-## 🔧 Configuration
+1. **Safety and Panic Prevention:**
+   - Collector threads inside `server/` must **never panic**. Always handle missing metrics or failing system calls gracefully using `Option` or `Result` and fall back to zero/empty values.
+   - Do not use `unwrap()` or `expect()` in production collector paths.
+2. **Asynchronous Concurrency:**
+   - Network streaming and HTTP endpoints use **Tokio**. Blocking I/O (such as file reads or heavy system queries) must run on `tokio::task::spawn_blocking` to avoid stalling the async reactor.
+3. **gRPC Protocol Contracts:**
+   - Any modification to message schemas must occur in `shared/proto/monitor.proto`. Run `cargo build` to trigger `tonic-build` code generation.
+4. **Sibling Repositories & Confidentiality:**
+   - This project is part of a triad: `code-monitor` (public product code), `code-monitor-ops` (private fleet infrastructure), and `code-monitor-clientes` (private client data).
+   - **Never commit real server hostnames, VPN IPs, customer tokens, or private secrets to this repository.**
+   - All external releases are filtered through `scripts/publish-to-github.sh` respecting `.publishignore`.
+   - Before implementing complex changes or collectors, consult [`AGENTS.md`](AGENTS.md) and [`CLAUDE.md`](CLAUDE.md).
 
-### Server (`config.toml`)
-```toml
-update_interval_seconds = 5
-max_clients = 100
-enable_authentication = true
-access_token = "your-token-here"
-log_level = "info"
-
-[tls]
-enabled = true
-cert_path = "/etc/code-monitor/server.crt"
-key_path = "/etc/code-monitor/server.key"
-```
-
-### Client (`client-config.toml`)
-```toml
-update_interval_seconds = 5
-auto_reconnect = true
-reconnect_delay_seconds = 5
-
-[[servers]]
-id = "uuid"
-name = "Production Server"
-address = "192.168.1.100"
-port = 50051
-access_token = "token-from-server"
-```
-
-## 🚨 Alert Configuration
-
-```toml
-[[alerts]]
-name = "CPU Critical"
-type = "cpu_high"
-threshold = 90
-duration_seconds = 300  # 5 minutes
-severity = "critical"
-notify = ["webhook", "slack"]
-
-[[alerts]]
-name = "Memory Warning"
-type = "memory_high"
-threshold = 80
-duration_seconds = 60
-severity = "warning"
-notify = ["discord"]
-```
-
-## 📡 Health Check Endpoints
-
-- `GET /health` - Basic health status
-- `GET /ready` - Readiness probe with checks
-- `GET /metrics` - Prometheus-compatible metrics
-
-## 🐳 Docker Compose
-
-```yaml
-version: '3.8'
-services:
-  monitor-server:
-    image: codemonitor/server:latest
-    ports:
-      - "50051:50051"
-      - "8080:8080"
-    volumes:
-      - ./config.toml:/etc/code-monitor/config.toml
-      - monitor-data:/var/lib/code-monitor
-    restart: unless-stopped
-```
-
-## 📚 Documentation
-
-- [Product Vision](docsx/01-PRODUTO/visao-geral.md)
-- [Market Analysis](docsx/02-MERCADO/analise-competitiva.md)
-- [Technical Architecture](docsx/05-TECNICO/arquitetura-futura.md)
-- [Roadmap](docsx/04-ROADMAP/visao-12-meses.md)
-- [Quick Wins](docsx/06-ACAO/quick-wins.md)
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+---
 
 ## 📝 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
-
-**Built with Rust** 🦀 | **Fast** ⚡ | **Secure** 🔒 | **Open Source** 📖
