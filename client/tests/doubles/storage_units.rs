@@ -2,15 +2,15 @@ use super::*;
 use crate::unit_sqlite::{self as sdk, Expected, Reply, State};
 use rusqlite::types::Value;
 use std::sync::{Arc, Mutex};
-const SETUP: [&str;4]=[
+pub(crate) const SETUP: [&str;4]=[
 "CREATE TABLE IF NOT EXISTS metrics (id INTEGER PRIMARY KEY AUTOINCREMENT,server_id TEXT NOT NULL,timestamp INTEGER NOT NULL,cpu_usage REAL,memory_used INTEGER,memory_total INTEGER)",
 "CREATE INDEX IF NOT EXISTS idx_metrics_server_time ON metrics(server_id, timestamp)",
 "CREATE TABLE IF NOT EXISTS storage_meta (key TEXT PRIMARY KEY,value TEXT)",
 "INSERT OR REPLACE INTO storage_meta (key, value) VALUES ('schema_version', '1')",
 ];
-const HISTORY:&str="SELECT id, server_id, timestamp, cpu_usage, memory_used, memory_total FROM metrics WHERE server_id = ?1 AND timestamp > ?2 ORDER BY timestamp ASC";
+pub(crate) const HISTORY:&str="SELECT id, server_id, timestamp, cpu_usage, memory_used, memory_total FROM metrics WHERE server_id = ?1 AND timestamp > ?2 ORDER BY timestamp ASC";
 const LATEST:&str="SELECT id, server_id, timestamp, cpu_usage, memory_used, memory_total FROM metrics WHERE server_id = ?1 ORDER BY timestamp DESC LIMIT 1";
-const STATS: [&str; 4] = [
+pub(crate) const STATS: [&str; 4] = [
     "SELECT COUNT(*) FROM metrics",
     "SELECT MIN(timestamp) FROM metrics",
     "SELECT MAX(timestamp) FROM metrics",

@@ -86,8 +86,9 @@ self-signed test certificate; its private key is outside the repository. The
 ignore exception admits this public fixture only.
 
 Build instrumentation environment is recorded in `setup/llvm-env.sh`. After a
-successful instrumented `cargo test --workspace --no-run --offline --locked
---message-format=json`, run:
+successful instrumented `cargo test --workspace
+--features monitor-client/unit-doubles,monitor-server/unit-doubles
+--no-run --offline --locked --message-format=json`, run:
 
 ```sh
 python3 coverage/run-rust-units.py /absolute/evidence/rust /absolute/compile/run.log
@@ -162,7 +163,7 @@ requests and authentication metadata, checks gzip settings and returns typed
 responses/errors without sockets. Unconfigured external connections fail closed.
 
 
-### Current checkpoint
+### Historical committed checkpoint (`90d0b60`)
 
 `iterations/workspace-01` retains 708 passing selected units (212 server,
 297 client, 199 shared), original LLVM exports, JUnit, selection/catalog and the
@@ -184,3 +185,51 @@ real production code, without removing compiler-generated coverage points.
 Original baseline binaries are copied with SHA-256 verification under
 `baseline/preserved-original-binaries`, so later Cargo builds cannot overwrite
 the baseline's executable evidence. Source and binary provenance is retained.
+
+
+### Resumed work (not a final coverage claim)
+
+`progress.json` outside Git is the current evidence index. `client-13` has 333 passing unit tests, 5,185/5,185 production lines,
+351/351 functions and 8,050/8,050 native regions. `server-13` has 286 passing
+units, 2,810/2,810 lines, 374/374 functions and 4,307/4,307 regions. These are
+component iterations, not a final repository claim. Reports are never combined
+by adding counts from different source revisions. Final coverage requires native
+checks and a clean committed workspace run.
+
+The resumed units execute real dashboard handlers and rendering against a
+memory backend wrapping `tui::TestBackend`, scripted crossterm input and a virtual
+monotonic clock. Files and configuration use owned scratch paths. HTTP listeners,
+registry requests, Docker, PostgreSQL and MariaDB SDKs are replaced by typed
+responses, error queues and captured requests; they never fall back to a real
+service. Monitoring service units replace their monitor collaborator while the
+actual monitor body remains compiled and is covered independently against its
+sysinfo and collector SDK boundaries. Startup uses typed CLI input, a memory
+logging builder, an in-memory task scheduler, gRPC transport and signal doubles.
+No user/service provisioning, deployment, publication or host monitoring runs.
+
+Minimal private seams keep the original defaults: startup connection policy is
+factored out of the dashboard; expiry decoding accepts chrono's original decoder;
+stream limits expose the same lock/error mapping; network discovery keeps lock
+ordering and accepts a provider. A pure font policy takes the platform flag so
+both Unix and Windows defaults are observable in units. Successful-only private
+refresh/settings/connection-probe operations now return their values directly,
+and the nonterminating monitoring loop returns `!`; their original behavior had
+no reachable `Err`/success-return respectively. The selected-server id and tab
+hotkey checks use their already-established invariants without deleting any
+reachable behavior. Existing public defaults and normal native SDK imports are
+preserved. Native production builds remain a separate required final check.
+
+Additional public certificate fixtures cover legacy CN and IP-only SAN parsing.
+`create-certificate-fixtures.py` runs only as offline fixture preparation, records
+its invocation, and discards temporary private keys. Unit certificate reads are
+restricted to owned temporary paths, with explicit inventory/read failure cases.
+
+Server command dispatch now loads configuration inside each selected stateful
+arm of one exhaustive match. This preserves Init's ability to work without
+preloading the existing file, and preserves Import's existing validation of the
+current file before replacement. It removes the duplicate, unreachable Init arm.
+The EnableAuth handler uses Config::load's existing guarantee that missing tokens
+are generated and persisted; the redundant second empty-token branch had no
+reachable path. Empty-token behavior remains asserted by the original handler
+case and dedicated loader units. No testable command or production file is
+excluded to close coverage.

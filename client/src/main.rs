@@ -7,8 +7,16 @@ use anyhow::Result;
 use clap::Parser;
 use shared::types::*;
 use std::collections::HashMap;
-use tokio::time::{sleep, Duration};
+#[cfg(not(all(test, feature = "unit-doubles")))]
+use std::fs::File as OutputFile;
+#[cfg(not(all(test, feature = "unit-doubles")))]
+use tokio::time::sleep;
+use tokio::time::Duration;
 use tracing::{error, info, warn};
+#[cfg(all(test, feature = "unit-doubles"))]
+use unit_bootstrap::sleep;
+#[cfg(all(test, feature = "unit-doubles"))]
+use unit_files::{csv, File as OutputFile};
 
 #[cfg(test)]
 #[cfg(feature = "unit-doubles")]
@@ -51,9 +59,24 @@ use crate::cli::CliArgs;
 use crate::client::MonitorClient;
 use crate::config::ClientConfigManager;
 
+#[cfg(not(all(test, feature = "unit-doubles")))]
+const CLI_ARGS: fn() -> CliArgs = CliArgs::parse;
+#[cfg(all(test, feature = "unit-doubles"))]
+const CLI_ARGS: fn() -> CliArgs = unit_bootstrap::parse;
+#[cfg(all(test, feature = "unit-doubles"))]
+use unit_bootstrap::logging as tracing_subscriber;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/bootstrap.rs"]
+mod unit_bootstrap;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/console.rs"]
+mod unit_console;
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = CliArgs::parse();
+    let args = CLI_ARGS();
 
     // Setup logging
     let log_level = match args.log_level.as_str() {
@@ -102,7 +125,7 @@ async fn main() -> Result<()> {
             monitor_server(&config_manager, server, interval, format).await?;
         }
         cli::Commands::Serve { address, port } => {
-            start_server_mode(&config_manager, address, port).await?;
+            start_server_mode(&config_manager, address, port).await;
         }
         cli::Commands::Dashboard => {
             run_dashboard(&config_manager).await?;
@@ -153,6 +176,9 @@ fn has_token(token: Option<&str>) -> bool {
 }
 
 async fn init_client(config_manager: &mut ClientConfigManager, force: bool) -> Result<()> {
+    #[cfg(all(test, feature = "unit-doubles"))]
+    use crate::unit_console::{self as io, Write};
+    #[cfg(not(all(test, feature = "unit-doubles")))]
     use std::io::{self, Write};
 
     let mut config = config_manager.load_config()?;
@@ -174,7 +200,7 @@ async fn init_client(config_manager: &mut ClientConfigManager, force: bool) -> R
         let server = prompt_server().await?;
         let test_now = prompt_bool("Test connection now", true)?;
         if test_now {
-            test_server_connection(&server, config.tls.as_ref()).await?;
+            test_server_connection(&server, config.tls.as_ref()).await;
         }
 
         if let Some(existing) = config
@@ -229,7 +255,7 @@ async fn prompt_server() -> Result<ServerEndpoint> {
 async fn test_server_connection(
     server: &ServerEndpoint,
     tls_config: Option<&shared::types::ClientTlsConfig>,
-) -> Result<()> {
+) {
     let scheme = if tls_config.is_some() {
         "https"
     } else {
@@ -263,11 +289,12 @@ async fn test_server_connection(
         }
     }
     println!();
-
-    Ok(())
 }
 
 fn prompt_string(label: &str, default: &str) -> Result<String> {
+    #[cfg(all(test, feature = "unit-doubles"))]
+    use crate::unit_console::{self as io, Write};
+    #[cfg(not(all(test, feature = "unit-doubles")))]
     use std::io::{self, Write};
 
     if default.is_empty() {
@@ -404,6 +431,9 @@ async fn quick_connect(
     address: String,
     port: u16,
 ) -> Result<()> {
+    #[cfg(all(test, feature = "unit-doubles"))]
+    use crate::unit_console::{self as io, Write};
+    #[cfg(not(all(test, feature = "unit-doubles")))]
     use std::io::{self, Write};
 
     println!();
@@ -587,16 +617,14 @@ async fn monitor_server(
     }
 
     // Start monitoring loop
-    start_monitoring_loop(clients, interval, format).await?;
-
-    Ok(())
+    start_monitoring_loop(clients, interval, format).await
 }
 
 async fn start_monitoring_loop(
     mut clients: HashMap<uuid::Uuid, (ServerEndpoint, MonitorClient)>,
     interval: u64,
     format: cli::MonitorFormat,
-) -> Result<()> {
+) -> ! {
     loop {
         let mut system_summaries = Vec::new();
 
@@ -738,14 +766,9 @@ fn format_bytes(bytes: u64) -> String {
     format!("{:.1} {}", size, UNITS[unit_index])
 }
 
-async fn start_server_mode(
-    _config_manager: &ClientConfigManager,
-    _address: String,
-    _port: u16,
-) -> Result<()> {
+async fn start_server_mode(_config_manager: &ClientConfigManager, _address: String, _port: u16) {
     println!("Client server mode is not yet implemented");
     println!("This would run a local server for the client to connect to remote systems");
-    Ok(())
 }
 
 async fn run_dashboard(config_manager: &ClientConfigManager) -> Result<()> {
@@ -1002,7 +1025,7 @@ async fn export_metrics(
             all_points.extend(points);
         }
 
-        let file = std::fs::File::create(&output)?;
+        let file = OutputFile::create(&output)?;
         serde_json::to_writer_pretty(file, &all_points)?;
         total_records = all_points.len();
     } else {
@@ -1324,11 +1347,15 @@ mod tests {
     // start_server_mode
     // ------------------------------------------------------------------
     #[tokio::test]
-    async fn test_start_server_mode_returns_ok() {
+    async fn test_start_server_mode_is_infallible() {
         let temp = TempDir::new().unwrap();
         let manager = ClientConfigManager::new(&temp.path().join("cfg.toml")).unwrap();
 
-        let result = start_server_mode(&manager, "127.0.0.1".to_string(), 50052).await;
-        assert!(result.is_ok());
+        start_server_mode(&manager, "127.0.0.1".to_string(), 50052).await;
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/main_units.rs"]
+mod campaign_main_units;

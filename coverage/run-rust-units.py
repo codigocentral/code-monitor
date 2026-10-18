@@ -26,6 +26,10 @@ for line in compile_log.read_text().splitlines():
 assert len(artifacts) == (1 if '--component' in sys.argv[3:] else 3), [x['target']['name'] for x in artifacts]
 
 def classification(crate, name):
+    if name.startswith('campaign_main_units::'):
+        return 'unit'
+    if name.startswith('tls::campaign_ca_units::'):
+        return 'unit'
     if name.startswith('bridge_units::'):
         return 'unit'
     if crate == 'code_monitor_build_units':
@@ -42,11 +46,17 @@ def classification(crate, name):
         if name.startswith('storage::tests::'):
             return 'integration: real SQLite adapter; not used in initial isolated unit baseline'
         return 'unit'
+    if name.startswith('service::campaign_service_units::') or name.startswith('service::tests::test_validate_request_') or name in ['service::tests::test_datetime_to_timestamp','service::tests::test_now_timestamp']:
+        return 'unit'
+    if name.startswith('health::campaign_health_units::') or name == 'health::tests::test_health_state_new':
+        return 'unit'
+    if name.startswith('monitor::campaign_monitor_units::'):
+        return 'unit'
     if name.startswith('monitor::campaign_ip_units::'):
         return 'unit'
     if name.startswith('metrics::tests::'):
         return 'unit'
-    if name.startswith(('config::tests::', 'tls::tests::', 'tests::')):
+    if name.startswith(('config::tests::', 'config::campaign_io_units::', 'tls::tests::', 'tests::')):
         return 'unit'
     if name.startswith('collectors::'):
         if name.endswith(('test_docker_collector_collect_when_unavailable', 'test_docker_collector_with_socket_path_does_not_panic', 'test_docker_collector_new_with_env_var_does_not_panic')):

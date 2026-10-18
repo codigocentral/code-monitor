@@ -3,6 +3,8 @@
 //! Connects to Postgres via TCP or Unix socket and collects
 //! database sizes, connection counts, cache hit ratios, and top queries.
 
+#[cfg(all(test, feature = "unit-doubles"))]
+use crate::unit_pg as tokio_postgres;
 use anyhow::{Context, Result};
 use shared::types::{
     ConnectionStateCount, PostgresClusterInfo, PostgresDatabaseInfo, PostgresSetting, TopQuery,
@@ -119,7 +121,7 @@ impl PostgresCollector {
         let (connections_total, connections_by_state) = self.collect_connections(&client).await?;
         let cache_hit_ratio = self.collect_cache_hit_ratio(&client).await?;
         let top_queries = self.collect_top_queries(&client).await?;
-        let settings = self.collect_settings(&client).await?;
+        let settings = self.collect_settings(&client).await;
 
         Ok(PostgresClusterInfo {
             name: self.config.name.clone(),
@@ -143,10 +145,7 @@ impl PostgresCollector {
     /// while actually running with 4GB. Debugging from the main file alone
     /// produces a confident wrong answer, and only `pg_settings` shows which
     /// file won.
-    async fn collect_settings(
-        &self,
-        client: &tokio_postgres::Client,
-    ) -> Result<Vec<PostgresSetting>> {
+    async fn collect_settings(&self, client: &tokio_postgres::Client) -> Vec<PostgresSetting> {
         let rows = match client
             .query(
                 "SELECT name, setting, unit, source, sourcefile, sourceline
@@ -166,12 +165,11 @@ impl PostgresCollector {
                     "Failed to read pg_settings from '{}': {}",
                     self.config.name, e
                 );
-                return Ok(Vec::new());
+                return Vec::new();
             }
         };
 
-        Ok(rows
-            .iter()
+        rows.iter()
             .map(|row| {
                 let unit: Option<String> = row.get(2);
                 let source_file: Option<String> = row.get(4);
@@ -185,7 +183,7 @@ impl PostgresCollector {
                     source_line: row.get(5),
                 }
             })
-            .collect())
+            .collect()
     }
 
     fn parse_database_info(
@@ -553,3 +551,8 @@ mod tests {
         assert!(info.cache_hit_ratio.is_infinite());
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../../tests/doubles/postgres_units.rs"]
+mod campaign_pg_units;

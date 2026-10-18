@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # All service, account, crypto and filesystem effects below are doubles.
+# Do not inherit publication endpoints, caller identity or token fixtures.
+unset GITHUB_REMOTE PUBLISH_BRANCH SUDO_USER UNIT_TOKEN
 set -u
 TASK_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 FIXTURE_ROOT="$(/usr/bin/mktemp -d "${TMPDIR%/}/monitor-unit.XXXXXX")"

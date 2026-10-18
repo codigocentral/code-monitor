@@ -6,6 +6,10 @@
 //! Designed to detect "digest drift" on floating tags (e.g. `latest`, `stable`)
 //! without pulling images or causing significant network traffic (using HTTP HEAD).
 
+#[cfg(all(test, feature = "unit-doubles"))]
+use crate::unit_bollard as bollard;
+#[cfg(all(test, feature = "unit-doubles"))]
+use crate::unit_registry_http as reqwest;
 use anyhow::Result;
 use bollard::Docker;
 use chrono::Utc;
@@ -194,19 +198,11 @@ impl VersionsCollector {
     }
 
     /// Check the version and digest status of a container image
-    pub async fn check_image(
-        &self,
-        docker: &Docker,
-        image_ref: &str,
-    ) -> ImageVersionInfo {
+    pub async fn check_image(&self, docker: &Docker, image_ref: &str) -> ImageVersionInfo {
         let (registry, repository, tag) = parse_image_ref(image_ref);
 
         // Check if image matches any skip pattern
-        if self
-            .skip_patterns
-            .iter()
-            .any(|pat| image_ref.contains(pat))
-        {
+        if self.skip_patterns.iter().any(|pat| image_ref.contains(pat)) {
             return ImageVersionInfo {
                 image_ref: image_ref.to_string(),
                 registry,
@@ -231,9 +227,7 @@ impl VersionsCollector {
 
         // Inspect image locally to read RepoDigests
         let local_digest = match docker.inspect_image(image_ref).await {
-            Ok(inspect) => {
-                Self::extract_local_digest(inspect.repo_digests.as_deref(), &repository)
-            }
+            Ok(inspect) => Self::extract_local_digest(inspect.repo_digests.as_deref(), &repository),
             Err(e) => {
                 debug!("Failed to inspect image {} locally: {}", image_ref, e);
                 None
@@ -320,7 +314,8 @@ mod tests {
     #[test]
     fn test_extract_local_digest() {
         let digests = vec![
-            "library/redis@sha256:1111111111111111111111111111111111111111111111111111111111111111".to_string(),
+            "library/redis@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                .to_string(),
         ];
         let dig = VersionsCollector::extract_local_digest(Some(&digests), "library/redis");
         assert_eq!(
@@ -329,7 +324,15 @@ mod tests {
         );
 
         let empty: Vec<String> = Vec::new();
-        assert_eq!(VersionsCollector::extract_local_digest(Some(&empty), "redis"), None);
+        assert_eq!(
+            VersionsCollector::extract_local_digest(Some(&empty), "redis"),
+            None
+        );
         assert_eq!(VersionsCollector::extract_local_digest(None, "redis"), None);
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../../tests/doubles/versions_units.rs"]
+mod campaign_versions_units;

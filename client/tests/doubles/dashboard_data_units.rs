@@ -209,7 +209,7 @@ async fn successful_connect_populates_every_cache_and_repeated_fetches_evaluate_
     assert_eq!(app.ports_cache[&id].len(), 3);
     for _ in 0..3 {
         queue_poll(&state, true, false);
-        fetch_server_data(&mut app, id).await.unwrap();
+        fetch_server_data(&mut app, id).await;
     }
     assert_eq!(app.cpu_history[&id].len(), 4);
     for kind in [
@@ -227,10 +227,10 @@ async fn successful_connect_populates_every_cache_and_repeated_fetches_evaluate_
     }
     app.servers.clear();
     queue_poll(&state, false, false);
-    fetch_server_data(&mut app, id).await.unwrap();
+    fetch_server_data(&mut app, id).await;
     assert!(app.system_info_cache[&id].disk_info.is_empty());
     queue_poll(&state, false, true);
-    fetch_server_data(&mut app, id).await.unwrap();
+    fetch_server_data(&mut app, id).await;
     assert_eq!(app.system_info_cache[&id].hostname, "dashboard-unit");
     assert!(state.lock().unwrap().responses.is_empty());
 }
@@ -262,7 +262,7 @@ async fn storage_failures_are_logged_without_losing_the_fetched_snapshot() {
     ] {
         database.lock().unwrap().expected.push_back(crate::unit_sqlite::Expected {sql:"INSERT INTO metrics (server_id, timestamp, cpu_usage, memory_used, memory_total) VALUES (?1, ?2, ?3, ?4, ?5)",parameters:vec![rusqlite::types::Value::Text(id.to_string()),rusqlite::types::Value::Integer(1_700_000_000),rusqlite::types::Value::Real(95.),rusqlite::types::Value::Integer(95),rusqlite::types::Value::Integer(100)],reply});
         queue_poll(&state, true, false);
-        fetch_server_data(&mut app, id).await.unwrap();
+        fetch_server_data(&mut app, id).await;
         assert_eq!(app.system_info_cache[&id].hostname, "dashboard-unit");
     }
     assert!(logs
@@ -271,4 +271,15 @@ async fn storage_failures_are_logged_without_losing_the_fetched_snapshot() {
         .iter()
         .any(|line| line.contains("Failed to store metrics")));
     assert!(database.lock().unwrap().expected.is_empty());
+}
+
+#[tokio::test]
+async fn connection_disconnect_and_refresh_without_selection_leave_status_unchanged() {
+    let mut app = DashboardApp::new(vec![], NotificationConfig::default(), None);
+    app.status_message = "unit unchanged".into();
+    for command in ["connect", "disconnect", "refresh"] {
+        handle_command(&mut app, command).await;
+        assert_eq!(app.status_message, "unit unchanged");
+        assert!(app.connected_clients.is_empty());
+    }
 }

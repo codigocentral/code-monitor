@@ -819,6 +819,10 @@ pub(crate) mod campaign_systemd_units {
 
     #[test]
     fn offset_and_failed_row_edge_cases() {
+        assert_eq!(
+            unit_state_label("deactivating", "stop-sigterm"),
+            ("deactivating (stop-sigterm)".into(), false)
+        );
         for invalid in [
             "", "+xy", "+xy12", "+12xy", "+xy:12", "+12:xy", "+12x34", "+123", "+24", "+1260",
         ] {

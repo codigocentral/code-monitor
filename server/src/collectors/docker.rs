@@ -3,6 +3,9 @@
 //! This collector gathers metrics from Docker containers using the
 //! Docker Engine API via the bollard crate.
 
+use crate::collectors::versions::VersionsCollector;
+#[cfg(all(test, feature = "unit-doubles"))]
+use crate::unit_bollard as bollard;
 use anyhow::Result;
 use bollard::container::ListContainersOptions;
 use bollard::container::StatsOptions;
@@ -14,7 +17,6 @@ use shared::types::{ContainerHealthDetail, ContainerInfo};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
-use crate::collectors::versions::VersionsCollector;
 
 /// Cap on the stored healthcheck output.
 ///
@@ -741,3 +743,8 @@ mod tests {
         assert!(result.is_ok());
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../../tests/doubles/docker_units.rs"]
+mod campaign_docker_units;

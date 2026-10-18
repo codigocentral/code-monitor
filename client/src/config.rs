@@ -361,7 +361,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod campaign_path_units {
+pub(crate) mod campaign_path_units {
     use super::*;
     #[test]
     fn exposes_the_exact_config_path_and_propagates_initial_write_failure() {
@@ -376,7 +376,7 @@ mod campaign_path_units {
     }
 
     #[derive(Clone, Copy, PartialEq)]
-    enum Fault {
+    pub(crate) enum Fault {
         None,
         Serialize,
         Write,
@@ -384,9 +384,9 @@ mod campaign_path_units {
         Permissions,
     }
     thread_local! { static FAULT: std::cell::Cell<Fault> = const { std::cell::Cell::new(Fault::None) }; }
-    struct FaultGuard;
+    pub(crate) struct FaultGuard;
     impl FaultGuard {
-        fn arm(value: Fault) -> Self {
+        pub(crate) fn arm(value: Fault) -> Self {
             FAULT.with(|fault| fault.set(value));
             Self
         }

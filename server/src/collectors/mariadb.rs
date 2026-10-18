@@ -3,6 +3,8 @@
 //! Connects to MariaDB/MySQL via TCP or Unix socket and collects
 //! schema sizes, process list, and basic InnoDB status.
 
+#[cfg(all(test, feature = "unit-doubles"))]
+use crate::unit_maria as mysql_async;
 use anyhow::{Context, Result};
 use mysql_async::{prelude::Queryable, Conn, OptsBuilder};
 use shared::types::{MariaDBClusterInfo, MariaDBProcessInfo, MariaDBSchemaInfo};
@@ -447,3 +449,8 @@ mod tests {
         assert!(collector.config.enabled);
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../../tests/doubles/mariadb_units.rs"]
+mod campaign_maria_units;

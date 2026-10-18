@@ -428,4 +428,57 @@ mod tests {
         assert_eq!(ports.len(), 3);
         assert!(ports.iter().any(|p| p.protocol == "tcp6" && p.port == 8080));
     }
+    #[test]
+    fn test_default_root() {
+        assert_eq!(NetPortsCollector::new().proc_root, "/proc");
+        assert_eq!(NetPortsCollector::default().proc_root, "/proc");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_resolve_owners_from_synthetic_proc() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path();
+        std::fs::create_dir(path.join("net")).unwrap();
+        std::fs::write(path.join("net/tcp"), TCP_TABLE).unwrap();
+        std::fs::write(path.join("99"), "exited").unwrap();
+        for (pid, inode) in [(55, 18050), (56, 22102)] {
+            let fd = path.join(pid.to_string()).join("fd");
+            std::fs::create_dir_all(&fd).unwrap();
+            std::os::unix::fs::symlink(format!("socket:[{inode}]"), fd.join("1")).unwrap();
+            std::os::unix::fs::symlink("pipe:[1]", fd.join("2")).unwrap();
+            std::fs::write(fd.join("3"), "regular file").unwrap();
+        }
+        std::fs::write(path.join("55/comm"), "unit-process\n").unwrap();
+        let ports = NetPortsCollector::with_proc_root(path.to_str().unwrap())
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(ports.len(), 2);
+        assert_eq!(
+            (ports[0].port, ports[0].pid, ports[0].process_name.as_str()),
+            (5432, Some(55), "unit-process")
+        );
+        assert_eq!(
+            (ports[1].port, ports[1].pid, ports[1].process_name.as_str()),
+            (53, Some(56), "")
+        );
+    }
+    #[test]
+    fn test_every_malformed_socket_field_is_ignored() {
+        assert!(parse_address_hex("ZZZZZZZZ000000000000000000000000").is_none());
+        for row in [
+            "0:",
+            "0: 00000000:0001",
+            "0: 00000000:0001 00000000:0000",
+            "0: missing-colon 00000000:0000 0A",
+            "0: ZZZZZZZZ:0001 00000000:0000 0A",
+            "0: 00000000:ZZZZ 00000000:0000 0A",
+            "0: 00000000:0001 00000000:0000 0A 0 0 0 0 0 bad-inode",
+        ] {
+            assert!(parse_socket_line(row).is_none(), "{row}");
+        }
+        assert!(parse_socket_link("socket:[123").is_none());
+        assert!(parse_socket_link("socket:[invalid]").is_none());
+    }
 }

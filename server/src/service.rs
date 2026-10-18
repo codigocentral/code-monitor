@@ -31,7 +31,10 @@ use tracing::{error, info, warn};
 
 use crate::config::Config;
 use crate::metrics;
+#[cfg(not(all(test, feature = "unit-doubles")))]
 use crate::monitor::SystemMonitor;
+#[cfg(all(test, feature = "unit-doubles"))]
+use crate::unit_service_monitor::SystemMonitor;
 
 fn datetime_to_timestamp(dt: DateTime<Utc>) -> prost_types::Timestamp {
     prost_types::Timestamp {
@@ -40,8 +43,17 @@ fn datetime_to_timestamp(dt: DateTime<Utc>) -> prost_types::Timestamp {
     }
 }
 
+#[cfg(not(all(test, feature = "unit-doubles")))]
+const NOW: fn() -> DateTime<Utc> = Utc::now;
+#[cfg(all(test, feature = "unit-doubles"))]
+const NOW: fn() -> DateTime<Utc> = crate::unit_sysinfo::now;
+#[cfg(all(test, feature = "unit-doubles"))]
+use crate::unit_runtime::interval;
+#[cfg(not(all(test, feature = "unit-doubles")))]
+use tokio::time::interval;
+
 fn now_timestamp() -> prost_types::Timestamp {
-    datetime_to_timestamp(Utc::now())
+    datetime_to_timestamp(NOW())
 }
 
 /// Maximum accepted length for the process filter parameter
@@ -120,6 +132,14 @@ impl MonitorServiceImpl {
     pub fn shutdown(&self) {
         self.monitor.stop_background_monitoring();
         info!("Monitor service shutdown");
+    }
+
+    fn max_clients(&self) -> Result<usize, Status> {
+        Ok(self
+            .config
+            .read()
+            .map_err(|_| Status::internal("Config lock error"))?
+            .max_clients)
     }
 
     /// Validate access token from request metadata
@@ -358,11 +378,7 @@ impl MonitorService for MonitorServiceImpl {
         info!("Handling StreamSystemUpdates request");
 
         // Enforce max_clients on long-lived streaming connections
-        let max_clients = self
-            .config
-            .read()
-            .map_err(|_| Status::internal("Config lock error"))?
-            .max_clients;
+        let max_clients = self.max_clients()?;
         if self
             .active_streams
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
@@ -393,8 +409,7 @@ impl MonitorService for MonitorServiceImpl {
         let monitor = Arc::clone(&self.monitor);
 
         tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(tokio::time::Duration::from_secs(update_interval));
+            let mut interval = interval(tokio::time::Duration::from_secs(update_interval));
 
             loop {
                 interval.tick().await;
@@ -1076,9 +1091,9 @@ mod tests {
 
     #[test]
     fn test_now_timestamp() {
-        let before = Utc::now().timestamp();
+        let before = NOW().timestamp();
         let ts = now_timestamp();
-        let after = Utc::now().timestamp();
+        let after = NOW().timestamp();
         assert!(ts.seconds >= before);
         assert!(ts.seconds <= after);
         assert!(ts.nanos >= 0);
@@ -1507,3 +1522,8 @@ mod tests {
         let _ = clusters;
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/service_units.rs"]
+mod campaign_service_units;

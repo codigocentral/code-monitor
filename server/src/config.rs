@@ -2,9 +2,12 @@
 
 use anyhow::Result;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as BASE64, Engine as _};
+#[cfg(all(test, feature = "unit-doubles"))]
+use campaign_io_units::{fs, toml};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+#[cfg(not(all(test, feature = "unit-doubles")))]
 use std::fs;
 use std::path::Path;
 
@@ -894,4 +897,47 @@ mod tests {
         let result = Config::load(path);
         assert!(result.is_err());
     }
+    #[test]
+    fn test_valid_cluster_ports_and_nonempty_tls_paths() {
+        let mut config = Config::default();
+        config
+            .postgres_clusters
+            .push(toml::from_str("name = 'unit-pg'").unwrap());
+        config
+            .mariadb_clusters
+            .push(toml::from_str("name = 'unit-maria'").unwrap());
+        config.tls = Some(TlsConfig {
+            cert_path: "unit-cert.pem".into(),
+            key_path: "unit-key.pem".into(),
+            ca_path: None,
+        });
+        assert!(config.validate().is_ok());
+    }
+    #[test]
+    fn test_invalid_mariadb_port_and_empty_tls_key() {
+        let mut config = Config::default();
+        let mut cluster: MariaDBClusterConfig = toml::from_str("name = 'unit'").unwrap();
+        cluster.port = 0;
+        config.mariadb_clusters.push(cluster);
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("mariadb cluster 'unit' has invalid port 0"));
+        config.mariadb_clusters.clear();
+        config.tls = Some(TlsConfig {
+            cert_path: "unit.pem".into(),
+            key_path: " ".into(),
+            ca_path: None,
+        });
+        assert_eq!(
+            config.validate().unwrap_err().to_string(),
+            "tls.key_path must not be empty when TLS is configured"
+        );
+    }
 }
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/config_io_units.rs"]
+pub(crate) mod campaign_io_units;

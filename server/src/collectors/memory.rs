@@ -116,7 +116,10 @@ pub fn parse_vm_swap(status: &str) -> Option<u64> {
 /// variants that embed the same 64-character hex id.
 pub fn parse_container_id(cgroup: &str) -> Option<String> {
     for line in cgroup.lines() {
-        let path = line.rsplit(':').next()?;
+        let path = line
+            .rsplit(':')
+            .next()
+            .expect("split always has a first field");
 
         for segment in path.split('/') {
             let candidate = segment
@@ -593,6 +596,33 @@ full avg10=0.00 avg60=0.75 avg300=0.20 total=10507701
             MemoryCollector::with_proc_root(&root.path().to_string_lossy())
                 .swap_by_container()
                 .is_empty()
+        );
+    }
+    #[test]
+    fn test_defaults_and_non_process_entries() {
+        assert_eq!(MemoryCollector::new().proc_root, "/proc");
+        assert_eq!(MemoryCollector::default().proc_root, "/proc");
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("self")).unwrap();
+        std::fs::write(root.path().join("123"), "exited process").unwrap();
+        assert!(
+            MemoryCollector::with_proc_root(root.path().to_str().unwrap())
+                .swap_by_container()
+                .is_empty()
+        );
+    }
+    #[test]
+    fn test_malformed_and_incomplete_kernel_values() {
+        assert!(parse_vmstat("pswpin 1").is_none());
+        assert!(parse_pressure("\nsome avg60=1").is_none());
+        assert!(parse_vm_swap("VmSwap:").is_none());
+        assert!(parse_vm_swap("VmSwap: malformed kB").is_none());
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("5")).unwrap();
+        std::fs::write(root.path().join("5/status"), "VmSwap: 3 kB").unwrap();
+        assert_eq!(
+            MemoryCollector::with_proc_root(root.path().to_str().unwrap()).process_swap(5),
+            Some(3072)
         );
     }
 }

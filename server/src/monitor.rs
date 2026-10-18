@@ -2,6 +2,12 @@
 //!
 //! This module collects system information using the sysinfo library
 
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+use crate::unit_runtime::interval;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+use crate::unit_sysinfo as sysinfo;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use shared::types::*;
@@ -9,17 +15,38 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use sysinfo::{CpuExt, DiskExt, NetworkExt, NetworksExt, PidExt, ProcessExt, System, SystemExt};
-use tokio::time::{interval, Duration};
+#[cfg(not(all(test, feature = "unit-doubles")))]
+use tokio::time::interval;
+use tokio::time::Duration;
 use tracing::{error, info};
+#[cfg(not(all(test, feature = "unit-doubles")))]
+const NOW: fn() -> DateTime<Utc> = Utc::now;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+const NOW: fn() -> DateTime<Utc> = crate::unit_sysinfo::now;
 
+#[cfg(not(all(test, feature = "unit-doubles")))]
 use crate::collectors::docker::DockerCollector;
+#[cfg(not(all(test, feature = "unit-doubles")))]
 use crate::collectors::mariadb::MariaDBCollector;
-use crate::collectors::memory::{MemoryCollector, SwapActivityTracker};
+#[cfg(not(all(test, feature = "unit-doubles")))]
+use crate::collectors::memory::MemoryCollector;
+use crate::collectors::memory::SwapActivityTracker;
+#[cfg(not(all(test, feature = "unit-doubles")))]
 use crate::collectors::net_ports::NetPortsCollector;
+#[cfg(not(all(test, feature = "unit-doubles")))]
 use crate::collectors::postgres::PostgresCollector;
+#[cfg(not(all(test, feature = "unit-doubles")))]
 use crate::collectors::systemd::SystemdCollector;
+#[cfg(not(all(test, feature = "unit-doubles")))]
 use crate::collectors::tls::TlsCollector;
 use crate::config::{MariaDBClusterConfig, PostgresClusterConfig};
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+use crate::unit_collectors::{
+    DockerCollector, MariaDBCollector, MemoryCollector, NetPortsCollector, PostgresCollector,
+    SystemdCollector, TlsCollector,
+};
 
 /// Parse the output of `ip addr show` into a map of interface name to IPv4 address.
 ///
@@ -43,18 +70,18 @@ fn parse_ip_addr_output(stdout: &str) -> HashMap<String, String> {
             .unwrap_or(false)
             && line.contains(": ")
         {
-            if let Some(iface) = line.split(": ").nth(1) {
-                current_iface = iface.split(':').next().unwrap_or(iface).to_string();
-            }
+            // contains above guarantees a second split segment.
+            let iface = line.split(": ").nth(1).unwrap();
+            current_iface = iface.split(':').next().unwrap_or(iface).to_string();
         }
         // Line like "inet 192.168.0.31/24 brd 192.168.0.255 scope global eth0"
         if line.starts_with("inet ") && !current_iface.is_empty() {
-            if let Some(ip_part) = line.strip_prefix("inet ") {
-                if let Some(ip) = ip_part.split('/').next() {
-                    if let Some(ip) = ip.split_whitespace().next() {
-                        ips.insert(current_iface.clone(), ip.to_string());
-                    }
-                }
+            // The prefix is guarded above, and split always yields a first
+            // segment, including for an empty string.
+            let ip_part = &line["inet ".len()..];
+            let candidate = ip_part.split('/').next().unwrap();
+            if let Some(ip) = candidate.split_whitespace().next() {
+                ips.insert(current_iface.clone(), ip.to_string());
             }
         }
     }
@@ -148,7 +175,7 @@ impl SystemMonitor {
         let monitor = Self {
             system: Arc::new(RwLock::new(system)),
             update_interval: Duration::from_secs(update_interval_seconds),
-            last_update: Arc::new(RwLock::new(Utc::now())),
+            last_update: Arc::new(RwLock::new(NOW())),
             is_running: Arc::new(AtomicBool::new(false)),
             docker_collector: DockerCollector::new(),
             postgres_collectors,
@@ -230,7 +257,7 @@ impl SystemMonitor {
 
         *last_update
             .write()
-            .map_err(|e| anyhow::anyhow!("Failed to lock last_update: {}", e))? = Utc::now();
+            .map_err(|e| anyhow::anyhow!("Failed to lock last_update: {}", e))? = NOW();
 
         Ok(())
     }
@@ -246,7 +273,7 @@ impl SystemMonitor {
         };
 
         let observed = match activity.write() {
-            Ok(mut tracker) => tracker.observe(counters, Utc::now()),
+            Ok(mut tracker) => tracker.observe(counters, NOW()),
             Err(e) => {
                 error!("Failed to lock swap activity: {}", e);
                 return;
@@ -361,7 +388,7 @@ impl SystemMonitor {
                     cpu_usage_percent: cpu_usage,
                     memory_usage_bytes: memory_usage,
                     command_line: process.cmd().join(" "),
-                    start_time: Utc::now() - chrono::Duration::seconds(process.run_time() as i64),
+                    start_time: NOW() - chrono::Duration::seconds(process.run_time() as i64),
                     status: format!("{:?}", process.status()),
                     swap_bytes: self.memory_collector.process_swap(pid.as_u32()),
                 }
@@ -539,13 +566,20 @@ impl SystemMonitor {
     }
 
     pub fn get_network_info(&self) -> Result<Vec<NetworkInfo>> {
+        self.get_network_info_with_provider(get_interface_ips)
+    }
+
+    fn get_network_info_with_provider(
+        &self,
+        ips: fn() -> HashMap<String, String>,
+    ) -> Result<Vec<NetworkInfo>> {
         let sys = self
             .system
             .read()
             .map_err(|e| anyhow::anyhow!("Failed to lock system: {}", e))?;
 
         // Get IP addresses for all interfaces
-        let interface_ips = get_interface_ips();
+        let interface_ips = ips();
 
         let network_info: Vec<NetworkInfo> = sys
             .networks()
@@ -1409,3 +1443,8 @@ mod campaign_ip_units {
         process::drained();
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/monitor_units.rs"]
+pub(crate) mod campaign_monitor_units;

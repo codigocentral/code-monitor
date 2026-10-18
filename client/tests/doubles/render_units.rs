@@ -40,7 +40,7 @@ async fn fixture() -> (DashboardApp, uuid::Uuid) {
     app.connected_clients.insert(id, client);
     app.connection_status
         .insert(id, ConnectionStatus::Connected);
-    fetch_server_data(&mut app, id).await.unwrap();
+    fetch_server_data(&mut app, id).await;
     (app, id)
 }
 #[tokio::test]
@@ -358,4 +358,16 @@ async fn severity_styles_image_versions_and_database_origins_reach_the_buffer() 
     app.connected_clients.clear();
     app.current_tab = Tab::Overview;
     assert!(render(&app).contains("Unit"));
+}
+
+#[tokio::test]
+async fn swap_without_kernel_pressure_keeps_the_swap_row_visible() {
+    let (mut app, id) = fixture().await;
+    let info = app.system_info_cache.get_mut(&id).unwrap();
+    info.swap.total_bytes = 1024;
+    info.memory_pressure = None;
+    app.current_tab = Tab::Overview;
+    let output = render(&app);
+    assert!(output.contains("Swap"));
+    assert!(!output.contains("PSI some"));
 }

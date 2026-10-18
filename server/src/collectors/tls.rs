@@ -9,11 +9,18 @@
 //! on the monitored host.
 
 use anyhow::Result;
-use chrono::{DateTime, TimeZone, Utc};
+#[cfg(test)]
+use chrono::TimeZone;
+use chrono::{DateTime, Utc};
 use shared::types::{TlsCertificateInfo, TlsSnapshot};
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 use x509_parser::prelude::*;
+
+#[cfg(all(test, feature = "unit-doubles"))]
+use campaign_tls_units::read_certificate;
+#[cfg(not(all(test, feature = "unit-doubles")))]
+use std::fs::read as read_certificate;
 
 /// Where Let's Encrypt keeps its lineages by default
 const DEFAULT_CERTIFICATE_DIR: &str = "/etc/letsencrypt/live";
@@ -41,15 +48,22 @@ pub struct ParsedCertificate {
 /// and the intermediates expire on their own schedule, which is not what a
 /// site's availability depends on.
 pub fn parse_certificate(pem_bytes: &[u8]) -> Result<ParsedCertificate> {
+    parse_certificate_with_expiry(pem_bytes, DateTime::<Utc>::from_timestamp)
+}
+
+// Keep the defensive expiry conversion observable without manufacturing an
+// invalid ASN.1 date; the production decoder is chrono's standard conversion.
+fn parse_certificate_with_expiry(
+    pem_bytes: &[u8],
+    expiry: fn(i64, u32) -> Option<DateTime<Utc>>,
+) -> Result<ParsedCertificate> {
     let (_, pem) = x509_parser::pem::parse_x509_pem(pem_bytes)
         .map_err(|e| anyhow::anyhow!("not a PEM certificate: {}", e))?;
     let cert = pem
         .parse_x509()
         .map_err(|e| anyhow::anyhow!("malformed certificate: {}", e))?;
 
-    let not_after = Utc
-        .timestamp_opt(cert.validity().not_after.timestamp(), 0)
-        .single()
+    let not_after = expiry(cert.validity().not_after.timestamp(), 0)
         .ok_or_else(|| anyhow::anyhow!("certificate carries an unrepresentable expiry"))?;
 
     // Subject Alternative Names are what browsers actually match; the common
@@ -131,7 +145,7 @@ impl TlsCollector {
 
         for dir in &self.certificate_dirs {
             for cert_path in Self::certificate_paths(Path::new(dir)) {
-                match std::fs::read(&cert_path) {
+                match read_certificate(&cert_path) {
                     Ok(bytes) => match parse_certificate(&bytes) {
                         Ok(parsed) => certificates.push(TlsCertificateInfo {
                             name: lineage_name(&cert_path),
@@ -367,3 +381,8 @@ mod tests {
         assert_eq!(collector.certificate_dirs, vec![DEFAULT_CERTIFICATE_DIR]);
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../../tests/doubles/certificate_units.rs"]
+pub(crate) mod campaign_tls_units;

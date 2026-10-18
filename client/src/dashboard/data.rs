@@ -19,7 +19,9 @@ pub(super) async fn connect_to_server(
     .await
 }
 
-pub(super) async fn fetch_server_data(app: &mut DashboardApp, server_id: uuid::Uuid) -> Result<()> {
+// Every RPC failure is converted to an absent sample; storage/notification
+// failures are best effort. This operation has no error return path.
+pub(super) async fn fetch_server_data(app: &mut DashboardApp, server_id: uuid::Uuid) {
     // First, fetch all data from the client
     let data = {
         if let Some(client) = app.connected_clients.get_mut(&server_id) {
@@ -282,7 +284,6 @@ pub(super) async fn fetch_server_data(app: &mut DashboardApp, server_id: uuid::U
             app.ports_cache.insert(server_id, ports);
         }
     }
-    Ok(())
 }
 
 pub(super) async fn handle_command(app: &mut DashboardApp, command: &str) {
@@ -301,7 +302,7 @@ pub(super) async fn handle_command(app: &mut DashboardApp, command: &str) {
                         app.connection_status
                             .insert(server.id, ConnectionStatus::Connected);
                         app.status_message = format!("Connected to {}", server.name);
-                        let _ = fetch_server_data(app, server.id).await;
+                        fetch_server_data(app, server.id).await;
                     }
                     Err(e) => {
                         app.status_message = format!("Connection failed: {}", e);
@@ -319,9 +320,7 @@ pub(super) async fn handle_command(app: &mut DashboardApp, command: &str) {
         }
         "refresh" | "r" => {
             if let Some(server_id) = app.get_selected_server_id() {
-                if let Err(e) = fetch_server_data(app, server_id).await {
-                    app.status_message = format!("Refresh failed: {}", e);
-                }
+                fetch_server_data(app, server_id).await;
             }
         }
         "quit" | "q" => {
@@ -415,7 +414,7 @@ mod tests {
     async fn test_handle_command_refresh_no_client() {
         let mut app = create_test_app();
         handle_command(&mut app, "refresh").await;
-        // fetch_server_data returns Ok when no client is connected
+        // No client means no samples and no status change
         assert_eq!(app.status_message, "");
     }
 
@@ -431,8 +430,8 @@ mod tests {
     async fn test_fetch_server_data_no_client() {
         let mut app = create_test_app();
         let server_id = app.servers[0].id;
-        let result = fetch_server_data(&mut app, server_id).await;
-        assert!(result.is_ok());
+        fetch_server_data(&mut app, server_id).await;
+        assert!(app.system_info_cache.is_empty());
     }
 
     #[tokio::test]

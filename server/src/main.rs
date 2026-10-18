@@ -8,14 +8,31 @@ use clap::{Parser, Subcommand};
 use shared::proto::monitoring::monitor_service_server::MonitorServiceServer;
 use shared::types::ServerConfig;
 use std::net::SocketAddr;
+#[cfg(not(all(test, feature = "unit-doubles")))]
+use tokio::{signal, spawn as spawn_health};
 use tonic::codec::CompressionEncoding;
+#[cfg(not(all(test, feature = "unit-doubles")))]
 use tonic::transport::Server;
 use tracing::{info, warn};
+#[cfg(all(test, feature = "unit-doubles"))]
+use unit_server_bootstrap::Server;
+#[cfg(all(test, feature = "unit-doubles"))]
+use unit_server_bootstrap::{logging as tracing_subscriber, signal, spawn as spawn_health};
 
 use crate::config::Config;
+#[cfg(not(all(test, feature = "unit-doubles")))]
 use crate::monitor::SystemMonitor;
+#[cfg(not(all(test, feature = "unit-doubles")))]
 use crate::service::MonitorServiceImpl;
+#[cfg(all(test, feature = "unit-doubles"))]
+use crate::unit_service_monitor::SystemMonitor;
+#[cfg(all(test, feature = "unit-doubles"))]
+use unit_server_bootstrap::ServiceFactory as MonitorServiceImpl;
 
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/collectors.rs"]
+mod unit_collectors;
 #[cfg(test)]
 #[cfg(feature = "unit-doubles")]
 #[path = "../../tests/rust/log_bridge.rs"]
@@ -30,16 +47,66 @@ mod unit_logs;
 mod unit_process;
 #[cfg(test)]
 #[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/runtime.rs"]
+mod unit_runtime;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/sysinfo.rs"]
+mod unit_sysinfo;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
 mod bridge_units {
     #[tokio::test]
     async fn log_fallback_formats_systemctl_failure_before_subscriber_installation() {
         crate::unit_log_compat::install();
         crate::collectors::systemd::campaign_systemd_units::exercise_log_fallback().await;
+        crate::monitor::campaign_monitor_units::exercise_log_fallback().await;
+        crate::health::campaign_health_units::exercise_log_fallback().await;
+        crate::collectors::tls::campaign_tls_units::exercise_log_fallback().await;
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("missing-proc");
+        let memory =
+            crate::collectors::memory::MemoryCollector::with_proc_root(missing.to_str().unwrap());
+        assert!(memory.paging_counters().is_none());
+        assert!(memory.pressure().is_none());
+        assert!(
+            crate::collectors::net_ports::NetPortsCollector::with_proc_root(
+                missing.to_str().unwrap()
+            )
+            .collect()
+            .await
+            .unwrap()
+            .is_empty()
+        );
         assert!(crate::unit_log_compat::records()
             .iter()
             .any(|line| line.contains("systemctl list-units failed: unit systemctl refused")));
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/service_monitor.rs"]
+mod unit_service_monitor;
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/bollard.rs"]
+mod unit_bollard;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/registry_http.rs"]
+mod unit_registry_http;
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/postgres_sdk.rs"]
+mod unit_pg;
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/mariadb_sdk.rs"]
+mod unit_maria;
 
 mod collectors;
 mod config;
@@ -142,10 +209,23 @@ pub enum Commands {
     },
 }
 
+#[cfg(not(all(test, feature = "unit-doubles")))]
+const CLI_ARGS: fn() -> Args = Args::parse;
+#[cfg(all(test, feature = "unit-doubles"))]
+const CLI_ARGS: fn() -> Args = unit_server_bootstrap::parse;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../../client/tests/doubles/console.rs"]
+mod unit_console;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/server_bootstrap.rs"]
+mod unit_server_bootstrap;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Parse command line arguments
-    let args = Args::parse();
+    let args = CLI_ARGS();
 
     // Handle subcommands first (before setting up logging for cleaner output)
     if let Some(cmd) = &args.command {
@@ -261,7 +341,7 @@ async fn main() -> Result<()> {
     // Start health check server in parallel (if enabled)
     if !args.no_health {
         let health_port = args.health_port;
-        tokio::spawn(async move {
+        spawn_health(async move {
             if let Err(e) = health::start_health_server(health_port).await {
                 tracing::error!("Health check server error: {}", e);
             }
@@ -296,7 +376,7 @@ async fn main() -> Result<()> {
 /// Wait for SIGINT (Ctrl+C) or SIGTERM (Unix) to trigger a graceful shutdown
 async fn shutdown_signal() {
     let ctrl_c = async {
-        if let Err(e) = tokio::signal::ctrl_c().await {
+        if let Err(e) = signal::ctrl_c().await {
             warn!("Failed to install Ctrl+C handler: {}", e);
             std::future::pending::<()>().await;
         }
@@ -304,7 +384,7 @@ async fn shutdown_signal() {
 
     #[cfg(unix)]
     let terminate = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        match signal::unix::signal(signal::unix::SignalKind::terminate()) {
             Ok(mut signal) => {
                 signal.recv().await;
             }
@@ -325,15 +405,12 @@ async fn shutdown_signal() {
 }
 
 fn handle_command(cmd: &Commands, config_path: &str) -> Result<()> {
-    if let Commands::Init { force } = cmd {
-        return init_config(config_path, *force);
-    }
-
-    let mut config = Config::load(config_path)?;
-
+    // Init must work without loading/validating the existing configuration.
+    // Other commands load once inside their selected arm.
     match cmd {
-        Commands::Init { .. } => unreachable!(),
+        Commands::Init { force } => return init_config(config_path, *force),
         Commands::ShowToken => {
+            let config = Config::load(config_path)?;
             println!();
             println!("🔑 Access Token for clients:");
             println!();
@@ -346,6 +423,7 @@ fn handle_command(cmd: &Commands, config_path: &str) -> Result<()> {
             println!();
         }
         Commands::NewToken => {
+            let mut config = Config::load(config_path)?;
             config.generate_access_token();
             config.save(config_path)?;
             println!();
@@ -357,6 +435,7 @@ fn handle_command(cmd: &Commands, config_path: &str) -> Result<()> {
             println!();
         }
         Commands::ListClients => {
+            let config = Config::load(config_path)?;
             println!();
             if config.authorized_clients.is_empty() {
                 println!("📋 No authorized clients yet.");
@@ -373,6 +452,7 @@ fn handle_command(cmd: &Commands, config_path: &str) -> Result<()> {
             println!();
         }
         Commands::RemoveClient { name } => {
+            let mut config = Config::load(config_path)?;
             if config.remove_authorized_client(name) {
                 config.save(config_path)?;
                 println!("✅ Client '{}' removed.", name);
@@ -381,6 +461,7 @@ fn handle_command(cmd: &Commands, config_path: &str) -> Result<()> {
             }
         }
         Commands::DisableAuth => {
+            let mut config = Config::load(config_path)?;
             config.enable_authentication = false;
             config.save(config_path)?;
             println!();
@@ -389,10 +470,9 @@ fn handle_command(cmd: &Commands, config_path: &str) -> Result<()> {
             println!();
         }
         Commands::EnableAuth => {
+            let mut config = Config::load(config_path)?;
             config.enable_authentication = true;
-            if config.access_token.is_empty() {
-                config.generate_access_token();
-            }
+            // Loading already generates and persists any missing token.
             config.save(config_path)?;
             println!();
             println!("✅ Authentication ENABLED");
@@ -401,16 +481,19 @@ fn handle_command(cmd: &Commands, config_path: &str) -> Result<()> {
             println!();
         }
         Commands::AddClient { name, public_key } => {
+            let mut config = Config::load(config_path)?;
             config.add_authorized_client(name.clone(), public_key.clone());
             config.save(config_path)?;
             println!("✅ Client '{}' authorized for signature auth.", name);
         }
         Commands::ExportConfig { output } => {
+            let config = Config::load(config_path)?;
             config.save(output)?;
             println!("✅ Configuration exported to {}", output);
             println!("⚠️  The backup contains the access token — store it safely.");
         }
         Commands::ImportConfig { input } => {
+            Config::load(config_path)?;
             let imported = Config::load(input)?;
             imported.save(config_path)?;
             println!("✅ Configuration imported from {} and applied.", input);
@@ -422,6 +505,9 @@ fn handle_command(cmd: &Commands, config_path: &str) -> Result<()> {
 }
 
 fn init_config(config_path: &str, force: bool) -> Result<()> {
+    #[cfg(all(test, feature = "unit-doubles"))]
+    use crate::unit_console::{self as io, Write};
+    #[cfg(not(all(test, feature = "unit-doubles")))]
     use std::io::{self, Write};
     use std::path::Path;
 
@@ -521,6 +607,9 @@ fn init_config(config_path: &str, force: bool) -> Result<()> {
 }
 
 fn prompt_string(label: &str, default: &str) -> Result<String> {
+    #[cfg(all(test, feature = "unit-doubles"))]
+    use crate::unit_console::{self as io, Write};
+    #[cfg(not(all(test, feature = "unit-doubles")))]
     use std::io::{self, Write};
 
     if default.is_empty() {
@@ -707,3 +796,8 @@ mod tests {
         assert!(result.is_ok());
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/server_main_units.rs"]
+mod campaign_main_units;
