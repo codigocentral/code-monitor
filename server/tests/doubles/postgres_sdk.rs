@@ -51,7 +51,8 @@ pub struct State {
     pub calls: Vec<(String, Vec<String>)>,
 }
 pub type SharedState = Arc<Mutex<State>>;
-thread_local! {static CONNECTS:RefCell<VecDeque<io::Result<(SharedState,io::Result<()>)>>>=const{RefCell::new(VecDeque::new())};pub static CONFIGS:RefCell<Vec<::tokio_postgres::Config>>=const{RefCell::new(Vec::new())};}
+type ConnectionReply = io::Result<(SharedState, io::Result<()>)>;
+thread_local! {static CONNECTS:RefCell<VecDeque<ConnectionReply>>=const{RefCell::new(VecDeque::new())};pub static CONFIGS:RefCell<Vec<::tokio_postgres::Config>>=const{RefCell::new(Vec::new())};}
 pub fn next(reply: io::Result<(SharedState, io::Result<()>)>) {
     CONNECTS.with(|q| q.borrow_mut().push_back(reply));
 }

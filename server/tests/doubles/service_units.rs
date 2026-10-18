@@ -332,7 +332,11 @@ async fn authentication_format_precedence_and_poisoned_config() {
     .join()
     .is_err());
     assert_eq!(
-        service.max_clients().unwrap_err().message(),
+        service
+            .max_clients()
+            .map_err(Status::from_error)
+            .unwrap_err()
+            .message(),
         "Config lock error"
     );
     assert_eq!(
@@ -399,7 +403,6 @@ async fn streaming_limit_counter_drop_and_scripted_success_or_error_ticks() {
         let mut response = service
             .stream_system_updates(Request::new(UpdatesRequest {
                 update_interval_seconds: 0,
-                ..Default::default()
             }))
             .await
             .unwrap()

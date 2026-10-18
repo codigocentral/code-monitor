@@ -233,3 +233,10 @@ are generated and persisted; the redundant second empty-token branch had no
 reachable path. Empty-token behavior remains asserted by the original handler
 case and dedicated loader units. No testable command or production file is
 excluded to close coverage.
+
+Native lint validation keeps Linux-only systemd parsers under the same Linux-or-
+test condition as their callers. They remain compiled and measured in every unit
+run; no coverage ignore is introduced. The private stream-limit error is boxed
+and converted through tonic's Status::from_error, which preserves the original
+Status code/message. Its poisoned-lock unit asserts the same client-visible
+error. SDK queue aliases and explicit request fields keep test code lint-clean.

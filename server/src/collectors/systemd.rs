@@ -9,8 +9,10 @@ use anyhow::Result;
 #[cfg(test)]
 #[cfg(feature = "unit-doubles")]
 use campaign_systemd_units::Command;
+#[cfg(any(target_os = "linux", test))]
 use chrono::{DateTime, Utc};
 use shared::types::{SystemdFailedUnit, SystemdUnitInfo};
+#[cfg(any(target_os = "linux", test))]
 use std::collections::HashMap;
 #[cfg(all(
     any(target_os = "linux", test),
@@ -28,6 +30,7 @@ pub struct SystemdCollector {
 /// Parse the `key=value` lines emitted by `systemctl show` into a map.
 ///
 /// Values may themselves contain `=`, so only the first separator splits.
+#[cfg(any(target_os = "linux", test))]
 fn parse_unit_properties(stdout: &str) -> HashMap<String, String> {
     let mut props = HashMap::new();
 
@@ -47,6 +50,7 @@ fn parse_unit_properties(stdout: &str) -> HashMap<String, String> {
 /// is honoured when present. Named zones other than UTC cannot be resolved from
 /// the string alone and are treated as UTC. Returns `None` for `n/a`, empty
 /// values and anything unparseable.
+#[cfg(any(target_os = "linux", test))]
 fn parse_systemd_timestamp(value: &str) -> Option<DateTime<Utc>> {
     let value = value.trim();
     if value.is_empty() || value == "n/a" {
@@ -80,6 +84,7 @@ fn parse_systemd_timestamp(value: &str) -> Option<DateTime<Utc>> {
 
 /// Parse a numeric UTC offset as printed by systemd (`-03`, `+0530`, `+05:30`)
 /// into seconds east of UTC. Named zones such as `UTC` yield `None`.
+#[cfg(any(target_os = "linux", test))]
 fn parse_utc_offset_seconds(token: &str) -> Option<i32> {
     let sign = match token.as_bytes().first()? {
         b'+' => 1,
@@ -110,6 +115,7 @@ fn parse_utc_offset_seconds(token: &str) -> Option<i32> {
 
 /// Parse systemd's `MemoryCurrent` property, which is `[not set]` when the unit
 /// has no memory accounting.
+#[cfg(any(target_os = "linux", test))]
 fn parse_memory_current(value: &str) -> Option<u64> {
     if value == "[not set]" || value.is_empty() {
         None
@@ -120,6 +126,7 @@ fn parse_memory_current(value: &str) -> Option<u64> {
 
 /// Map systemd's `ActiveState`/`SubState` pair to a display status and whether
 /// the unit counts as active.
+#[cfg(any(target_os = "linux", test))]
 fn unit_state_label(active_state: &str, sub_state: &str) -> (String, bool) {
     match active_state {
         "active" => ("active".to_string(), true),
@@ -137,6 +144,7 @@ fn unit_state_label(active_state: &str, sub_state: &str) -> (String, bool) {
 /// Columns are `UNIT LOAD ACTIVE SUB DESCRIPTION`, the description being
 /// everything past the fourth column. A leading bullet is tolerated so the
 /// parser still works if `--plain` is ever dropped.
+#[cfg(any(target_os = "linux", test))]
 fn parse_failed_units(stdout: &str) -> Vec<(String, String)> {
     let mut units = Vec::new();
 

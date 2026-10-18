@@ -8,6 +8,9 @@ use std::{
 };
 use tonic::{Request, Response, Status};
 
+type Message = Box<dyn Any + Send>;
+type Reply = (&'static str, Result<Message, Status>);
+
 pub struct Call {
     pub method: &'static str,
     pub token: Option<String>,
@@ -15,7 +18,7 @@ pub struct Call {
 }
 #[derive(Default)]
 pub struct State {
-    pub responses: VecDeque<(&'static str, Result<Box<dyn Any + Send>, Status>)>,
+    pub responses: VecDeque<Reply>,
     pub calls: Vec<Call>,
     pub connection_kind: Option<&'static str>,
 }
@@ -65,7 +68,7 @@ impl Endpoint {
     async fn connected(self, kind: &'static str) -> Result<Channel, Status> {
         let state = CONNECTIONS
             .with(|queue| queue.borrow_mut().pop_front())
-            .unwrap_or_else(|| Err(Status::unavailable("unit transport unconfigured")))?;
+            .unwrap_or(Err(Status::unavailable("unit transport unconfigured")))?;
         state.lock().unwrap().connection_kind = Some(kind);
         Ok(Channel(state))
     }

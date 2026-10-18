@@ -134,7 +134,7 @@ impl MonitorServiceImpl {
         info!("Monitor service shutdown");
     }
 
-    fn max_clients(&self) -> Result<usize, Status> {
+    fn max_clients(&self) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
         Ok(self
             .config
             .read()
@@ -378,7 +378,7 @@ impl MonitorService for MonitorServiceImpl {
         info!("Handling StreamSystemUpdates request");
 
         // Enforce max_clients on long-lived streaming connections
-        let max_clients = self.max_clients()?;
+        let max_clients = self.max_clients().map_err(Status::from_error)?;
         if self
             .active_streams
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {

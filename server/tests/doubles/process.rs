@@ -1,6 +1,7 @@
 //! Scripted process provider: commands are captured, never spawned.
 use std::{cell::RefCell, collections::VecDeque, io, process::Output};
-thread_local! {static QUEUE:RefCell<VecDeque<(String,Vec<String>,io::Result<Output>)>>=const{RefCell::new(VecDeque::new())};}
+type QueuedCommand = (String, Vec<String>, io::Result<Output>);
+thread_local! {static QUEUE:RefCell<VecDeque<QueuedCommand>>=const{RefCell::new(VecDeque::new())};}
 pub struct Command {
     program: String,
     args: Vec<String>,

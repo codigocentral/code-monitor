@@ -631,7 +631,7 @@ async fn connect_startup_servers<B: tui::backend::Backend>(
             app.status_message = format!("🔄 Connecting to {}...", server.name);
             app.connection_status
                 .insert(server.id, ConnectionStatus::Connecting);
-            terminal.draw(|f| draw_ui(f, &app))?;
+            terminal.draw(|f| draw_ui(f, app))?;
 
             match connect_to_server(server, update_interval, app.tls_config.as_ref()).await {
                 Ok(client) => {
@@ -1065,14 +1065,12 @@ async fn run_app<B: tui::backend::Backend>(
                                 app.show_details = !app.show_details;
                             }
                             // Filter (in processes tab)
-                            KeyCode::Char('/') => {
-                                if app.current_tab == Tab::Processes {
-                                    app.input_mode = InputMode::Command;
-                                    app.input_buffer = app.process_filter.clone();
-                                    app.status_message =
-                                        "🔍 Type filter, press Enter to apply, Esc to cancel"
-                                            .to_string();
-                                }
+                            KeyCode::Char('/') if app.current_tab == Tab::Processes => {
+                                app.input_mode = InputMode::Command;
+                                app.input_buffer = app.process_filter.clone();
+                                app.status_message =
+                                    "🔍 Type filter, press Enter to apply, Esc to cancel"
+                                        .to_string();
                             }
                             // Clear filter
                             KeyCode::Char('x') => {
@@ -1115,13 +1113,11 @@ async fn run_app<B: tui::backend::Backend>(
                                 app.status_message = "➕ Add Server - Enter name:".to_string();
                             }
                             // Edit token for selected server
-                            KeyCode::Char('t') => {
-                                if app.get_selected_server().is_some() {
-                                    app.input_mode = InputMode::EditToken;
-                                    app.input_buffer.clear();
-                                    app.status_message =
-                                        "🔑 Enter access token (from server):".to_string();
-                                }
+                            KeyCode::Char('t') if app.get_selected_server().is_some() => {
+                                app.input_mode = InputMode::EditToken;
+                                app.input_buffer.clear();
+                                app.status_message =
+                                    "🔑 Enter access token (from server):".to_string();
                             }
                             // Remove selected server
                             KeyCode::Delete => {
@@ -1394,15 +1390,11 @@ async fn run_app<B: tui::backend::Backend>(
                                 app.input_mode = InputMode::Normal;
                                 app.status_message.clear();
                             }
-                            KeyCode::Up | KeyCode::Char('k') => {
-                                if app.settings_selection > 0 {
-                                    app.settings_selection -= 1;
-                                }
+                            KeyCode::Up | KeyCode::Char('k') if app.settings_selection > 0 => {
+                                app.settings_selection -= 1;
                             }
-                            KeyCode::Down | KeyCode::Char('j') => {
-                                if app.settings_selection < 2 {
-                                    app.settings_selection += 1;
-                                }
+                            KeyCode::Down | KeyCode::Char('j') if app.settings_selection < 2 => {
+                                app.settings_selection += 1;
                             }
                             KeyCode::Enter => {
                                 match app.settings_selection {
