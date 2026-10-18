@@ -23,7 +23,7 @@ for line in compile_log.read_text().splitlines():
         continue
     if item.get('reason') == 'compiler-artifact' and item.get('executable') and item['profile']['test']:
         artifacts.append(item)
-assert len(artifacts) == 3, [x['target']['name'] for x in artifacts]
+assert len(artifacts) == (1 if '--component' in sys.argv[3:] else 3), [x['target']['name'] for x in artifacts]
 
 def classification(crate, name):
     if crate == 'shared':
@@ -51,10 +51,11 @@ selection = {}
 unit_failed = False
 raw = out / 'profiles'
 raw.mkdir(exist_ok=True)
-env = dict(os.environ, LLVM_PROFILE_FILE=str(raw / '%p-%m.profraw'))
+env = {key: value for key, value in os.environ.items() if not key.startswith('CODE_MONITOR_')}
+env.update(LLVM_PROFILE_FILE=str(raw / '%p-%m.profraw'), DOCKER_SOCKET=str(out / 'nonexistent-docker.sock'))
 for artifact in artifacts:
     binary = artifact['executable']
-    crate = artifact['target']['name']
+    crate = artifact['target']['name'].replace('-', '_')
     listing = subprocess.check_output([binary, '--list', '--format=terse'], text=True)
     (out / f'{crate}-list.txt').write_text(listing)
     names = [line[:-6] for line in listing.splitlines() if line.endswith(': test')]
@@ -94,5 +95,6 @@ with (out / 'coverage.info').open('w') as handle:
 with (out / 'llvm-coverage.json').open('w') as handle:
     subprocess.run(common, check=True, stdout=handle)
 print(json.loads((out / 'llvm-coverage.json').read_text())['data'][0]['totals'], flush=True)
+subprocess.run([sys.executable, 'coverage/rust-production-scope.py', str(out)], check=True)
 if unit_failed:
     raise SystemExit(1)

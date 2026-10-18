@@ -1672,3 +1672,37 @@ mod tests {
         assert_eq!(status.message(), "Internal error");
     }
 }
+
+#[cfg(test)]
+mod campaign_version_units {
+    use super::types::VersionStatus;
+    #[test]
+    fn registry_status_labels_are_stable() {
+        for (status, text) in [
+            (VersionStatus::UpToDate, "UpToDate"),
+            (VersionStatus::Drifted, "Drifted"),
+            (VersionStatus::LocalBuild, "LocalBuild"),
+            (VersionStatus::Unknown, "Unknown"),
+        ] {
+            assert_eq!(status.to_string(), text);
+        }
+    }
+}
+
+#[cfg(test)]
+mod campaign_schema_units {
+    use super::types::MariaDBSchemaInfo;
+    #[test]
+    fn emptiness_depends_on_table_count_even_without_write_time_visibility() {
+        let mut schema = MariaDBSchemaInfo {
+            name: "unit".into(),
+            size_bytes: 0,
+            table_count: 0,
+            last_write_at: None,
+            write_time_available: false,
+        };
+        assert!(schema.is_empty());
+        schema.table_count = 1;
+        assert!(!schema.is_empty());
+    }
+}

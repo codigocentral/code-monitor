@@ -214,9 +214,17 @@ impl AlertState {
     }
 
     pub fn can_trigger_again(&self, cooldown: Duration) -> bool {
+        self.can_trigger_again_with(cooldown, Utc::now)
+    }
+
+    fn can_trigger_again_with(
+        &self,
+        cooldown: Duration,
+        clock: impl FnOnce() -> DateTime<Utc>,
+    ) -> bool {
         match self.last_triggered {
             None => true,
-            Some(last) => Utc::now() - last > cooldown,
+            Some(last) => clock() - last > cooldown,
         }
     }
 
@@ -723,11 +731,11 @@ impl AlertManager {
 
         // Naming the largest term is the whole point: a ratio alone sends
         // someone hunting through configuration files.
-        let culprit = commitment
-            .top_contributors(1)
-            .first()
-            .map(|c| format!("{} ({})", c.source, c.basis))
-            .unwrap_or_else(|| "unknown".to_string());
+        // Warning/Critical requires a positive total, hence at least one
+        // component. The Ok/empty case returned above.
+        let contributors = commitment.top_contributors(1);
+        let component = contributors[0];
+        let culprit = format!("{} ({})", component.source, component.basis);
 
         self.raise_once(
             server_id,
@@ -1103,8 +1111,16 @@ mod tests {
 
         state.mark_triggered();
         assert!(!state.can_trigger_again(Duration::minutes(5)));
-        // But with zero cooldown it should allow
-        assert!(state.can_trigger_again(Duration::seconds(0)));
+        // The comparison is strict: the same instant is not past cooldown.
+        // Supply fixed instants rather than assuming the OS clock advanced.
+        let last = state.last_triggered.unwrap();
+        assert!(!state.can_trigger_again_with(Duration::zero(), || last));
+        assert!(state.can_trigger_again_with(Duration::zero(), || last + Duration::nanoseconds(1)));
+        assert!(
+            AlertState::new().can_trigger_again_with(Duration::minutes(5), || panic!(
+                "an untriggered state must not read the clock"
+            ))
+        );
     }
 
     #[test]
@@ -2179,5 +2195,165 @@ mod tests {
         assert!(manager.active_alerts.is_empty());
         assert!(manager.alert_history.is_empty());
         assert_eq!(manager.max_history, 1000);
+    }
+}
+
+#[cfg(test)]
+mod campaign_display_units {
+    use super::AlertType;
+    #[test]
+    fn every_alert_kind_has_the_external_event_label() {
+        for (kind, label) in [
+            (AlertType::CpuHigh, "CPU_HIGH"),
+            (AlertType::MemoryHigh, "MEMORY_HIGH"),
+            (AlertType::DiskHigh, "DISK_HIGH"),
+            (AlertType::ServerDown, "SERVER_DOWN"),
+            (AlertType::ProcessDown, "PROCESS_DOWN"),
+            (AlertType::SystemdUnitFailed, "SYSTEMD_UNIT_FAILED"),
+            (AlertType::ContainerCrashLoop, "CONTAINER_CRASH_LOOP"),
+            (
+                AlertType::ContainerHealthcheckBroken,
+                "CONTAINER_HEALTHCHECK_BROKEN",
+            ),
+            (
+                AlertType::TlsCertificateExpiring,
+                "TLS_CERTIFICATE_EXPIRING",
+            ),
+            (AlertType::TlsRenewalBroken, "TLS_RENEWAL_BROKEN"),
+            (AlertType::ExposedDatastore, "EXPOSED_DATASTORE"),
+            (AlertType::SwapThrashing, "SWAP_THRASHING"),
+            (AlertType::MemoryStalled, "MEMORY_STALLED"),
+            (AlertType::MemoryOvercommitted, "MEMORY_OVERCOMMITTED"),
+        ] {
+            assert_eq!(kind.to_string(), label);
+        }
+    }
+}
+
+#[cfg(test)]
+mod campaign_manager_units {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn rule(kind: AlertType) -> AlertRule {
+        AlertRule {
+            id: format!("{kind}"),
+            name: "unit threshold".into(),
+            alert_type: kind,
+            severity: AlertSeverity::Warning,
+            enabled: true,
+            threshold: 50.0,
+            duration_seconds: 0,
+            servers: vec![],
+            channels: vec![],
+        }
+    }
+    #[test]
+    fn memory_and_disk_rules_raise_resolve_and_respect_cooldown() {
+        let mut manager = AlertManager::new();
+        manager.add_rule(rule(AlertType::MemoryHigh));
+        manager.add_rule(rule(AlertType::DiskHigh));
+        assert_eq!(
+            manager.process_metrics("s", "unit", 0.0, 75.0, 80.0).len(),
+            2
+        );
+        assert!(manager
+            .process_metrics("s", "unit", 0.0, 75.0, 80.0)
+            .is_empty());
+        assert!(manager
+            .process_metrics("s", "unit", 0.0, 0.0, 0.0)
+            .is_empty());
+        assert!(manager.active_alerts.iter().all(Alert::is_resolved));
+        assert!(manager
+            .process_metrics("s", "unit", 0.0, 75.0, 80.0)
+            .is_empty());
+    }
+    #[test]
+    fn threshold_window_requires_multiple_samples_before_raising() {
+        let mut manager = AlertManager::new();
+        let mut configured = rule(AlertType::MemoryHigh);
+        configured.duration_seconds = 10;
+        manager.add_rule(configured);
+        assert!(manager
+            .process_metrics("s", "unit", 0.0, 75.0, 0.0)
+            .is_empty());
+        assert_eq!(
+            manager.process_metrics("s", "unit", 0.0, 75.0, 0.0).len(),
+            1
+        );
+    }
+    #[test]
+    fn resolving_tracked_state_tolerates_an_absent_active_record() {
+        let mut manager = AlertManager::new();
+        manager.add_rule(rule(AlertType::MemoryHigh));
+        manager.process_metrics("s", "unit", 0.0, 80.0, 0.0);
+        manager.active_alerts.clear();
+        manager.process_metrics("s", "unit", 0.0, 0.0, 0.0);
+        assert!(!manager.states[&("s".into(), AlertType::MemoryHigh)].is_triggered());
+        manager.process_systemd_failed_units("s", "unit", &["unit.service".into()]);
+        manager.active_alerts.clear();
+        assert!(manager
+            .process_systemd_failed_units("s", "unit", &[])
+            .is_none());
+        manager.process_broken_healthchecks("s", "unit", &["unit-container".into()]);
+        manager.active_alerts.clear();
+        assert!(manager
+            .process_broken_healthchecks("s", "unit", &[])
+            .is_none());
+        manager
+            .states
+            .entry(("s".into(), AlertType::SwapThrashing))
+            .or_default()
+            .mark_triggered();
+        manager.clear("s", AlertType::SwapThrashing);
+        assert!(!manager.states[&("s".into(), AlertType::SwapThrashing)].is_triggered());
+        manager.unsilence_alert("missing", AlertType::CpuHigh);
+    }
+    #[test]
+    fn sustained_pressure_and_broken_renewal_do_not_repeat_notifications() {
+        let mut manager = AlertManager::new();
+        for _ in 0..3 {
+            manager.process_memory_pressure("s", "unit", 1000.0, Some(100.0));
+        }
+        assert!(manager
+            .process_memory_pressure("s", "unit", 1000.0, Some(100.0))
+            .is_empty());
+        let certificates = vec![("unit.test".into(), 100)];
+        assert_eq!(
+            manager
+                .process_tls_certificates(
+                    "s",
+                    "unit",
+                    &certificates,
+                    Some(("renew.timer", "failed"))
+                )
+                .len(),
+            1
+        );
+        assert!(manager
+            .process_tls_certificates("s", "unit", &certificates, Some(("renew.timer", "failed")))
+            .is_empty());
+    }
+    #[test]
+    fn cleanup_filters_history_independently_and_keeps_active_unresolved_alerts() {
+        let mut manager = AlertManager::new();
+        let mut old = Alert::new(
+            AlertType::CpuHigh,
+            AlertSeverity::Warning,
+            "s".into(),
+            "unit".into(),
+            "old".into(),
+            None,
+            None,
+        );
+        old.triggered_at = Utc.timestamp_opt(1, 0).unwrap();
+        let mut fresh = old.clone();
+        fresh.triggered_at = Utc.timestamp_opt(4_000_000_000, 0).unwrap();
+        manager.alert_history = vec![old.clone(), fresh.clone()];
+        manager.active_alerts = vec![old.clone(), fresh.clone()];
+        manager.cleanup(Duration::days(1));
+        assert_eq!(manager.alert_history.len(), 1);
+        assert_eq!(manager.alert_history[0].triggered_at, fresh.triggered_at);
+        assert_eq!(manager.active_alerts.len(), 2);
     }
 }

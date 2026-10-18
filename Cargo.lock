@@ -3178,6 +3178,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "http 0.2.12",
  "prost",
  "prost-types",
  "reqwest",
