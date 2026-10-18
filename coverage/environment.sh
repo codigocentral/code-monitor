@@ -18,3 +18,4 @@ export LLVM_PROFDATA="${LLVM_COV%/llvm-cov}/llvm-profdata"
 export CARGO_LLVM_COV_SETUP=no
 export PROTOC="$campaign/cache/session-13/rust-tools/protoc-33.2/bin/protoc"
 export PROTOC_INCLUDE="$campaign/cache/session-13/rust-tools/protoc-33.2/include"
+export TOKIO_WORKER_THREADS=1

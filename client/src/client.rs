@@ -2,11 +2,15 @@
 //!
 //! This module handles the gRPC communication with monitoring servers
 
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+use crate::unit_grpc::{Channel, MonitorServiceClient, Streaming};
 use anyhow::{Context, Result};
 use chrono::{DateTime, TimeZone, Utc};
+#[cfg(any(not(test), not(feature = "unit-doubles")))]
+use shared::proto::monitoring::monitor_service_client::MonitorServiceClient;
 use shared::proto::monitoring::{
-    monitor_service_client::MonitorServiceClient, ImageVersionStatus as ProtoImageVersionStatus,
-    ProcessesRequest, SystemUpdate, UpdatesRequest,
+    ImageVersionStatus as ProtoImageVersionStatus, ProcessesRequest, SystemUpdate, UpdatesRequest,
 };
 use shared::types::{
     BindScope, ConnectionStateCount, ContainerHealthDetail, ContainerInfo, DiskInfo,
@@ -16,14 +20,19 @@ use shared::types::{
     SystemdUnitInfo, TlsCertificateInfo, TlsSnapshot, TopQuery,
 };
 use tonic::metadata::MetadataValue;
-use tonic::transport::Channel;
-use tonic::Streaming;
+#[cfg(any(not(test), not(feature = "unit-doubles")))]
+use tonic::{transport::Channel, Streaming};
 use tracing::info;
+#[cfg(any(not(test), not(feature = "unit-doubles")))]
+const NOW: fn() -> DateTime<Utc> = Utc::now;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+const NOW: fn() -> DateTime<Utc> = crate::unit_sqlite::now;
 
 fn timestamp_to_datetime(ts: prost_types::Timestamp) -> DateTime<Utc> {
     Utc.timestamp_opt(ts.seconds, ts.nanos as u32)
         .single()
-        .unwrap_or_else(Utc::now)
+        .unwrap_or_else(NOW)
 }
 
 pub struct MonitorClient {
@@ -161,7 +170,7 @@ impl MonitorClient {
             timestamp: resp
                 .timestamp
                 .map(timestamp_to_datetime)
-                .unwrap_or_else(Utc::now),
+                .unwrap_or_else(NOW),
             swap: SwapInfo {
                 total_bytes: resp.swap_total_bytes,
                 used_bytes: resp.swap_used_bytes,
@@ -221,7 +230,7 @@ impl MonitorClient {
                 start_time: proc
                     .start_time
                     .map(timestamp_to_datetime)
-                    .unwrap_or_else(Utc::now),
+                    .unwrap_or_else(NOW),
                 status: proc.status,
                 swap_bytes: proc.swap_bytes,
             })
@@ -342,12 +351,8 @@ impl MonitorClient {
                 swap_bytes: c.swap_bytes,
                 image_version: c.image_version.map(|v| {
                     let status = match v.status() {
-                        ProtoImageVersionStatus::UpToDate => {
-                            shared::types::VersionStatus::UpToDate
-                        }
-                        ProtoImageVersionStatus::Drifted => {
-                            shared::types::VersionStatus::Drifted
-                        }
+                        ProtoImageVersionStatus::UpToDate => shared::types::VersionStatus::UpToDate,
+                        ProtoImageVersionStatus::Drifted => shared::types::VersionStatus::Drifted,
                         ProtoImageVersionStatus::LocalBuild => {
                             shared::types::VersionStatus::LocalBuild
                         }
@@ -421,10 +426,7 @@ impl MonitorClient {
                         mean_exec_time_ms: q.mean_exec_time_ms,
                     })
                     .collect(),
-                timestamp: c
-                    .timestamp
-                    .map(timestamp_to_datetime)
-                    .unwrap_or_else(Utc::now),
+                timestamp: c.timestamp.map(timestamp_to_datetime).unwrap_or_else(NOW),
                 settings: c
                     .settings
                     .into_iter()
@@ -501,10 +503,7 @@ impl MonitorClient {
                         },
                     })
                     .collect(),
-                timestamp: c
-                    .timestamp
-                    .map(timestamp_to_datetime)
-                    .unwrap_or_else(Utc::now),
+                timestamp: c.timestamp.map(timestamp_to_datetime).unwrap_or_else(NOW),
             })
             .collect();
 
@@ -710,3 +709,8 @@ mod tests {
         let _ = dt;
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/client_units.rs"]
+mod campaign_rpc_units;

@@ -449,3 +449,8 @@ mod tests {
         assert!(result.is_err());
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../../tests/doubles/dashboard_data_units.rs"]
+pub(crate) mod campaign_data_units;

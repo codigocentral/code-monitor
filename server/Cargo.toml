@@ -3,6 +3,10 @@ name = "monitor-server"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# Unit-only external provider bindings; normal builds retain native SDKs.
+unit-doubles = []
+
 [dependencies]
 # Server-specific dependencies
 shared = { path = "../shared" }
@@ -62,3 +66,5 @@ mysql_async = { version = "0.36", default-features = false, features = [
 
 [build-dependencies]
 tonic-build = "0.10"
+[dev-dependencies]
+log = "=0.4.29"

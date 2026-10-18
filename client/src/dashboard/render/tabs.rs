@@ -1050,20 +1050,27 @@ pub(super) fn draw_containers_tab<B: tui::backend::Backend>(
                     }
 
                     let image_base = c.image.split(':').next().unwrap_or(&c.image);
-                    let mut image_spans = vec![Span::styled(image_base, Style::default().fg(Theme::MUTED))];
+                    let mut image_spans =
+                        vec![Span::styled(image_base, Style::default().fg(Theme::MUTED))];
                     if let Some(ver) = &c.image_version {
                         match ver.status {
                             shared::types::VersionStatus::Drifted => {
-                                image_spans.push(Span::styled(" ↑", Style::default().fg(Theme::WARNING)));
+                                image_spans
+                                    .push(Span::styled(" ↑", Style::default().fg(Theme::WARNING)));
                             }
                             shared::types::VersionStatus::UpToDate => {
-                                image_spans.push(Span::styled(" ·", Style::default().fg(Theme::SUCCESS)));
+                                image_spans
+                                    .push(Span::styled(" ·", Style::default().fg(Theme::SUCCESS)));
                             }
                             shared::types::VersionStatus::LocalBuild => {
-                                image_spans.push(Span::styled(" (local)", Style::default().fg(Theme::MUTED)));
+                                image_spans.push(Span::styled(
+                                    " (local)",
+                                    Style::default().fg(Theme::MUTED),
+                                ));
                             }
                             shared::types::VersionStatus::Unknown => {
-                                image_spans.push(Span::styled(" ?", Style::default().fg(Theme::MUTED)));
+                                image_spans
+                                    .push(Span::styled(" ?", Style::default().fg(Theme::MUTED)));
                             }
                         }
                     }

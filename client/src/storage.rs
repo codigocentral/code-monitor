@@ -3,12 +3,27 @@
 //! This module provides persistent storage for historical metrics data,
 //! allowing users to view trends and export data.
 
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+use crate::unit_files::{csv, File};
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+use crate::unit_sqlite::Connection;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+#[cfg(any(not(test), not(feature = "unit-doubles")))]
+use rusqlite::Connection;
+use rusqlite::{params, OptionalExtension};
 use shared::types::SystemInfo;
+#[cfg(any(not(test), not(feature = "unit-doubles")))]
+use std::fs::File;
 use std::path::Path;
 use tracing::{debug, info};
+#[cfg(any(not(test), not(feature = "unit-doubles")))]
+const NOW: fn() -> DateTime<Utc> = Utc::now;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+const NOW: fn() -> DateTime<Utc> = crate::unit_sqlite::now;
 
 /// A single metrics data point stored in the database
 #[derive(Debug, Clone, serde::Serialize)]
@@ -97,7 +112,7 @@ impl MetricsStorage {
 
     /// Get metrics history for a server
     pub fn get_history(&self, server_id: &str, hours: i64) -> Result<Vec<MetricsPoint>> {
-        let since = Utc::now() - chrono::Duration::hours(hours);
+        let since = NOW() - chrono::Duration::hours(hours);
         let since_timestamp = since.timestamp();
 
         let mut stmt = self.conn.prepare(
@@ -112,7 +127,7 @@ impl MetricsStorage {
             Ok(MetricsPoint {
                 id: row.get(0)?,
                 server_id: row.get(1)?,
-                timestamp: DateTime::from_timestamp(timestamp, 0).unwrap_or_else(Utc::now),
+                timestamp: DateTime::from_timestamp(timestamp, 0).unwrap_or_else(NOW),
                 cpu_usage: row.get(3)?,
                 memory_used: row.get(4)?,
                 memory_total: row.get(5)?,
@@ -144,7 +159,7 @@ impl MetricsStorage {
                     Ok(MetricsPoint {
                         id: row.get(0)?,
                         server_id: row.get(1)?,
-                        timestamp: DateTime::from_timestamp(timestamp, 0).unwrap_or_else(Utc::now),
+                        timestamp: DateTime::from_timestamp(timestamp, 0).unwrap_or_else(NOW),
                         cpu_usage: row.get(3)?,
                         memory_used: row.get(4)?,
                         memory_total: row.get(5)?,
@@ -161,7 +176,7 @@ impl MetricsStorage {
         let deleted = if days == 0 {
             self.conn.execute("DELETE FROM metrics", [])?
         } else {
-            let cutoff = Utc::now() - chrono::Duration::days(days);
+            let cutoff = NOW() - chrono::Duration::days(days);
             let cutoff_timestamp = cutoff.timestamp();
             self.conn.execute(
                 "DELETE FROM metrics WHERE timestamp < ?1",
@@ -250,7 +265,7 @@ impl MetricsStorage {
     pub fn export_json(&self, server_id: &str, output_path: &Path) -> Result<usize> {
         let points = self.get_history(server_id, 24 * 30)?; // Last 30 days
 
-        let file = std::fs::File::create(output_path)?;
+        let file = File::create(output_path)?;
         serde_json::to_writer_pretty(file, &points)?;
 
         info!(
@@ -273,6 +288,7 @@ pub struct StorageStats {
 }
 
 #[cfg(test)]
+#[cfg(not(feature = "unit-doubles"))]
 mod tests {
     use super::*;
     use tempfile::NamedTempFile;
@@ -501,3 +517,8 @@ mod tests {
         assert!(content.contains("[]"));
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/storage_units.rs"]
+pub(crate) mod campaign_storage_units;

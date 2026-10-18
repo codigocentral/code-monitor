@@ -6,10 +6,18 @@
 //! On other platforms, returns empty.
 
 use anyhow::Result;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+use campaign_systemd_units::Command;
 use chrono::{DateTime, Utc};
 use shared::types::{SystemdFailedUnit, SystemdUnitInfo};
 use std::collections::HashMap;
-#[cfg(target_os = "linux")]
+#[cfg(all(
+    any(target_os = "linux", test),
+    not(all(test, feature = "unit-doubles"))
+))]
+use std::process::Command;
+#[cfg(any(target_os = "linux", test))]
 use tracing::warn;
 
 /// Collector for systemd unit status
@@ -139,10 +147,8 @@ fn parse_failed_units(stdout: &str) -> Vec<(String, String)> {
         }
 
         let mut fields = line.split_whitespace();
-        let mut name = match fields.next() {
-            Some(f) => f,
-            None => continue,
-        };
+        // A trimmed, nonempty line necessarily has a first whitespace token.
+        let mut name = fields.next().unwrap();
 
         // Drop the status bullet systemd prints without `--plain`
         if name == "\u{25cf}" || name == "*" || name == "x" {
@@ -172,65 +178,55 @@ impl SystemdCollector {
         Self { units }
     }
 
-    /// Collect status for all configured units
+    /// Collect status for all configured units.
     pub async fn collect(&self) -> Result<Vec<SystemdUnitInfo>> {
+        self.collect_for_platform(cfg!(target_os = "linux")).await
+    }
+
+    async fn collect_for_platform(&self, linux: bool) -> Result<Vec<SystemdUnitInfo>> {
         if self.units.is_empty() {
             return Ok(Vec::new());
         }
-
-        #[cfg(target_os = "linux")]
-        {
-            self.collect_linux().await
+        #[cfg(any(target_os = "linux", test))]
+        if linux {
+            return self.collect_linux().await;
         }
-
-        #[cfg(not(target_os = "linux"))]
-        {
-            Ok(Vec::new())
-        }
+        let _ = linux;
+        Ok(Vec::new())
     }
 
-    /// Status of a single unit, regardless of whether it is configured for
-    /// monitoring.
-    ///
-    /// Used to answer questions about a specific unit that another collector
-    /// cares about — the certificate inventory needs to know whether renewal
-    /// still runs, since a healthy certificate with a broken timer is an
-    /// outage on a schedule.
+    /// Status of a single unit, whether or not it is configured for monitoring.
     pub async fn unit_status(&self, unit: &str) -> Option<String> {
-        #[cfg(target_os = "linux")]
-        {
-            self.collect_unit(unit).await.ok().map(|info| info.status)
-        }
-
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = unit;
-            None
-        }
+        self.unit_status_for_platform(unit, cfg!(target_os = "linux"))
+            .await
     }
 
-    /// Scan the whole host for units in the `failed` state.
-    ///
-    /// Deliberately independent of the configured unit list: a failed unit
-    /// nobody thought to configure is exactly the one worth surfacing. Returns
-    /// an empty list — never an error — when systemd is unavailable, so a host
-    /// without systemd does not fail the whole RPC.
+    async fn unit_status_for_platform(&self, unit: &str, linux: bool) -> Option<String> {
+        #[cfg(any(target_os = "linux", test))]
+        if linux {
+            return self.collect_unit(unit).await.ok().map(|info| info.status);
+        }
+        let _ = (unit, linux);
+        None
+    }
+
+    /// Scan host-wide failed units; unavailable systemd yields an empty list.
     pub async fn collect_failed(&self) -> Result<Vec<SystemdFailedUnit>> {
-        #[cfg(target_os = "linux")]
-        {
-            self.collect_failed_linux().await
-        }
-
-        #[cfg(not(target_os = "linux"))]
-        {
-            Ok(Vec::new())
-        }
+        self.collect_failed_for_platform(cfg!(target_os = "linux"))
+            .await
     }
 
-    #[cfg(target_os = "linux")]
-    async fn collect_failed_linux(&self) -> Result<Vec<SystemdFailedUnit>> {
-        use std::process::Command;
+    async fn collect_failed_for_platform(&self, linux: bool) -> Result<Vec<SystemdFailedUnit>> {
+        #[cfg(any(target_os = "linux", test))]
+        if linux {
+            return self.collect_failed_linux().await;
+        }
+        let _ = linux;
+        Ok(Vec::new())
+    }
 
+    #[cfg(any(target_os = "linux", test))]
+    async fn collect_failed_linux(&self) -> Result<Vec<SystemdFailedUnit>> {
         let output = match Command::new("systemctl")
             .args([
                 "list-units",
@@ -274,10 +270,8 @@ impl SystemdCollector {
 
     /// Read when a unit last changed state. Best effort: a missing value only
     /// costs the `since` column.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", test))]
     fn unit_state_change(&self, unit: &str) -> Option<DateTime<Utc>> {
-        use std::process::Command;
-
         let output = Command::new("systemctl")
             .args([
                 "show",
@@ -299,7 +293,7 @@ impl SystemdCollector {
             .and_then(|v| parse_systemd_timestamp(v))
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", test))]
     async fn collect_linux(&self) -> Result<Vec<SystemdUnitInfo>> {
         let mut results = Vec::with_capacity(self.units.len());
 
@@ -315,10 +309,8 @@ impl SystemdCollector {
         Ok(results)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", test))]
     async fn collect_unit(&self, unit: &str) -> Result<SystemdUnitInfo> {
-        use std::process::Command;
-
         let output = Command::new("systemctl")
             .args([
                 "show",
@@ -586,5 +578,253 @@ mod tests {
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].0, "weird.service");
         assert_eq!(units[0].1, "");
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+pub(crate) mod campaign_systemd_units {
+    use super::*;
+    use std::{
+        cell::RefCell,
+        collections::VecDeque,
+        io,
+        process::{ExitStatus, Output},
+    };
+    thread_local! { static RESPONSES: RefCell<VecDeque<(Vec<String>, io::Result<Output>)>> = const { RefCell::new(VecDeque::new()) }; }
+    pub struct Command {
+        args: Vec<String>,
+    }
+    impl Command {
+        pub fn new(program: &str) -> Self {
+            assert_eq!(program, "systemctl");
+            Self { args: vec![] }
+        }
+        pub fn args<const N: usize>(&mut self, args: [&str; N]) -> &mut Self {
+            self.args.extend(args.map(str::to_owned));
+            self
+        }
+        pub fn output(&mut self) -> io::Result<Output> {
+            RESPONSES.with(|queue| {
+                let (expected, result) =
+                    queue.borrow_mut().pop_front().expect("unexpected command");
+                assert_eq!(self.args, expected);
+                result
+            })
+        }
+    }
+    fn output(success: bool, stdout: &str) -> io::Result<Output> {
+        #[cfg(unix)]
+        use std::os::unix::process::ExitStatusExt;
+        #[cfg(windows)]
+        use std::os::windows::process::ExitStatusExt;
+        Ok(Output {
+            status: ExitStatus::from_raw(if success { 0 } else { 256 }),
+            stdout: stdout.as_bytes().into(),
+            stderr: b"unit systemctl refused".into(),
+        })
+    }
+    fn queue(args: &[&str], result: io::Result<Output>) {
+        RESPONSES.with(|queue| {
+            queue
+                .borrow_mut()
+                .push_back((args.iter().map(|s| (*s).into()).collect(), result))
+        });
+    }
+    fn show(unit: &str, result: io::Result<Output>) {
+        queue(
+            &[
+                "show",
+                unit,
+                "--property=ActiveState",
+                "--property=SubState",
+                "--property=MainPID",
+                "--property=ExecMainStartTimestamp",
+                "--property=MemoryCurrent",
+                "--no-pager",
+            ],
+            result,
+        );
+    }
+    fn timestamp(unit: &str, result: io::Result<Output>) {
+        queue(
+            &[
+                "show",
+                unit,
+                "--property=StateChangeTimestamp",
+                "--no-pager",
+            ],
+            result,
+        );
+    }
+    fn list(result: io::Result<Output>) {
+        queue(
+            &[
+                "list-units",
+                "--state=failed",
+                "--plain",
+                "--no-legend",
+                "--no-pager",
+            ],
+            result,
+        );
+    }
+    fn unavailable() -> io::Result<Output> {
+        Err(io::Error::new(io::ErrorKind::NotFound, "unit unavailable"))
+    }
+    fn drained() {
+        RESPONSES.with(|queue| assert!(queue.borrow().is_empty()));
+    }
+
+    #[tokio::test]
+    async fn unit_status_decodes_properties_and_preserves_failure_policy() {
+        let (_guard, logs) = crate::unit_logs::capture();
+        let collector = SystemdCollector::new(vec!["ok.service".into(), "bad.service".into()]);
+        show("ok.service", output(true, "ActiveState=active\nSubState=running\nMainPID=42\nMemoryCurrent=8192\nExecMainStartTimestamp=Mon 2024-01-01 10:00:00 UTC\n"));
+        show("bad.service", unavailable());
+        let units = collector.collect_for_platform(true).await.unwrap();
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].name, "ok.service");
+        assert!(units[0].is_active);
+        assert_eq!(units[0].pid, Some(42));
+        assert_eq!(units[0].memory_current_bytes, 8192);
+        assert_eq!(
+            units[0].started_at.unwrap().to_rfc3339(),
+            "2024-01-01T10:00:00+00:00"
+        );
+        show("missing", output(true, ""));
+        let unit = collector.collect_unit("missing").await.unwrap();
+        assert_eq!(unit.pid, None);
+        assert_eq!(unit.memory_current_bytes, 0);
+        assert_eq!(unit.started_at, None);
+        show(
+            "invalid",
+            output(
+                true,
+                "MainPID=bad\nMemoryCurrent=bad\nExecMainStartTimestamp=n/a\n",
+            ),
+        );
+        assert_eq!(collector.collect_unit("invalid").await.unwrap().pid, None);
+        show("bad-exit", output(false, ""));
+        assert!(collector
+            .collect_unit("bad-exit")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("unit systemctl refused"));
+        show("status", output(true, "ActiveState=inactive\n"));
+        assert_eq!(
+            collector
+                .unit_status_for_platform("status", true)
+                .await
+                .as_deref(),
+            Some("inactive")
+        );
+        show("status", unavailable());
+        assert_eq!(
+            collector.unit_status_for_platform("status", true).await,
+            None
+        );
+        assert!(collector
+            .collect_for_platform(false)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            collector.unit_status_for_platform("unused", false).await,
+            None
+        );
+        assert!(collector
+            .collect_failed_for_platform(false)
+            .await
+            .unwrap()
+            .is_empty());
+        // Public methods preserve the native OS dispatch without native commands.
+        if cfg!(target_os = "linux") {
+            show("public", output(true, "ActiveState=active\n"));
+            assert_eq!(
+                collector.unit_status("public").await.as_deref(),
+                Some("active")
+            );
+        } else {
+            assert_eq!(collector.unit_status("public").await, None);
+        }
+        let empty = SystemdCollector::new(vec![]);
+        assert!(empty.collect().await.unwrap().is_empty());
+        if cfg!(target_os = "linux") {
+            show("ok.service", output(true, "ActiveState=active\n"));
+            show("bad.service", output(false, ""));
+            assert_eq!(collector.collect().await.unwrap().len(), 1);
+            list(output(true, ""));
+        } else {
+            assert!(collector.collect().await.unwrap().is_empty());
+        }
+        assert!(collector.collect_failed().await.unwrap().is_empty());
+        assert!(!logs.lock().unwrap().is_empty());
+        drained();
+    }
+
+    #[tokio::test]
+    async fn failed_units_scan_is_best_effort_and_keeps_timestamps() {
+        let (_guard, logs) = crate::unit_logs::capture();
+        let collector = SystemdCollector::new(vec![]);
+        list(unavailable());
+        assert!(collector
+            .collect_failed_for_platform(true)
+            .await
+            .unwrap()
+            .is_empty());
+        list(output(false, ""));
+        assert!(collector
+            .collect_failed_for_platform(true)
+            .await
+            .unwrap()
+            .is_empty());
+        list(output(true, "broken.service loaded failed failed Unit failed\nmissing.service loaded failed failed No time\n"));
+        timestamp(
+            "broken.service",
+            output(true, "StateChangeTimestamp=Mon 2024-01-01 10:00:00 UTC\n"),
+        );
+        timestamp("missing.service", unavailable());
+        let units = collector.collect_failed_for_platform(true).await.unwrap();
+        assert_eq!(units.len(), 2);
+        assert_eq!(units[0].name, "broken.service");
+        assert_eq!(units[0].description, "Unit failed");
+        assert!(units[0].since.is_some());
+        assert!(units[1].since.is_none());
+        timestamp("bad", output(false, ""));
+        assert!(collector.unit_state_change("bad").is_none());
+        timestamp("absent", output(true, ""));
+        assert!(collector.unit_state_change("absent").is_none());
+        timestamp("invalid", output(true, "StateChangeTimestamp=invalid\n"));
+        assert!(collector.unit_state_change("invalid").is_none());
+        assert!(logs
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.contains("systemctl list-units failed")));
+        drained();
+    }
+
+    pub(crate) async fn exercise_log_fallback() {
+        let collector = SystemdCollector::new(vec![]);
+        list(output(false, ""));
+        assert!(collector
+            .collect_failed_for_platform(true)
+            .await
+            .unwrap()
+            .is_empty());
+        drained();
+    }
+
+    #[test]
+    fn offset_and_failed_row_edge_cases() {
+        for invalid in [
+            "", "+xy", "+xy12", "+12xy", "+xy:12", "+12:xy", "+12x34", "+123", "+24", "+1260",
+        ] {
+            assert_eq!(parse_utc_offset_seconds(invalid), None, "{invalid}");
+        }
+        assert!(parse_systemd_timestamp("Mon invalid 10:00:00 UTC").is_none());
+        assert_eq!(parse_failed_units("\n●\n*\nx\nshort loaded\n"), vec![]);
     }
 }

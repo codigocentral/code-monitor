@@ -387,3 +387,8 @@ mod tests {
         assert_eq!(Theme::ERROR, Color::Rgb(243, 139, 168));
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../../tests/doubles/render_units.rs"]
+mod campaign_render_units;

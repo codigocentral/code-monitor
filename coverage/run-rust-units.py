@@ -26,19 +26,31 @@ for line in compile_log.read_text().splitlines():
 assert len(artifacts) == (1 if '--component' in sys.argv[3:] else 3), [x['target']['name'] for x in artifacts]
 
 def classification(crate, name):
+    if name.startswith('bridge_units::'):
+        return 'unit'
+    if crate == 'code_monitor_build_units':
+        return 'unit'
     if crate == 'shared':
         if name.endswith(('test_webhook_channel_send_error', 'test_slack_channel_send_error', 'test_discord_channel_send_error')):
             return 'integration: actual loopback HTTP attempts; replace transport before unit use'
         return 'unit'
     if crate == 'monitor_client':
-        if name.startswith('storage::'):
+        if '--strict-baseline' in sys.argv and name.startswith('dashboard::'):
+            return 'integration: original dashboard constructor opens real SQLite indirectly'
+        if '--strict-baseline' in sys.argv and name.endswith(('test_handle_command_connect_error', 'test_connect_to_server_error')):
+            return 'integration: original gRPC connection has no transport double'
+        if name.startswith('storage::tests::'):
             return 'integration: real SQLite adapter; not used in initial isolated unit baseline'
-        if name.endswith(('test_handle_command_connect_error', 'test_connect_to_server_error')):
-            return 'integration: real gRPC connection; replace transport before unit use'
+        return 'unit'
+    if name.startswith('monitor::campaign_ip_units::'):
+        return 'unit'
+    if name.startswith('metrics::tests::'):
         return 'unit'
     if name.startswith(('config::tests::', 'tls::tests::', 'tests::')):
         return 'unit'
     if name.startswith('collectors::'):
+        if name.endswith(('test_docker_collector_collect_when_unavailable', 'test_docker_collector_with_socket_path_does_not_panic', 'test_docker_collector_new_with_env_var_does_not_panic')):
+            return 'smoke/integration: native Docker adapter or constructor does-not-panic probe'
         if name.endswith(('test_systemd_collect_empty_units', 'test_systemd_collect_failed_never_errors')):
             return 'integration: invokes platform systemctl without a double on Linux'
         return 'unit'
@@ -51,11 +63,13 @@ selection = {}
 unit_failed = False
 raw = out / 'profiles'
 raw.mkdir(exist_ok=True)
-env = {key: value for key, value in os.environ.items() if not key.startswith('CODE_MONITOR_')}
+env = {key: value for key, value in os.environ.items() if not key.startswith('CODE_MONITOR_') and key not in ['DOCKER_HOST','DOCKER_TLS_VERIFY','DOCKER_CERT_PATH','DOCKER_CONTEXT']}
 env.update(LLVM_PROFILE_FILE=str(raw / '%p-%m.profraw'), DOCKER_SOCKET=str(out / 'nonexistent-docker.sock'))
 for artifact in artifacts:
     binary = artifact['executable']
     crate = artifact['target']['name'].replace('-', '_')
+    if crate in ['monitor_client','monitor_server'] and '--strict-baseline' not in sys.argv:
+        assert 'unit-doubles' in artifact['features'], 'compile with the explicit unit provider feature'
     listing = subprocess.check_output([binary, '--list', '--format=terse'], text=True)
     (out / f'{crate}-list.txt').write_text(listing)
     names = [line[:-6] for line in listing.splitlines() if line.endswith(': test')]
@@ -79,6 +93,15 @@ for artifact in artifacts:
             ET.SubElement(case, 'failure' if result == 'FAILED' else 'skipped').text = run.stdout
     unit_failed |= run.returncode != 0 or any(result != 'ok' for _, result in records)
     selection[crate] = {'classification': labels, 'command': command, 'started_at': started, 'unit_command_exit_code': run.returncode, 'passed': sum(result == 'ok' for _, result in records), 'failed': sum(result == 'FAILED' for _, result in records), 'integration_not_run': len(excluded)}
+    selection[crate]['compiled_features'] = artifact['features']
+    if crate == 'monitor_client' and 'unit-doubles' in artifact['features']:
+        baseline_catalog = Path('/Volumes/LaCie/GitLab/coverage-unitarios-2026-10-17/resultados/codigocentral-code-monitor/baseline/rust-strict/unit-selection.json')
+        original = json.loads(baseline_catalog.read_text())['monitor_client']['classification']
+        gated = [name for name in original if name.startswith('storage::tests::')]
+        assert len(gated) == 13 and not (set(gated) & set(names))
+        selection[crate]['native_sqlite_cases_retained_in_normal_test_configuration'] = gated
+        selection[crate]['original_catalog'] = str(baseline_catalog)
+
     print(crate, selection[crate]['passed'], 'passed;', len(excluded), 'integration tests retained separately', flush=True)
 
 ET.ElementTree(suite_root).write(out / 'unit.xml', encoding='utf-8', xml_declaration=True)
@@ -89,12 +112,12 @@ subprocess.run([os.environ['LLVM_PROFDATA'], 'merge', '-sparse', *map(str, profi
 objects = []
 for artifact in artifacts:
     objects.extend(['-object', artifact['executable']])
-common = [os.environ['LLVM_COV'], 'export', '-instr-profile=' + str(out / 'coverage.profdata'), *objects, '-ignore-filename-regex=(/cache/|/rustc/)']
+common = [os.environ['LLVM_COV'], 'export', '-instr-profile=' + str(out / 'coverage.profdata'), *objects, '-ignore-filename-regex=(/cache/|/rustc/)', '-num-threads=1']
 with (out / 'coverage.info').open('w') as handle:
     subprocess.run([*common, '-format=lcov'], check=True, stdout=handle)
 with (out / 'llvm-coverage.json').open('w') as handle:
     subprocess.run(common, check=True, stdout=handle)
 print(json.loads((out / 'llvm-coverage.json').read_text())['data'][0]['totals'], flush=True)
-subprocess.run([sys.executable, 'coverage/rust-production-scope.py', str(out)], check=True)
+subprocess.run([sys.executable, 'coverage/rust-production-scope.py', str(out), *[arg for arg in sys.argv[3:] if arg.startswith('--source-head=')]], check=True)
 if unit_failed:
     raise SystemExit(1)

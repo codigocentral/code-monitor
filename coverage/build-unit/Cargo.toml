@@ -1,0 +1,9 @@
+[package]
+name = "code-monitor-build-units"
+version = "0.1.0"
+edition = "2021"
+publish = false
+[workspace]
+[dependencies]
+tonic-build = "=0.10.2"
+tempfile = "=3.27.0"

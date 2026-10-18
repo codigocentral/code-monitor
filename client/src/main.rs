@@ -10,6 +10,35 @@ use std::collections::HashMap;
 use tokio::time::{sleep, Duration};
 use tracing::{error, info, warn};
 
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/log_bridge_units.rs"]
+mod bridge_units;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/files.rs"]
+mod unit_files;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/grpc.rs"]
+mod unit_grpc;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../../tests/rust/log_bridge.rs"]
+mod unit_log_compat;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/logs.rs"]
+mod unit_logs;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/sqlite.rs"]
+mod unit_sqlite;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/tls.rs"]
+mod unit_tls;
+
 mod cli;
 mod client;
 mod config;

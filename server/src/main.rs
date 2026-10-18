@@ -16,6 +16,31 @@ use crate::config::Config;
 use crate::monitor::SystemMonitor;
 use crate::service::MonitorServiceImpl;
 
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../../tests/rust/log_bridge.rs"]
+mod unit_log_compat;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../../client/tests/doubles/logs.rs"]
+mod unit_logs;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/process.rs"]
+mod unit_process;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+mod bridge_units {
+    #[tokio::test]
+    async fn log_fallback_formats_systemctl_failure_before_subscriber_installation() {
+        crate::unit_log_compat::install();
+        crate::collectors::systemd::campaign_systemd_units::exercise_log_fallback().await;
+        assert!(crate::unit_log_compat::records()
+            .iter()
+            .any(|line| line.contains("systemctl list-units failed: unit systemctl refused")));
+    }
+}
+
 mod collectors;
 mod config;
 mod health;

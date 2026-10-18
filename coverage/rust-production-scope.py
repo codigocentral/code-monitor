@@ -1,7 +1,7 @@
 """Project native LLVM points onto the production scope, excluding test code.
 
 No coverage hit is changed. Every removed point must be within a syn-parsed
-#[cfg(test)] module or test-only function. Native original reports are retained.
+#[cfg(test)] module/function, a test/tooling file, or external dependency source. Native original reports are retained.
 This is equivalent to collecting `src` without test files in languages that
 store tests in separate files; Rust stores these modules inline in `src`.
 """
@@ -17,17 +17,32 @@ folder = Path(sys.argv[1]).resolve()
 native = json.loads((folder / 'llvm-coverage.json').read_text())['data'][0]
 files = [item['filename'] for item in native['files']]
 root = Path.cwd().resolve()
-assert files and all(Path(name).is_relative_to(root) for name in files)
+assert files
+# Macro expansions can attribute points to the installed standard library.
+# Preserve them in the native export and audit them as dependency source.
+def source_role(name):
+    path = Path(name).resolve()
+    if not path.is_relative_to(root):
+        assert '/.rustup/toolchains/' in str(path) and '/lib/rustlib/src/rust/' in str(path), name
+        return 'rust-standard-library-dependency'
+    relative = path.relative_to(root)
+    return 'test-support/tooling' if ('tests' in relative.parts or relative.parts[0] == 'coverage') else 'production-with-inline-tests'
+
 parser = Path('/Volumes/LaCie/GitLab/coverage-unitarios-2026-10-17/cache/session-13/cargo-code-monitor-scope/debug/code-monitor-unit-scope')
 source_head = next((arg.split('=', 1)[1] for arg in sys.argv[2:] if arg.startswith('--source-head=')), None)
 if source_head:
     previous = json.loads((folder / 'production-scope-audit.json').read_text())
     scopes = {name: value['test_only_ast_ranges'] for name, value in previous['source'].items()}
     for name in files:
-        original = subprocess.check_output(['git', 'show', source_head + ':' + str(Path(name).relative_to(root))])
+        original = subprocess.check_output(['git', 'show', source_head + ':' + str(Path(name).resolve().relative_to(root))])
         assert hashlib.sha256(original).hexdigest() == previous['source'][name]['source_sha256']
 else:
-    scopes = json.loads(subprocess.check_output([str(parser), *files], text=True))
+    scopes = json.loads(subprocess.check_output([str(parser), *[name for name in files if source_role(name) == 'production-with-inline-tests']], text=True))
+    for name in files:
+        if source_role(name) != 'production-with-inline-tests':
+            # Canonicalize before classification: include!(.../shared/build.rs)
+            # remains production, independently of the caller's test directory.
+            scopes[name] = [[1, len(Path(name).read_text().splitlines())]]
 
 # LLVM groups generic instantiations by the first source region. Reconstruct
 # its native summaries and require exact agreement for EVERY original file
@@ -63,7 +78,7 @@ for original_file in native['files']:
 def in_test(name, line):
     return any(start <= line <= end for start, end in scopes[name])
 
-proof = {'definition': 'Only syn-parsed #[cfg(test)] modules and test-only functions are outside production scope.',
+proof = {'definition': 'Only syn-parsed #[cfg(test)] code, test/support tooling, and external Rust standard-library source are outside production scope.',
          'raw_lcov': str(folder / 'coverage.info'),
          'raw_llvm_json': str(folder / 'llvm-coverage.json'),
          'raw_lcov_sha256': hashlib.sha256((folder / 'coverage.info').read_bytes()).hexdigest(),
@@ -131,6 +146,8 @@ for section in (folder / 'coverage.info').read_text().split('end_of_record'):
     output.append('end_of_record')
     lines_out.extend(output)
     proof['source'][name] = {'source_sha256': previous['source'][name]['source_sha256'] if source_head else hashlib.sha256(Path(name).read_bytes()).hexdigest(),
+                             'resolved_path': str(Path(name).resolve()),
+                             'source_role': source_role(name),
                              'test_only_ast_ranges': scopes[name], 'removed_test_lines': removed_lines,
                              'removed_test_functions': sorted(test_functions), 'removed_test_branches': removed_branches,
                              'native_instantiation_records_retained': len(kept_hits),

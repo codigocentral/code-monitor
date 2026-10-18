@@ -1706,3 +1706,43 @@ mod campaign_schema_units {
         assert!(!schema.is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/rust/log_bridge.rs"]
+mod unit_log_compat;
+#[cfg(test)]
+mod aaa_log_bridge_units {
+    struct Refuses;
+    #[async_trait::async_trait]
+    impl crate::notifications::NotificationChannel for Refuses {
+        async fn send(&self, _: &crate::alerts::Alert) -> anyhow::Result<()> {
+            Err(anyhow::anyhow!("unit notification refused"))
+        }
+        fn name(&self) -> &str {
+            "unit bridge channel"
+        }
+    }
+    #[tokio::test]
+    async fn notification_error_formats_the_native_log_bridge() {
+        crate::unit_log_compat::install();
+        let mut dispatcher = crate::notifications::NotificationDispatcher::new();
+        dispatcher.add_channel(Box::new(Refuses));
+        let alert = crate::alerts::Alert::new(
+            crate::alerts::AlertType::CpuHigh,
+            crate::alerts::AlertSeverity::Warning,
+            "unit-server".into(),
+            "Unit server".into(),
+            "unit message".into(),
+            Some(95.),
+            Some(80.),
+        );
+        let results = dispatcher.dispatch(&alert).await;
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_err());
+        assert!(crate::unit_log_compat::records()
+            .iter()
+            .any(|line| line.contains(
+                "Failed to send notification to unit bridge channel: unit notification refused"
+            )));
+    }
+}

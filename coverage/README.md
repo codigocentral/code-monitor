@@ -101,3 +101,86 @@ profraw/profdata, LCOV and native LLVM JSON are retained. Build-execution
 profiles and test-listing profiles are not merged into unit evidence. The build
 script and Linux-only code require separate unit evidence before completion.
 Rust coverage is not complete until all supported counters and scope checks pass.
+
+### Corrected initial selection
+
+The first client selection indirectly opened SQLite through
+`DashboardApp::new`, despite excluding the explicit `storage::tests` module.
+Those historical client/aggregate numbers are mixed evidence and are not valid
+unit-only coverage. `baseline/rust-strict` corrects the selection using the
+unchanged original binaries, whose SHA-256, timestamps, original build command
+and source revision are recorded in `binary-provenance.json`. It excludes all
+original dashboard cases, the native SQLite/gRPC cases and Docker smoke probes.
+The corrected Rust baseline is 451 passing tests, 2,211/8,847 production lines,
+276/815 functions and 3,085/13,430 regions. The historical mixed reports and the
+initial flaky alert-clock failure are retained rather than overwritten.
+
+### Production scope projection
+
+Native LLVM JSON and LCOV retain inline Rust tests and macro-attributed standard
+library points. `rust-production-scope.py` additionally emits `production.info`
+and a proof: source hashes, exact syn-parsed `#[cfg(test)]` ranges, explicit
+external standard-library/test-tooling origins, every removed point and every
+retained uncovered production line. Production hit counts are never changed.
+The tool reconstructs LLVM's native generic function/region groups and requires
+exact agreement for every original file before applying the production scope.
+The include of the actual `shared/build.rs` is canonicalized back to production,
+so its points cannot disappear because the caller lives under `coverage/`.
+Stable Rust/LLVM does not expose branch or MC/DC counters for this build; zero
+unsupported denominators are not a coverage percentage. Regions, functions and
+lines remain exact measured counters.
+
+`shared` currently has 199 passing units and 1,103/1,103 production lines,
+126/126 functions and 1,477/1,477 regions. Its notification transport and clock
+are replaced by typed doubles. JSON payloads, status handling and errors are
+asserted without HTTP. The flaky zero-cooldown assertion now uses deterministic
+instants and checks the original strict greater-than boundary.
+
+The build script is executed from its actual tracked source with an explicit
+protoc command double. The double captures arguments and returns a public
+schema descriptor fixture or a controlled error; no compiler is contacted in
+these units. Both client/server code-generation settings and error context are
+asserted. Two units cover 8/8 production lines, 2/2 functions and 12/12 regions.
+
+The repository remains incomplete until all client/server paths and platform
+logic pass their unit scope checks, native bindings build, and the queue gate
+accepts the final committed revision.
+
+### Native versus unit provider bindings
+
+The `unit-doubles` feature on client/server selects external provider doubles
+only when compiling tests. Normal production builds always keep the original
+native SDK imports. The client's original SQLite adapter tests remain intact
+under the normal test configuration; in the explicit unit configuration they
+are separated from the scripted adapter units. Their original names and scope
+remain inventoried by the baseline, rather than counted as unit tests. This
+keeps normal SDK behavior reviewable and prevents dashboard constructors from
+opening a real database during unit measurement. Scripted SQLite responses
+verify SQL, values, operation order, row conversion and errors; they do not
+execute SQL or reimplement the storage methods. The gRPC double captures typed
+requests and authentication metadata, checks gzip settings and returns typed
+responses/errors without sockets. Unconfigured external connections fail closed.
+
+
+### Current checkpoint
+
+`iterations/workspace-01` retains 708 passing selected units (212 server,
+297 client, 199 shared), original LLVM exports, JUnit, selection/catalog and the
+production-scope proof. Production workspace coverage is still partial:
+6,142/9,096 lines, 576/845 functions and 9,384/13,800 regions. The separate build
+script and Bash/PowerShell reports remain preserved.
+
+The client gRPC mapping, configuration, SQLite orchestration, TLS and legacy UI
+are fully covered by supported counters at this checkpoint. The dashboard render
+coordinator, database/process renderers and popups are complete; the tab renderer
+still needs one region. Main/bootstrap, the dashboard event loop, most server
+monitor/service/collector paths and a few error cases remain unfinished.
+
+The `tracing/log` feature creates a separate fallback formatting path. Dedicated
+unit cases run before subscriber installation and capture native log output in
+memory; later subscriber cases exercise ordinary tracing. Both paths execute
+real production code, without removing compiler-generated coverage points.
+
+Original baseline binaries are copied with SHA-256 verification under
+`baseline/preserved-original-binaries`, so later Cargo builds cannot overwrite
+the baseline's executable evidence. Source and binary provenance is retained.

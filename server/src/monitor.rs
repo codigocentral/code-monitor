@@ -68,17 +68,24 @@ fn parse_ip_addr_output(stdout: &str) -> HashMap<String, String> {
 /// Returns an empty map on non-Linux platforms, or when `ip` is unavailable;
 /// callers render those interfaces as N/A.
 fn get_interface_ips() -> HashMap<String, String> {
-    #[cfg(target_os = "linux")]
-    {
+    get_interface_ips_for_platform(cfg!(target_os = "linux"))
+}
+
+fn get_interface_ips_for_platform(linux: bool) -> HashMap<String, String> {
+    #[cfg(any(target_os = "linux", test))]
+    if linux {
+        #[cfg(all(test, feature = "unit-doubles"))]
+        use crate::unit_process::Command;
+        #[cfg(not(all(test, feature = "unit-doubles")))]
         use std::process::Command;
-        // Use 'ip addr' command as a reliable way to get IPs
+        // Preserve the existing policy: parse stdout even for a nonzero exit.
         if let Ok(output) = Command::new("ip").args(["addr", "show"]).output() {
             if let Ok(stdout) = String::from_utf8(output.stdout) {
                 return parse_ip_addr_output(&stdout);
             }
         }
     }
-
+    let _ = linux;
     HashMap::new()
 }
 
@@ -1361,5 +1368,44 @@ mod tests {
         let mut results: Vec<i32> = Vec::new();
         SystemMonitor::push_or_log(&mut results, Err(anyhow::anyhow!("fail")), "Test");
         assert!(results.is_empty());
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+mod campaign_ip_units {
+    use super::*;
+    use crate::unit_process as process;
+    #[test]
+    fn platform_ip_lookup_preserves_parsing_and_degradation_policy() {
+        assert!(get_interface_ips_for_platform(false).is_empty());
+        for success in [true, false] {
+            process::expect(
+                "ip",
+                &["addr", "show"],
+                Ok(process::output(
+                    success,
+                    b"2: eth-unit: <UP>\n inet 192.0.2.5/24 scope global eth-unit\n",
+                )),
+            );
+            let ips = get_interface_ips_for_platform(true);
+            assert_eq!(ips.get("eth-unit").map(String::as_str), Some("192.0.2.5"));
+        }
+        process::expect(
+            "ip",
+            &["addr", "show"],
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "unit ip missing",
+            )),
+        );
+        assert!(get_interface_ips_for_platform(true).is_empty());
+        process::expect("ip", &["addr", "show"], Ok(process::output(true, &[0xff])));
+        assert!(get_interface_ips_for_platform(true).is_empty());
+        if cfg!(target_os = "linux") {
+            process::expect("ip", &["addr", "show"], Ok(process::output(true, b"")));
+        }
+        assert!(get_interface_ips().is_empty());
+        process::drained();
     }
 }
