@@ -671,3 +671,88 @@ mod tests {
         assert!(sources.contains(&"jvm"));
     }
 }
+
+#[cfg(test)]
+mod campaign_units {
+    use super::*;
+
+    fn configuration(value: &str, unit: Option<&str>) -> PostgresSetting {
+        PostgresSetting {
+            name: "shared_buffers".into(),
+            value: value.into(),
+            unit: unit.map(str::to_owned),
+            source: "unit fixture".into(),
+            source_file: None,
+            source_line: None,
+        }
+    }
+
+    #[test]
+    fn setting_bytes_honors_each_postgres_memory_unit() {
+        for (unit, multiplier) in [
+            (None, 1_u64),
+            (Some(""), 1),
+            (Some("B"), 1),
+            (Some("kB"), 1024),
+            (Some("MB"), 1024_u64.pow(2)),
+            (Some("GB"), 1024_u64.pow(3)),
+            (Some("8kB"), 8 * 1024),
+            (Some("16kB"), 16 * 1024),
+            (Some("32kB"), 32 * 1024),
+            (Some("64kB"), 64 * 1024),
+        ] {
+            assert_eq!(
+                setting_bytes(&configuration("2", unit)),
+                Some(2 * multiplier)
+            );
+        }
+        assert_eq!(setting_bytes(&configuration("1.5", Some("kB"))), Some(1536));
+        assert_eq!(setting_bytes(&configuration("0", Some("GB"))), Some(0));
+        assert_eq!(setting_bytes(&configuration("abc", Some("B"))), None);
+        assert_eq!(setting_bytes(&configuration("-0.1", Some("B"))), None);
+        assert_eq!(setting_bytes(&configuration("5", Some("unknown"))), None);
+    }
+
+    #[test]
+    fn heap_parse_failures_and_checked_multiplication_do_not_invent_capacity() {
+        assert_eq!(jvm_heap_bytes("java -Xmx18446744073709551616g"), None);
+        assert_eq!(jvm_heap_bytes("java -Xmx18446744073709551615g"), None);
+        assert_eq!(jvm_heap_bytes("java -Xmx0g"), Some(0));
+        assert_eq!(jvm_heap_bytes("java -Xmx7b -jar unit.jar"), Some(7));
+        assert_eq!(jvm_heap_bytes("java -Xmx8 -jar unit.jar"), Some(8));
+        assert_eq!(jvm_heap_bytes("java -Xmxinvalid"), None);
+    }
+
+    #[test]
+    fn contributors_are_sorted_and_truncated_without_mutating_configuration() {
+        let commitment = MemoryCommitment {
+            physical_bytes: 20,
+            components: vec![
+                CommitmentComponent {
+                    source: "small".into(),
+                    basis: "limit".into(),
+                    bytes: 2,
+                },
+                CommitmentComponent {
+                    source: "large".into(),
+                    basis: "heap".into(),
+                    bytes: 10,
+                },
+                CommitmentComponent {
+                    source: "middle".into(),
+                    basis: "buffers".into(),
+                    bytes: 5,
+                },
+            ],
+        };
+        assert!(commitment.top_contributors(0).is_empty());
+        let top = commitment.top_contributors(2);
+        assert_eq!(
+            top.iter().map(|c| c.source.as_str()).collect::<Vec<_>>(),
+            vec!["large", "middle"]
+        );
+        assert_eq!(commitment.top_contributors(99).len(), 3);
+        assert_eq!(commitment.components[0].source, "small");
+        assert_eq!(commitment.total_bytes(), 17);
+    }
+}

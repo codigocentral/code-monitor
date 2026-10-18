@@ -3,6 +3,9 @@
 
 set -euo pipefail
 
+# Optional filesystem staging root; empty keeps the normal host paths.
+PREFIX="${CODE_MONITOR_PREFIX:-}"
+
 GITHUB_REPO="${CODE_MONITOR_REPO:-codigocentral/code-monitor}"
 VERSION="${CODE_MONITOR_VERSION:-latest}"
 COMPONENT="${CODE_MONITOR_COMPONENT:-server}"
@@ -118,16 +121,16 @@ detect_version() {
 install_paths() {
     case "$(uname -s)" in
         Linux)
-            BIN_DIR="/usr/local/bin"
-            CONFIG_DIR="/etc/code-monitor"
-            DATA_DIR="/var/lib/code-monitor"
-            LOG_DIR="/var/log/code-monitor"
+            BIN_DIR="${PREFIX}/usr/local/bin"
+            CONFIG_DIR="${PREFIX}/etc/code-monitor"
+            DATA_DIR="${PREFIX}/var/lib/code-monitor"
+            LOG_DIR="${PREFIX}/var/log/code-monitor"
             ;;
         Darwin)
-            BIN_DIR="/usr/local/bin"
-            CONFIG_DIR="/usr/local/etc/code-monitor"
-            DATA_DIR="/usr/local/var/lib/code-monitor"
-            LOG_DIR="/usr/local/var/log/code-monitor"
+            BIN_DIR="${PREFIX}/usr/local/bin"
+            CONFIG_DIR="${PREFIX}/usr/local/etc/code-monitor"
+            DATA_DIR="${PREFIX}/usr/local/var/lib/code-monitor"
+            LOG_DIR="${PREFIX}/usr/local/var/log/code-monitor"
             ;;
     esac
 }
@@ -202,7 +205,7 @@ install_systemd_service() {
         return
     fi
 
-    cat > /etc/systemd/system/code-monitor-server.service <<EOF
+    cat > "${PREFIX}/etc/systemd/system/code-monitor-server.service" <<EOF
 [Unit]
 Description=Code Monitor Server
 After=network-online.target
@@ -239,7 +242,7 @@ install_launchd_service() {
     fi
 
     mkdir -p "$LOG_DIR"
-    cat > /Library/LaunchDaemons/com.codemonitor.server.plist <<EOF
+    cat > "${PREFIX}/Library/LaunchDaemons/com.codemonitor.server.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -264,12 +267,12 @@ install_launchd_service() {
 </dict>
 </plist>
 EOF
-    chmod 644 /Library/LaunchDaemons/com.codemonitor.server.plist
-    chown root:wheel /Library/LaunchDaemons/com.codemonitor.server.plist
+    chmod 644 "${PREFIX}/Library/LaunchDaemons/com.codemonitor.server.plist"
+    chown root:wheel "${PREFIX}/Library/LaunchDaemons/com.codemonitor.server.plist"
 
     if [ "$START_SERVICE" = "true" ]; then
-        launchctl bootout system /Library/LaunchDaemons/com.codemonitor.server.plist >/dev/null 2>&1 || true
-        launchctl bootstrap system /Library/LaunchDaemons/com.codemonitor.server.plist
+        launchctl bootout system "${PREFIX}/Library/LaunchDaemons/com.codemonitor.server.plist" >/dev/null 2>&1 || true
+        launchctl bootstrap system "${PREFIX}/Library/LaunchDaemons/com.codemonitor.server.plist"
     fi
 }
 

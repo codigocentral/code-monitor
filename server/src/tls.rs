@@ -163,3 +163,26 @@ mod tests {
         assert!(result.is_ok());
     }
 }
+
+#[cfg(test)]
+mod campaign_ca_units {
+    use super::*;
+    #[test]
+    fn missing_ca_preserves_context_after_the_identity_files_are_read() {
+        let root = tempfile::tempdir().unwrap();
+        let cert = root.path().join("cert.pem");
+        let key = root.path().join("key.pem");
+        let ca = root.path().join("missing-ca.pem");
+        std::fs::write(&cert, "unit certificate").unwrap();
+        std::fs::write(&key, "unit key").unwrap();
+        let error = load_tls_config(&TlsConfig {
+            cert_path: cert.display().to_string(),
+            key_path: key.display().to_string(),
+            ca_path: Some(ca.display().to_string()),
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("Failed to read CA certificate"));
+        assert!(error.contains("missing-ca.pem"));
+    }
+}

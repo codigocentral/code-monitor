@@ -11,9 +11,26 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Small platform boundaries accept type providers for isolated unit tests.
+function Get-AdministratorIdentity {
+    param([type]$IdentityType = [Security.Principal.WindowsIdentity])
+    return $IdentityType::GetCurrent()
+}
+function New-AdministratorPrincipal {
+    param($Identity, [type]$PrincipalType = [Security.Principal.WindowsPrincipal])
+    return $PrincipalType::new($Identity)
+}
+function Get-MachinePath {
+    param([type]$EnvironmentType = [Environment])
+    return $EnvironmentType::GetEnvironmentVariable("Path", "Machine")
+}
+function Set-MachinePath {
+    param([string]$Value, [type]$EnvironmentType = [Environment])
+    $EnvironmentType::SetEnvironmentVariable("Path", $Value, "Machine")
+}
 function Assert-Admin {
-    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    $identity = Get-AdministratorIdentity
+    $principal = New-AdministratorPrincipal -Identity $identity
     if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
         throw "Run this installer from an elevated PowerShell session."
     }
@@ -24,6 +41,16 @@ function Get-LatestVersion {
     $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases/latest" -Headers @{ "User-Agent" = "code-monitor-installer" }
     return $release.tag_name
 }
+
+function Install-CodeMonitor {
+    [CmdletBinding()]
+    param(
+        [string]$Version = $env:CODE_MONITOR_VERSION,
+        [ValidateSet("server", "client", "both")]
+        [string]$Component = $(if ($env:CODE_MONITOR_COMPONENT) { $env:CODE_MONITOR_COMPONENT } else { "server" }),
+        [string]$Repo = $(if ($env:CODE_MONITOR_REPO) { $env:CODE_MONITOR_REPO } else { "codigocentral/code-monitor" }),
+        [switch]$NoStart
+    )
 
 Assert-Admin
 
@@ -55,9 +82,9 @@ if ($Component -eq "client" -or $Component -eq "both") {
     Copy-Item -Path (Join-Path $tmpDir "monitor-client.exe") -Destination (Join-Path $installDir "monitor-client.exe") -Force
 }
 
-$machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+$machinePath = Get-MachinePath
 if ($machinePath -notlike "*$installDir*") {
-    [Environment]::SetEnvironmentVariable("Path", "$machinePath;$installDir", "Machine")
+    Set-MachinePath -Value "$machinePath;$installDir"
 }
 
 $configFile = Join-Path $configDir "config.toml"
@@ -99,3 +126,9 @@ Write-Host "Config:   $configDir"
 Write-Host ""
 Write-Host "Open a new terminal to use monitor-server or monitor-client from PATH."
 Write-Host "Update later with: powershell -ExecutionPolicy Bypass -File `"$updateScript`""
+
+}
+
+if ($MyInvocation.InvocationName -ne '.') {
+    Install-CodeMonitor @PSBoundParameters
+}

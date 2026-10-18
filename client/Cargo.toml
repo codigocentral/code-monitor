@@ -3,6 +3,10 @@ name = "monitor-client"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# Unit-only external provider bindings; normal builds retain native SDKs.
+unit-doubles = []
+
 [dependencies]
 # Client-specific dependencies
 shared = { path = "../shared" }
@@ -38,6 +42,7 @@ rusqlite = { version = "0.30", features = ["bundled"] }
 csv = "1.3"
 
 [dev-dependencies]
+log = "=0.4.29"
 tempfile = "3.0"
 
 [build-dependencies]

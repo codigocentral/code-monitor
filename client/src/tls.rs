@@ -4,8 +4,16 @@
 //! When `danger_skip_verify` is true, a custom rustls connector bypasses
 //! server certificate verification (insecure, for testing only).
 
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+use crate::unit_grpc::Endpoint;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+use crate::unit_tls::{HttpConnector, TokioTlsConnector};
 use anyhow::{Context, Result};
-use hyper::client::connect::{Connected, Connection, HttpConnector};
+#[cfg(any(not(test), not(feature = "unit-doubles")))]
+use hyper::client::connect::HttpConnector;
+use hyper::client::connect::{Connected, Connection};
 use std::{
     future::Future,
     pin::Pin,
@@ -13,18 +21,24 @@ use std::{
     task::{Context as TaskContext, Poll},
 };
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_rustls::{
-    rustls::{ClientConfig, ServerName},
-    TlsConnector as TokioTlsConnector,
-};
-use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
+use tokio_rustls::rustls::{ClientConfig, ServerName};
+#[cfg(any(not(test), not(feature = "unit-doubles")))]
+use tokio_rustls::TlsConnector as TokioTlsConnector;
+#[cfg(any(not(test), not(feature = "unit-doubles")))]
+type TransportStream = tokio_rustls::client::TlsStream<tokio::net::TcpStream>;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+type TransportStream = crate::unit_tls::TlsStream;
+#[cfg(any(not(test), not(feature = "unit-doubles")))]
+use tonic::transport::Endpoint;
+use tonic::transport::{Certificate, ClientTlsConfig, Identity};
 use tower::Service;
 use tracing::{info, warn};
 
 use shared::types::ClientTlsConfig as TlsConfig;
 
 /// Custom TLS stream that implements hyper's `Connection`.
-pub struct SkipVerifyStream(tokio_rustls::client::TlsStream<tokio::net::TcpStream>);
+pub struct SkipVerifyStream(TransportStream);
 
 impl AsyncRead for SkipVerifyStream {
     fn poll_read(
@@ -363,3 +377,8 @@ mod tests {
         assert!(result.is_ok());
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/tls_units.rs"]
+mod campaign_tls_units;

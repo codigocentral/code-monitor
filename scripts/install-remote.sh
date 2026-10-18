@@ -16,19 +16,22 @@
 
 set -euo pipefail
 
+# Optional filesystem staging root; empty keeps the normal host paths.
+PREFIX="${CODE_MONITOR_PREFIX:-}"
+
 BIND_IP="${1:?usage: install-remote.sh <bind-ip> [port]}"
 PORT="${2:-50051}"
 # The VPN subnet allowed to reach the gRPC port through the firewall
 VPN_CIDR="${3:-10.0.0.0/24}"
 
 SERVICE_USER="code-monitor"
-BIN_SRC="/tmp/monitor-server"
-BIN_DST="/usr/local/bin/monitor-server"
-CONF_DIR="/etc/code-monitor"
+BIN_SRC="${PREFIX}/tmp/monitor-server"
+BIN_DST="${PREFIX}/usr/local/bin/monitor-server"
+CONF_DIR="${PREFIX}/etc/code-monitor"
 CONF="$CONF_DIR/config.toml"
-DATA_DIR="/var/lib/code-monitor"
-UNIT="/etc/systemd/system/code-monitor-server.service"
-TOKEN_OUT="/tmp/cm-token.txt"
+DATA_DIR="${PREFIX}/var/lib/code-monitor"
+UNIT="${PREFIX}/etc/systemd/system/code-monitor-server.service"
+TOKEN_OUT="${PREFIX}/tmp/cm-token.txt"
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "error: must run as root (use sudo)" >&2

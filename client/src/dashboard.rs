@@ -4,18 +4,38 @@
 //! multiple servers with real-time updates.
 
 use anyhow::Result;
+#[cfg(not(all(test, feature = "unit-doubles")))]
+use crossterm::event;
+#[cfg(not(all(test, feature = "unit-doubles")))]
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
+    event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen},
 };
 use shared::notifications::NotificationConfig;
 use shared::types::*;
 use std::collections::HashMap;
+#[cfg(not(all(test, feature = "unit-doubles")))]
 use std::io;
-use std::time::{Duration, Instant};
+#[cfg(all(test, feature = "unit-doubles"))]
+use unit_terminal::{self as io, disable_raw_mode, enable_raw_mode, CrosstermBackend};
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/terminal.rs"]
+pub(crate) mod unit_terminal;
+use std::time::Duration;
+#[cfg(not(all(test, feature = "unit-doubles")))]
+use std::time::Instant;
+#[cfg(not(all(test, feature = "unit-doubles")))]
+use tui::backend::CrosstermBackend;
+#[cfg(all(test, feature = "unit-doubles"))]
+use unit_events::{self as event, Instant};
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/events.rs"]
+pub(crate) mod unit_events;
 use tui::{
-    backend::CrosstermBackend,
     widgets::{ListState, TableState},
     Terminal,
 };
@@ -318,6 +338,10 @@ impl DashboardApp {
 
     /// Detect if terminal likely supports Nerd Fonts
     fn detect_nerd_font_support() -> bool {
+        Self::detect_nerd_font_support_for_platform(cfg!(windows))
+    }
+
+    fn detect_nerd_font_support_for_platform(windows: bool) -> bool {
         // Check for common environment indicators
         // VSCode terminal usually supports icons, Windows Terminal depends on font
         if std::env::var("TERM_PROGRAM")
@@ -331,14 +355,7 @@ impl DashboardApp {
             return true; // Assume configured correctly
         }
         // Default to ASCII for safety on Windows cmd/PowerShell
-        #[cfg(windows)]
-        {
-            false
-        }
-        #[cfg(not(windows))]
-        {
-            true // Most Linux terminals support it
-        }
+        !windows // Most Unix terminals support it; use ASCII on Windows by default.
     }
 
     #[allow(dead_code)]
@@ -585,29 +602,7 @@ pub async fn run_dashboard(
     let mut app = DashboardApp::new(servers.clone(), notifications, tls_config.clone());
     app.update_interval = update_interval;
 
-    // Auto-connect to all servers on startup
-    if app.auto_connect {
-        for server in &servers {
-            app.status_message = format!("🔄 Connecting to {}...", server.name);
-            app.connection_status
-                .insert(server.id, ConnectionStatus::Connecting);
-            terminal.draw(|f| draw_ui(f, &app))?;
-
-            match connect_to_server(server, update_interval, app.tls_config.as_ref()).await {
-                Ok(client) => {
-                    app.connected_clients.insert(server.id, client);
-                    app.connection_status
-                        .insert(server.id, ConnectionStatus::Connected);
-                    let _ = fetch_server_data(&mut app, server.id).await;
-                }
-                Err(e) => {
-                    app.connection_status
-                        .insert(server.id, ConnectionStatus::Error(e.to_string()));
-                }
-            }
-        }
-        app.status_message = format!("✅ Connected to {} server(s)", app.connected_clients.len());
-    }
+    connect_startup_servers(&mut terminal, &mut app, &servers, update_interval).await?;
 
     // Run the main loop
     let result = run_app(&mut terminal, &mut app).await;
@@ -622,6 +617,39 @@ pub async fn run_dashboard(
     terminal.show_cursor()?;
 
     result
+}
+
+// Keep the startup connection policy independently testable with an app state.
+async fn connect_startup_servers<B: tui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+    app: &mut DashboardApp,
+    servers: &[ServerEndpoint],
+    update_interval: u64,
+) -> Result<()> {
+    if app.auto_connect {
+        for server in servers {
+            app.status_message = format!("🔄 Connecting to {}...", server.name);
+            app.connection_status
+                .insert(server.id, ConnectionStatus::Connecting);
+            terminal.draw(|f| draw_ui(f, app))?;
+
+            match connect_to_server(server, update_interval, app.tls_config.as_ref()).await {
+                Ok(client) => {
+                    app.connected_clients.insert(server.id, client);
+                    app.connection_status
+                        .insert(server.id, ConnectionStatus::Connected);
+                    fetch_server_data(app, server.id).await;
+                }
+                Err(e) => {
+                    app.connection_status
+                        .insert(server.id, ConnectionStatus::Error(e.to_string()));
+                }
+            }
+        }
+        app.status_message = format!("✅ Connected to {} server(s)", app.connected_clients.len());
+    }
+
+    Ok(())
 }
 
 async fn run_app<B: tui::backend::Backend>(
@@ -743,7 +771,7 @@ async fn run_app<B: tui::backend::Backend>(
                                                     .insert(server.id, ConnectionStatus::Connected);
                                                 app.status_message =
                                                     format!("Connected to {}", server.name);
-                                                let _ = fetch_server_data(app, server.id).await;
+                                                fetch_server_data(app, server.id).await;
                                             }
                                             Err(e) => {
                                                 app.connection_status.insert(
@@ -807,7 +835,7 @@ async fn run_app<B: tui::backend::Backend>(
                                                 app.connected_clients.insert(server.id, client);
                                                 app.connection_status
                                                     .insert(server.id, ConnectionStatus::Connected);
-                                                let _ = fetch_server_data(app, server.id).await;
+                                                fetch_server_data(app, server.id).await;
                                             }
                                             Err(e) => {
                                                 app.connection_status.insert(
@@ -845,12 +873,8 @@ async fn run_app<B: tui::backend::Backend>(
                                 if let Some(server_id) = app.get_selected_server_id() {
                                     if app.is_connected(&server_id) {
                                         app.status_message = "🔄 Refreshing...".to_string();
-                                        if let Err(e) = fetch_server_data(app, server_id).await {
-                                            app.status_message =
-                                                format!("❌ Refresh failed: {}", e);
-                                        } else {
-                                            app.status_message = "✅ Data refreshed".to_string();
-                                        }
+                                        fetch_server_data(app, server_id).await;
+                                        app.status_message = "✅ Data refreshed".to_string();
                                     }
                                 }
                             }
@@ -859,7 +883,7 @@ async fn run_app<B: tui::backend::Backend>(
                                 let server_ids: Vec<_> =
                                     app.connected_clients.keys().cloned().collect();
                                 for server_id in server_ids {
-                                    let _ = fetch_server_data(app, server_id).await;
+                                    fetch_server_data(app, server_id).await;
                                 }
                                 app.status_message = format!(
                                     "✅ Refreshed {} server(s)",
@@ -875,9 +899,8 @@ async fn run_app<B: tui::backend::Backend>(
                             }
                             // Number keys select a tab, 1-based
                             KeyCode::Char(c) if Tab::from_hotkey(c).is_some() => {
-                                if let Some(tab) = Tab::from_hotkey(c) {
-                                    app.select_tab(tab);
-                                }
+                                // The guard just verified this pure conversion.
+                                app.select_tab(Tab::from_hotkey(c).expect("hotkey guard matched"));
                             }
                             // Server navigation (j/k or arrows in overview)
                             KeyCode::Char('j') | KeyCode::Down => {
@@ -905,7 +928,7 @@ async fn run_app<B: tui::backend::Backend>(
                                                     );
                                                     app.status_message =
                                                         format!("✅ Connected to {}", server.name);
-                                                    let _ = fetch_server_data(app, server.id).await;
+                                                    fetch_server_data(app, server.id).await;
                                                 }
                                                 Err(e) => {
                                                     app.connection_status.insert(
@@ -947,7 +970,7 @@ async fn run_app<B: tui::backend::Backend>(
                                                     );
                                                     app.status_message =
                                                         format!("✅ Connected to {}", server.name);
-                                                    let _ = fetch_server_data(app, server.id).await;
+                                                    fetch_server_data(app, server.id).await;
                                                 }
                                                 Err(e) => {
                                                     app.connection_status.insert(
@@ -987,7 +1010,7 @@ async fn run_app<B: tui::backend::Backend>(
                                                     .insert(server.id, ConnectionStatus::Connected);
                                                 app.status_message =
                                                     format!("✅ Connected to {}", server.name);
-                                                let _ = fetch_server_data(app, server.id).await;
+                                                fetch_server_data(app, server.id).await;
                                             }
                                             Err(e) => {
                                                 app.connection_status.insert(
@@ -1023,7 +1046,7 @@ async fn run_app<B: tui::backend::Backend>(
                                                     .insert(server.id, ConnectionStatus::Connected);
                                                 app.status_message =
                                                     format!("✅ Connected to {}", server.name);
-                                                let _ = fetch_server_data(app, server.id).await;
+                                                fetch_server_data(app, server.id).await;
                                             }
                                             Err(e) => {
                                                 app.connection_status.insert(
@@ -1042,14 +1065,12 @@ async fn run_app<B: tui::backend::Backend>(
                                 app.show_details = !app.show_details;
                             }
                             // Filter (in processes tab)
-                            KeyCode::Char('/') => {
-                                if app.current_tab == Tab::Processes {
-                                    app.input_mode = InputMode::Command;
-                                    app.input_buffer = app.process_filter.clone();
-                                    app.status_message =
-                                        "🔍 Type filter, press Enter to apply, Esc to cancel"
-                                            .to_string();
-                                }
+                            KeyCode::Char('/') if app.current_tab == Tab::Processes => {
+                                app.input_mode = InputMode::Command;
+                                app.input_buffer = app.process_filter.clone();
+                                app.status_message =
+                                    "🔍 Type filter, press Enter to apply, Esc to cancel"
+                                        .to_string();
                             }
                             // Clear filter
                             KeyCode::Char('x') => {
@@ -1092,13 +1113,11 @@ async fn run_app<B: tui::backend::Backend>(
                                 app.status_message = "➕ Add Server - Enter name:".to_string();
                             }
                             // Edit token for selected server
-                            KeyCode::Char('t') => {
-                                if app.get_selected_server().is_some() {
-                                    app.input_mode = InputMode::EditToken;
-                                    app.input_buffer.clear();
-                                    app.status_message =
-                                        "🔑 Enter access token (from server):".to_string();
-                                }
+                            KeyCode::Char('t') if app.get_selected_server().is_some() => {
+                                app.input_mode = InputMode::EditToken;
+                                app.input_buffer.clear();
+                                app.status_message =
+                                    "🔑 Enter access token (from server):".to_string();
                             }
                             // Remove selected server
                             KeyCode::Delete => {
@@ -1265,11 +1284,14 @@ async fn run_app<B: tui::backend::Backend>(
                                     };
 
                                     // Update in servers list
-                                    if let Some(s) =
-                                        app.servers.iter_mut().find(|s| s.id == server.id)
-                                    {
-                                        s.access_token = token.clone();
-                                    }
+                                    // Nothing mutated the list after cloning the selected
+                                    // endpoint; its id must still be present. Keep the first
+                                    // matching id, including configurations with duplicate ids.
+                                    app.servers
+                                        .iter_mut()
+                                        .find(|s| s.id == server.id)
+                                        .expect("selected server remains in the list")
+                                        .access_token = token.clone();
 
                                     // Save to config
                                     if let Ok(manager) =
@@ -1368,15 +1390,11 @@ async fn run_app<B: tui::backend::Backend>(
                                 app.input_mode = InputMode::Normal;
                                 app.status_message.clear();
                             }
-                            KeyCode::Up | KeyCode::Char('k') => {
-                                if app.settings_selection > 0 {
-                                    app.settings_selection -= 1;
-                                }
+                            KeyCode::Up | KeyCode::Char('k') if app.settings_selection > 0 => {
+                                app.settings_selection -= 1;
                             }
-                            KeyCode::Down | KeyCode::Char('j') => {
-                                if app.settings_selection < 2 {
-                                    app.settings_selection += 1;
-                                }
+                            KeyCode::Down | KeyCode::Char('j') if app.settings_selection < 2 => {
+                                app.settings_selection += 1;
                             }
                             KeyCode::Enter => {
                                 match app.settings_selection {
@@ -1409,9 +1427,7 @@ async fn run_app<B: tui::backend::Backend>(
                                     _ => {}
                                 }
                             }
-                            KeyCode::Right | KeyCode::Char('l')
-                                if app.settings_selection == 1 =>
-                            {
+                            KeyCode::Right | KeyCode::Char('l') if app.settings_selection == 1 => {
                                 // Increase update interval
                                 if app.update_interval < 60 {
                                     app.update_interval += 1;
@@ -1419,9 +1435,7 @@ async fn run_app<B: tui::backend::Backend>(
                                 app.status_message =
                                     format!("Update interval: {}s", app.update_interval);
                             }
-                            KeyCode::Left | KeyCode::Char('h')
-                                if app.settings_selection == 1 =>
-                            {
+                            KeyCode::Left | KeyCode::Char('h') if app.settings_selection == 1 => {
                                 // Decrease update interval
                                 if app.update_interval > 1 {
                                     app.update_interval -= 1;
@@ -1439,7 +1453,7 @@ async fn run_app<B: tui::backend::Backend>(
         // Auto-refresh connected servers
         if app.last_update.elapsed() >= Duration::from_secs(app.update_interval) {
             for server_id in app.connected_clients.keys().cloned().collect::<Vec<_>>() {
-                let _ = fetch_server_data(app, server_id).await;
+                fetch_server_data(app, server_id).await;
             }
             app.last_update = Instant::now();
         }
@@ -2126,3 +2140,8 @@ mod tests {
         assert_eq!(app.sort_order, SortOrder::Ascending);
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/dashboard_loop_units.rs"]
+mod campaign_loop_units;

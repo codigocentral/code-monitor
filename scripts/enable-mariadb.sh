@@ -18,9 +18,12 @@
 
 set -euo pipefail
 
+# Optional filesystem staging root; empty keeps the normal host paths.
+PREFIX="${CODE_MONITOR_PREFIX:-}"
+
 CONTAINER="${1:-mautic_db}"
 SERVICE_USER="code-monitor"
-CONF="/etc/code-monitor/config.toml"
+CONF="${PREFIX}/etc/code-monitor/config.toml"
 MONITOR_USER="monitor"
 BEGIN="# >>> mariadb (managed by enable-mariadb.sh)"
 END="# <<< mariadb (managed by enable-mariadb.sh)"
@@ -43,14 +46,12 @@ CLIENT="mariadb"
 docker exec "$CONTAINER" sh -c 'command -v mariadb' >/dev/null 2>&1 || CLIENT="mysql"
 
 echo "==> reading container facts"
-ROOT_PW="$(docker inspect "$CONTAINER" --format '{{range .Config.Env}}{{println .}}{{end}}' \
-    | sed -n 's/^\(MYSQL_ROOT_PASSWORD\|MARIADB_ROOT_PASSWORD\)=//p' | head -1)"
+ROOT_PW="$(docker inspect "$CONTAINER" --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^\(MYSQL_ROOT_PASSWORD\|MARIADB_ROOT_PASSWORD\)=//p' | head -1)"
 if [ -z "$ROOT_PW" ]; then
     echo "error: no root password in the container environment; cannot provision" >&2
     exit 1
 fi
-CONTAINER_IP="$(docker inspect "$CONTAINER" \
-    --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' | head -1)"
+CONTAINER_IP="$(docker inspect "$CONTAINER" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' | head -1)"
 if [ -z "$CONTAINER_IP" ]; then
     echo "error: could not determine container IP" >&2
     exit 1

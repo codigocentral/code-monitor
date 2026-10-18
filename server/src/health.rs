@@ -12,6 +12,25 @@ use std::sync::Arc;
 use tracing::info;
 
 use crate::metrics;
+#[cfg(not(all(test, feature = "unit-doubles")))]
+use axum::serve as serve_http;
+#[cfg(not(all(test, feature = "unit-doubles")))]
+use tokio::net::TcpListener;
+#[cfg(all(test, feature = "unit-doubles"))]
+use unit_http::{serve_http, TcpListener};
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/health_http.rs"]
+pub(crate) mod unit_http;
+
+#[cfg(not(all(test, feature = "unit-doubles")))]
+const ELAPSED: fn(&std::time::Instant) -> std::time::Duration = std::time::Instant::elapsed;
+#[cfg(all(test, feature = "unit-doubles"))]
+const ELAPSED: fn(&std::time::Instant) -> std::time::Duration = unit_http::elapsed;
+#[cfg(not(all(test, feature = "unit-doubles")))]
+const NOW: fn() -> chrono::DateTime<chrono::Utc> = chrono::Utc::now;
+#[cfg(all(test, feature = "unit-doubles"))]
+const NOW: fn() -> chrono::DateTime<chrono::Utc> = crate::unit_sysinfo::now;
 
 /// Health check status
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,7 +76,7 @@ async fn health_check() -> Json<HealthStatus> {
     Json(HealthStatus {
         status: "healthy".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
-        timestamp: chrono::Utc::now().to_rfc3339(),
+        timestamp: NOW().to_rfc3339(),
     })
 }
 
@@ -68,7 +87,7 @@ async fn readiness_check(
     let mut checks = Vec::new();
 
     // Check uptime
-    let uptime_secs = state.start_time.elapsed().as_secs();
+    let uptime_secs = ELAPSED(&state.start_time).as_secs();
     checks.push(HealthCheck {
         name: "uptime".to_string(),
         status: "ok".to_string(),
@@ -123,7 +142,7 @@ async fn metrics_check(State(state): State<Arc<HealthState>>) -> Result<String, 
     ));
 
     // Uptime
-    let uptime_secs = state.start_time.elapsed().as_secs();
+    let uptime_secs = ELAPSED(&state.start_time).as_secs();
     metrics.push_str("# HELP code_monitor_uptime_seconds Server uptime in seconds\n");
     metrics.push_str("# TYPE code_monitor_uptime_seconds counter\n");
     metrics.push_str(&format!("code_monitor_uptime_seconds {}\n", uptime_secs));
@@ -178,14 +197,14 @@ pub async fn start_health_server(port: u16) -> anyhow::Result<()> {
     let app = create_router(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = TcpListener::bind(addr).await?;
 
     info!("Health check server started on http://{}", addr);
     info!("  - Health:  http://{}/health", addr);
     info!("  - Ready:   http://{}/ready", addr);
     info!("  - Metrics: http://{}/metrics", addr);
 
-    axum::serve(listener, app).await?;
+    serve_http(listener, app).await?;
 
     Ok(())
 }
@@ -541,3 +560,8 @@ mod tests {
         handle.abort();
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/health_units.rs"]
+pub(crate) mod campaign_health_units;

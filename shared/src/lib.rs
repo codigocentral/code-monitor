@@ -1672,3 +1672,77 @@ mod tests {
         assert_eq!(status.message(), "Internal error");
     }
 }
+
+#[cfg(test)]
+mod campaign_version_units {
+    use super::types::VersionStatus;
+    #[test]
+    fn registry_status_labels_are_stable() {
+        for (status, text) in [
+            (VersionStatus::UpToDate, "UpToDate"),
+            (VersionStatus::Drifted, "Drifted"),
+            (VersionStatus::LocalBuild, "LocalBuild"),
+            (VersionStatus::Unknown, "Unknown"),
+        ] {
+            assert_eq!(status.to_string(), text);
+        }
+    }
+}
+
+#[cfg(test)]
+mod campaign_schema_units {
+    use super::types::MariaDBSchemaInfo;
+    #[test]
+    fn emptiness_depends_on_table_count_even_without_write_time_visibility() {
+        let mut schema = MariaDBSchemaInfo {
+            name: "unit".into(),
+            size_bytes: 0,
+            table_count: 0,
+            last_write_at: None,
+            write_time_available: false,
+        };
+        assert!(schema.is_empty());
+        schema.table_count = 1;
+        assert!(!schema.is_empty());
+    }
+}
+
+#[cfg(test)]
+#[path = "../../tests/rust/log_bridge.rs"]
+mod unit_log_compat;
+#[cfg(test)]
+mod aaa_log_bridge_units {
+    struct Refuses;
+    #[async_trait::async_trait]
+    impl crate::notifications::NotificationChannel for Refuses {
+        async fn send(&self, _: &crate::alerts::Alert) -> anyhow::Result<()> {
+            Err(anyhow::anyhow!("unit notification refused"))
+        }
+        fn name(&self) -> &str {
+            "unit bridge channel"
+        }
+    }
+    #[tokio::test]
+    async fn notification_error_formats_the_native_log_bridge() {
+        crate::unit_log_compat::install();
+        let mut dispatcher = crate::notifications::NotificationDispatcher::new();
+        dispatcher.add_channel(Box::new(Refuses));
+        let alert = crate::alerts::Alert::new(
+            crate::alerts::AlertType::CpuHigh,
+            crate::alerts::AlertSeverity::Warning,
+            "unit-server".into(),
+            "Unit server".into(),
+            "unit message".into(),
+            Some(95.),
+            Some(80.),
+        );
+        let results = dispatcher.dispatch(&alert).await;
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_err());
+        assert!(crate::unit_log_compat::records()
+            .iter()
+            .any(|line| line.contains(
+                "Failed to send notification to unit bridge channel: unit notification refused"
+            )));
+    }
+}

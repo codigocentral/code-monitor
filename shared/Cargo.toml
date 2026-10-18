@@ -27,6 +27,10 @@ reqwest = { version = "0.11", default-features = false, features = [
 tracing = "0.1"
 
 [dev-dependencies]
+log = "=0.4.29"
+# Match the log-compatibility feature used by client/server dependency graphs.
+tracing = { version = "0.1", features = ["log"] }
+http = "0.2"
 tokio = { version = "1.0", features = ["rt-multi-thread", "macros"] }
 
 [build-dependencies]

@@ -2,6 +2,12 @@
 //!
 //! This module collects system information using the sysinfo library
 
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+use crate::unit_runtime::interval;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+use crate::unit_sysinfo as sysinfo;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use shared::types::*;
@@ -9,17 +15,38 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use sysinfo::{CpuExt, DiskExt, NetworkExt, NetworksExt, PidExt, ProcessExt, System, SystemExt};
-use tokio::time::{interval, Duration};
+#[cfg(not(all(test, feature = "unit-doubles")))]
+use tokio::time::interval;
+use tokio::time::Duration;
 use tracing::{error, info};
+#[cfg(not(all(test, feature = "unit-doubles")))]
+const NOW: fn() -> DateTime<Utc> = Utc::now;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+const NOW: fn() -> DateTime<Utc> = crate::unit_sysinfo::now;
 
+#[cfg(not(all(test, feature = "unit-doubles")))]
 use crate::collectors::docker::DockerCollector;
+#[cfg(not(all(test, feature = "unit-doubles")))]
 use crate::collectors::mariadb::MariaDBCollector;
-use crate::collectors::memory::{MemoryCollector, SwapActivityTracker};
+#[cfg(not(all(test, feature = "unit-doubles")))]
+use crate::collectors::memory::MemoryCollector;
+use crate::collectors::memory::SwapActivityTracker;
+#[cfg(not(all(test, feature = "unit-doubles")))]
 use crate::collectors::net_ports::NetPortsCollector;
+#[cfg(not(all(test, feature = "unit-doubles")))]
 use crate::collectors::postgres::PostgresCollector;
+#[cfg(not(all(test, feature = "unit-doubles")))]
 use crate::collectors::systemd::SystemdCollector;
+#[cfg(not(all(test, feature = "unit-doubles")))]
 use crate::collectors::tls::TlsCollector;
 use crate::config::{MariaDBClusterConfig, PostgresClusterConfig};
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+use crate::unit_collectors::{
+    DockerCollector, MariaDBCollector, MemoryCollector, NetPortsCollector, PostgresCollector,
+    SystemdCollector, TlsCollector,
+};
 
 /// Parse the output of `ip addr show` into a map of interface name to IPv4 address.
 ///
@@ -43,18 +70,18 @@ fn parse_ip_addr_output(stdout: &str) -> HashMap<String, String> {
             .unwrap_or(false)
             && line.contains(": ")
         {
-            if let Some(iface) = line.split(": ").nth(1) {
-                current_iface = iface.split(':').next().unwrap_or(iface).to_string();
-            }
+            // contains above guarantees a second split segment.
+            let iface = line.split(": ").nth(1).unwrap();
+            current_iface = iface.split(':').next().unwrap_or(iface).to_string();
         }
         // Line like "inet 192.168.0.31/24 brd 192.168.0.255 scope global eth0"
         if line.starts_with("inet ") && !current_iface.is_empty() {
-            if let Some(ip_part) = line.strip_prefix("inet ") {
-                if let Some(ip) = ip_part.split('/').next() {
-                    if let Some(ip) = ip.split_whitespace().next() {
-                        ips.insert(current_iface.clone(), ip.to_string());
-                    }
-                }
+            // The prefix is guarded above, and split always yields a first
+            // segment, including for an empty string.
+            let ip_part = &line["inet ".len()..];
+            let candidate = ip_part.split('/').next().unwrap();
+            if let Some(ip) = candidate.split_whitespace().next() {
+                ips.insert(current_iface.clone(), ip.to_string());
             }
         }
     }
@@ -68,17 +95,24 @@ fn parse_ip_addr_output(stdout: &str) -> HashMap<String, String> {
 /// Returns an empty map on non-Linux platforms, or when `ip` is unavailable;
 /// callers render those interfaces as N/A.
 fn get_interface_ips() -> HashMap<String, String> {
-    #[cfg(target_os = "linux")]
-    {
+    get_interface_ips_for_platform(cfg!(target_os = "linux"))
+}
+
+fn get_interface_ips_for_platform(linux: bool) -> HashMap<String, String> {
+    #[cfg(any(target_os = "linux", test))]
+    if linux {
+        #[cfg(all(test, feature = "unit-doubles"))]
+        use crate::unit_process::Command;
+        #[cfg(not(all(test, feature = "unit-doubles")))]
         use std::process::Command;
-        // Use 'ip addr' command as a reliable way to get IPs
+        // Preserve the existing policy: parse stdout even for a nonzero exit.
         if let Ok(output) = Command::new("ip").args(["addr", "show"]).output() {
             if let Ok(stdout) = String::from_utf8(output.stdout) {
                 return parse_ip_addr_output(&stdout);
             }
         }
     }
-
+    let _ = linux;
     HashMap::new()
 }
 
@@ -141,7 +175,7 @@ impl SystemMonitor {
         let monitor = Self {
             system: Arc::new(RwLock::new(system)),
             update_interval: Duration::from_secs(update_interval_seconds),
-            last_update: Arc::new(RwLock::new(Utc::now())),
+            last_update: Arc::new(RwLock::new(NOW())),
             is_running: Arc::new(AtomicBool::new(false)),
             docker_collector: DockerCollector::new(),
             postgres_collectors,
@@ -223,7 +257,7 @@ impl SystemMonitor {
 
         *last_update
             .write()
-            .map_err(|e| anyhow::anyhow!("Failed to lock last_update: {}", e))? = Utc::now();
+            .map_err(|e| anyhow::anyhow!("Failed to lock last_update: {}", e))? = NOW();
 
         Ok(())
     }
@@ -239,7 +273,7 @@ impl SystemMonitor {
         };
 
         let observed = match activity.write() {
-            Ok(mut tracker) => tracker.observe(counters, Utc::now()),
+            Ok(mut tracker) => tracker.observe(counters, NOW()),
             Err(e) => {
                 error!("Failed to lock swap activity: {}", e);
                 return;
@@ -354,7 +388,7 @@ impl SystemMonitor {
                     cpu_usage_percent: cpu_usage,
                     memory_usage_bytes: memory_usage,
                     command_line: process.cmd().join(" "),
-                    start_time: Utc::now() - chrono::Duration::seconds(process.run_time() as i64),
+                    start_time: NOW() - chrono::Duration::seconds(process.run_time() as i64),
                     status: format!("{:?}", process.status()),
                     swap_bytes: self.memory_collector.process_swap(pid.as_u32()),
                 }
@@ -532,13 +566,20 @@ impl SystemMonitor {
     }
 
     pub fn get_network_info(&self) -> Result<Vec<NetworkInfo>> {
+        self.get_network_info_with_provider(get_interface_ips)
+    }
+
+    fn get_network_info_with_provider(
+        &self,
+        ips: fn() -> HashMap<String, String>,
+    ) -> Result<Vec<NetworkInfo>> {
         let sys = self
             .system
             .read()
             .map_err(|e| anyhow::anyhow!("Failed to lock system: {}", e))?;
 
         // Get IP addresses for all interfaces
-        let interface_ips = get_interface_ips();
+        let interface_ips = ips();
 
         let network_info: Vec<NetworkInfo> = sys
             .networks()
@@ -1363,3 +1404,47 @@ mod tests {
         assert!(results.is_empty());
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+mod campaign_ip_units {
+    use super::*;
+    use crate::unit_process as process;
+    #[test]
+    fn platform_ip_lookup_preserves_parsing_and_degradation_policy() {
+        assert!(get_interface_ips_for_platform(false).is_empty());
+        for success in [true, false] {
+            process::expect(
+                "ip",
+                &["addr", "show"],
+                Ok(process::output(
+                    success,
+                    b"2: eth-unit: <UP>\n inet 192.0.2.5/24 scope global eth-unit\n",
+                )),
+            );
+            let ips = get_interface_ips_for_platform(true);
+            assert_eq!(ips.get("eth-unit").map(String::as_str), Some("192.0.2.5"));
+        }
+        process::expect(
+            "ip",
+            &["addr", "show"],
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "unit ip missing",
+            )),
+        );
+        assert!(get_interface_ips_for_platform(true).is_empty());
+        process::expect("ip", &["addr", "show"], Ok(process::output(true, &[0xff])));
+        assert!(get_interface_ips_for_platform(true).is_empty());
+        if cfg!(target_os = "linux") {
+            process::expect("ip", &["addr", "show"], Ok(process::output(true, b"")));
+        }
+        assert!(get_interface_ips().is_empty());
+        process::drained();
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/monitor_units.rs"]
+pub(crate) mod campaign_monitor_units;

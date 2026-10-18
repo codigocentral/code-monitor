@@ -1,7 +1,12 @@
 //! Client configuration management
 
 use anyhow::Result;
+#[cfg(test)]
+use campaign_path_units::fs;
+#[cfg(test)]
+use campaign_path_units::toml;
 use shared::types::*;
+#[cfg(not(test))]
 use std::fs;
 use uuid::Uuid;
 
@@ -352,5 +357,153 @@ mod tests {
         assert_eq!(loaded.servers.len(), 1);
         assert_eq!(loaded.servers[0].name, "test-server");
         assert_eq!(loaded.servers[0].access_token.as_ref().unwrap(), "token");
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod campaign_path_units {
+    use super::*;
+    #[test]
+    fn exposes_the_exact_config_path_and_propagates_initial_write_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("unit.toml");
+        let manager = ClientConfigManager::new(&path).unwrap();
+        assert_eq!(manager.config_path(), path);
+        let existing = ClientConfigManager::new(&path).unwrap();
+        assert_eq!(existing.config_path(), path);
+        assert!(manager.load_config().unwrap().servers.is_empty());
+        assert!(ClientConfigManager::new(&temp.path().join("missing-parent/unit.toml")).is_err());
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    pub(crate) enum Fault {
+        None,
+        Serialize,
+        Write,
+        Metadata,
+        Permissions,
+    }
+    thread_local! { static FAULT: std::cell::Cell<Fault> = const { std::cell::Cell::new(Fault::None) }; }
+    pub(crate) struct FaultGuard;
+    impl FaultGuard {
+        pub(crate) fn arm(value: Fault) -> Self {
+            FAULT.with(|fault| fault.set(value));
+            Self
+        }
+    }
+    impl Drop for FaultGuard {
+        fn drop(&mut self) {
+            FAULT.with(|fault| fault.set(Fault::None));
+        }
+    }
+    fn fails(value: Fault) -> bool {
+        FAULT.with(|fault| fault.get() == value)
+    }
+    fn error() -> std::io::Error {
+        std::io::Error::other("unit provider failure")
+    }
+
+    // Only external providers are replaced. Unarmed calls use owned fixtures;
+    // the production configuration parsing, mutations and error handling run.
+    pub mod fs {
+        use super::{error, fails, Fault};
+        pub use std::fs::{read_to_string, Permissions};
+        pub fn write(
+            path: impl AsRef<std::path::Path>,
+            content: impl AsRef<[u8]>,
+        ) -> std::io::Result<()> {
+            if fails(Fault::Write) {
+                Err(error())
+            } else {
+                std::fs::write(path, content)
+            }
+        }
+        pub fn metadata(path: impl AsRef<std::path::Path>) -> std::io::Result<std::fs::Metadata> {
+            if fails(Fault::Metadata) {
+                Err(error())
+            } else {
+                std::fs::metadata(path)
+            }
+        }
+        pub fn set_permissions(
+            path: impl AsRef<std::path::Path>,
+            permissions: Permissions,
+        ) -> std::io::Result<()> {
+            if fails(Fault::Permissions) {
+                Err(error())
+            } else {
+                std::fs::set_permissions(path, permissions)
+            }
+        }
+    }
+    pub mod toml {
+        pub use ::toml::from_str;
+        pub fn to_string_pretty<T: serde::Serialize>(
+            value: &T,
+        ) -> Result<String, ::toml::ser::Error> {
+            if super::fails(super::Fault::Serialize) {
+                Err(serde::ser::Error::custom("unit serializer failure"))
+            } else {
+                ::toml::to_string_pretty(value)
+            }
+        }
+    }
+
+    fn endpoint() -> ServerEndpoint {
+        ServerEndpoint {
+            id: Uuid::new_v4(),
+            name: "unit".into(),
+            address: "fixture.invalid".into(),
+            port: 1,
+            description: None,
+            access_token: None,
+        }
+    }
+
+    #[test]
+    fn all_readers_propagate_invalid_configuration_without_overwriting_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        std::fs::write(&path, "invalid = [").unwrap();
+        let mut manager = ClientConfigManager::new(&path).unwrap();
+        let server = endpoint();
+        assert!(manager.load_config().is_err());
+        assert!(manager.add_server(server.clone()).is_err());
+        assert!(manager.remove_server(server.id).is_err());
+        assert!(manager.update_server(server.id, server.clone()).is_err());
+        assert!(manager.get_server(server.id).is_err());
+        assert!(manager.list_servers().is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "invalid = [");
+        let directory_manager = ClientConfigManager::new(temp.path()).unwrap();
+        assert!(directory_manager.load_config().is_err());
+    }
+
+    #[test]
+    fn every_save_stage_propagates_provider_failures() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        let mut manager = ClientConfigManager::new(&path).unwrap();
+        let server = endpoint();
+        manager.add_server(server.clone()).unwrap();
+        let config = manager.load_config().unwrap();
+        for stage in [
+            Fault::Serialize,
+            Fault::Write,
+            Fault::Metadata,
+            Fault::Permissions,
+        ] {
+            let _guard = FaultGuard::arm(stage);
+            let error = manager.save_config(&config).unwrap_err().to_string();
+            assert!(error.contains("unit"));
+        }
+        // Mutation errors must propagate after successful reads, too.
+        let _guard = FaultGuard::arm(Fault::Write);
+        let other = ServerEndpoint {
+            port: 2,
+            ..endpoint()
+        };
+        assert!(manager.add_server(other).is_err());
+        assert!(manager.remove_server(server.id).is_err());
+        assert!(manager.update_server(server.id, server).is_err());
     }
 }

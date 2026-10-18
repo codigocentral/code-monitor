@@ -20,11 +20,14 @@
 
 set -euo pipefail
 
+# Optional filesystem staging root; empty keeps the normal host paths.
+PREFIX="${CODE_MONITOR_PREFIX:-}"
+
 SERVICE_USER="code-monitor"
-CONF="/etc/code-monitor/config.toml"
-BIN_DST="/usr/local/bin/monitor-server"
-BIN_SRC="/tmp/monitor-server"
-SOCKET_DIR="/var/run/postgresql"
+CONF="${PREFIX}/etc/code-monitor/config.toml"
+BIN_DST="${PREFIX}/usr/local/bin/monitor-server"
+BIN_SRC="${PREFIX}/tmp/monitor-server"
+SOCKET_DIR="${PREFIX}/var/run/postgresql"
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "error: must run as root (use sudo)" >&2
