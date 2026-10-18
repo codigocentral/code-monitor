@@ -110,11 +110,7 @@ fi
 CRED='(senha|password|passwd|token|secret|api_?key)[[:space:]]*[=:][[:space:]]*"?[[:alnum:]]'
 #     O teste roda só sobre o valor: o prefixo `arquivo:linha:` do grep tem
 #     dígitos e maiúsculas próprios e faria tudo casar.
-hits=$(grep -rInE "$CRED" \
-        --include='*.md' --include='*.toml' --include='*.yml' --include='*.yaml' \
-        --include='*.sh' --include='*.ps1' --include='*.env*' \
-        "$STAGE" 2>/dev/null \
-        | awk '{
+hits=$(grep -rInE "$CRED"          --include='*.md' --include='*.toml' --include='*.yml' --include='*.yaml'          --include='*.sh' --include='*.ps1' --include='*.env*'          "$STAGE" 2>/dev/null          | awk '{
               line = $0
               sub(/^[^:]*:[0-9]+:/, "", line)
               if (match(line, /[=:][ \t]*"?[A-Za-z0-9+\/=_-]{16,}/)) {

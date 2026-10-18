@@ -53,3 +53,6 @@ Desktop.ini
 .claude/
 .codegraph/
 dist/
+
+# Public self-signed unit fixture; no private key is tracked.
+!server/tests/fixtures/sample-cert.pem
