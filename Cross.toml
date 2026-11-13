@@ -1,0 +1,6 @@
+# `cross` builds the Linux release binaries inside its own container, which does not
+# see the runner's protoc. prost-build needs protoc to compile shared/src/proto.
+[build]
+pre-build = [
+    "apt-get update && apt-get install -y --no-install-recommends protobuf-compiler",
+]

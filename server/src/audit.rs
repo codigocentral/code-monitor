@@ -756,10 +756,16 @@ fn read_firewall(dir: &std::path::Path) -> shared::firewall::FirewallSnapshot {
     snapshot
 }
 
-#[cfg(not(all(test, feature = "unit-doubles")))]
+#[cfg(all(unix, not(all(test, feature = "unit-doubles"))))]
 fn running_as_root() -> bool {
     // SAFETY: geteuid has no preconditions and cannot fail
     unsafe { libc::geteuid() == 0 }
+}
+
+/// There is no effective-uid concept on Windows; the Linux-only audits never run as root there.
+#[cfg(all(not(unix), not(all(test, feature = "unit-doubles"))))]
+fn running_as_root() -> bool {
+    false
 }
 
 /// What networkd reports now, or `None` without networkctl.
