@@ -59,6 +59,14 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install protoc
 
+      - name: Install protoc for cross
+        if: matrix.use_cross == true
+        run: |
+          curl -sSLo protoc.zip https://github.com/protocolbuffers/protobuf/releases/download/v25.1/protoc-25.1-linux-x86_64.zip
+          unzip -q protoc.zip -d .protoc
+          rm protoc.zip
+          echo "PROTOC=/project/.protoc/bin/protoc" >> "$GITHUB_ENV"
+
       - name: Install cross
         if: matrix.use_cross == true
         uses: taiki-e/install-action@903f26e8b95aae0a27e09ef88bbd23ace6415d8e # cross
