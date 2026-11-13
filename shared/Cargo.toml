@@ -1,0 +1,40 @@
+[package]
+name = "shared"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+# Data structures and protocols shared between server and client
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tonic = "0.10"
+prost = "0.12"
+prost-types = "0.12"
+anyhow = "1.0"
+thiserror = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# Async traits and HTTP
+async-trait = "0.1"
+# rustls rather than the default native-tls, so nothing pulls in openssl-sys.
+# That keeps the whole workspace free of a system OpenSSL and lets the server
+# link statically against musl.
+reqwest = { version = "0.11", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+tracing = "0.1"
+
+[dev-dependencies]
+log = "=0.4.29"
+# Match the log-compatibility feature used by client/server dependency graphs.
+tracing = { version = "0.1", features = ["log"] }
+http = "0.2"
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros"] }
+# Snapshot-file tests write real files with a back-dated mtime
+tempfile = "3.0"
+
+[build-dependencies]
+tonic-build = "0.10"

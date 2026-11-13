@@ -1,0 +1,57 @@
+# Rust/Cargo build artifacts
+/target/
+**/*.rs.bk
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment, local configuration, and secrets
+.env
+*.local
+config.toml
+client-config.toml
+certs/
+keys/
+*.key
+*.pem
+*.p12
+*.pfx
+
+
+# Debug files
+*.pdb
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*.profraw
+check_*.rs
+check_*.exe
+
+# Generated files
+*.log
+
+# OS generated files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Backup files
+*.bak
+*.tmp
+*.temp
+
+# Local Codex/Claude settings
+.claude/
+.codegraph/
+dist/
+
+# Public self-signed unit fixture; no private key is tracked.
+!server/tests/fixtures/sample-cert.pem
+!server/tests/fixtures/legacy-cn.pem
+!server/tests/fixtures/ip-san.pem

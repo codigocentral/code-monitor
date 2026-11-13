@@ -1,0 +1,37 @@
+update_interval_seconds = 5
+max_clients = 100
+enable_authentication = true
+log_level = "warn"
+
+# Optional. If omitted, the server generates or loads its runtime token locally.
+# access_token = "replace-with-generated-token"
+
+# Optional TLS configuration.
+# [tls]
+# cert_path = "/etc/code-monitor/server.crt"
+# key_path = "/etc/code-monitor/server.key"
+# ca_path = "/etc/code-monitor/ca.crt"
+
+# Interactive setup:
+# monitor-server --config config.toml init
+
+# Disk findings run without a connected dashboard. Absolute free-space budgets
+# are opt-in per mount, so a small /boot filesystem is not treated as a data disk.
+# [disk_policy.defaults]
+# warning_percent = 80.0
+# critical_percent = 90.0
+# [[disk_policy.mounts]]
+# mount = "/"
+# warning_percent = 80.0
+# critical_percent = 90.0
+# warning_available_bytes = 16106127360
+# critical_available_bytes = 5368709120
+#
+# [[scheduled_jobs]]
+# name = "backup"
+# service = "backup.service"
+# timer = "backup.timer"
+# max_interval_seconds = 8100
+# Optional durable scalar Prometheus textfile; both fields must be set together.
+# status_file = "/var/lib/node_exporter/textfile_collector/backup.prom"
+# metric_prefix = "backup"

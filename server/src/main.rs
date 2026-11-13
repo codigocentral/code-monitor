@@ -1,0 +1,841 @@
+//! System Monitoring Server
+//!
+//! This is the server component that runs on the target system and collects
+//! system information to be queried by the client.
+
+use anyhow::Result;
+use clap::{Parser, Subcommand};
+use shared::proto::monitoring::monitor_service_server::MonitorServiceServer;
+use shared::types::ServerConfig;
+use std::net::SocketAddr;
+#[cfg(not(all(test, feature = "unit-doubles")))]
+use tokio::{signal, spawn as spawn_health};
+use tonic::codec::CompressionEncoding;
+#[cfg(not(all(test, feature = "unit-doubles")))]
+use tonic::transport::Server;
+use tracing::{info, warn};
+#[cfg(all(test, feature = "unit-doubles"))]
+use unit_server_bootstrap::Server;
+#[cfg(all(test, feature = "unit-doubles"))]
+use unit_server_bootstrap::{logging as tracing_subscriber, signal, spawn as spawn_health};
+
+use crate::config::Config;
+#[cfg(not(all(test, feature = "unit-doubles")))]
+use crate::monitor::SystemMonitor;
+#[cfg(not(all(test, feature = "unit-doubles")))]
+use crate::service::MonitorServiceImpl;
+#[cfg(all(test, feature = "unit-doubles"))]
+use crate::unit_service_monitor::SystemMonitor;
+#[cfg(all(test, feature = "unit-doubles"))]
+use unit_server_bootstrap::ServiceFactory as MonitorServiceImpl;
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/collectors.rs"]
+mod unit_collectors;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../../tests/rust/log_bridge.rs"]
+mod unit_log_compat;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../../client/tests/doubles/logs.rs"]
+mod unit_logs;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/process.rs"]
+mod unit_process;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/runtime.rs"]
+mod unit_runtime;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/sysinfo.rs"]
+mod unit_sysinfo;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+mod bridge_units {
+    #[tokio::test]
+    async fn log_fallback_formats_systemctl_failure_before_subscriber_installation() {
+        crate::unit_log_compat::install();
+        crate::collectors::systemd::campaign_systemd_units::exercise_log_fallback().await;
+        crate::monitor::campaign_monitor_units::exercise_log_fallback().await;
+        crate::health::campaign_health_units::exercise_log_fallback().await;
+        crate::collectors::tls::campaign_tls_units::exercise_log_fallback().await;
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("missing-proc");
+        let memory =
+            crate::collectors::memory::MemoryCollector::with_proc_root(missing.to_str().unwrap());
+        assert!(memory.paging_counters().is_none());
+        assert!(memory.pressure().is_none());
+        assert!(
+            crate::collectors::net_ports::NetPortsCollector::with_proc_root(
+                missing.to_str().unwrap()
+            )
+            .collect()
+            .await
+            .unwrap()
+            .is_empty()
+        );
+        assert!(crate::unit_log_compat::records()
+            .iter()
+            .any(|line| line.contains("systemctl list-units failed: unit systemctl refused")));
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/service_monitor.rs"]
+mod unit_service_monitor;
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/bollard.rs"]
+mod unit_bollard;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/registry_http.rs"]
+mod unit_registry_http;
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/postgres_sdk.rs"]
+mod unit_pg;
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/mariadb_sdk.rs"]
+mod unit_maria;
+
+mod audit;
+mod collectors;
+mod config;
+mod health;
+mod metrics;
+mod monitor;
+mod scheduled;
+mod service;
+mod tls;
+
+#[derive(Parser, Debug)]
+#[command(name = "monitor-server")]
+#[command(about = "System monitoring server")]
+#[command(version = health::VERSION)]
+struct Args {
+    /// Server address to bind to
+    #[arg(short, long, default_value = "0.0.0.0")]
+    address: String,
+
+    /// Server port to listen on (gRPC)
+    #[arg(short, long, default_value = "50051")]
+    port: u16,
+
+    /// Health check HTTP port
+    #[arg(long, default_value = "8080")]
+    health_port: u16,
+
+    /// Address the health/metrics HTTP server binds to.
+    ///
+    /// `/metrics` exposes audit findings (exposed ports, failed units...), so
+    /// on a multi-homed host bind it to a private interface.
+    #[arg(long, default_value = "0.0.0.0")]
+    health_address: std::net::IpAddr,
+
+    /// Disable health check HTTP server
+    #[arg(long)]
+    no_health: bool,
+
+    /// Seconds between audit passes feeding `/metrics` (0 disables the audit)
+    #[arg(long, default_value = "60")]
+    audit_interval: u64,
+
+    /// Directory where code-monitor-firewall-snapshot.timer saves the
+    /// iptables-save / ip6tables-save output the audit reads
+    #[arg(long, default_value = shared::firewall::DEFAULT_SNAPSHOT_DIR)]
+    firewall_snapshot_dir: std::path::PathBuf,
+
+    /// Configuration file path
+    #[arg(short, long, default_value = "config.toml")]
+    config: String,
+
+    /// Log level (trace, debug, info, warn, error)
+    #[arg(short, long, default_value = "warn")]
+    log_level: String,
+
+    /// Emit logs as structured JSON (also enabled via CODE_MONITOR_LOG_JSON=1)
+    #[arg(long)]
+    log_json: bool,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum Commands {
+    /// Create or update the server configuration interactively
+    Init {
+        /// Overwrite an existing config without asking
+        #[arg(short, long)]
+        force: bool,
+    },
+
+    /// Show the access token for clients to connect
+    ShowToken,
+
+    /// Generate a new access token
+    NewToken,
+
+    /// List authorized clients
+    ListClients,
+
+    /// Remove an authorized client
+    RemoveClient {
+        /// Client name to remove
+        #[arg(short, long)]
+        name: String,
+    },
+
+    /// Disable authentication (allow any client)
+    DisableAuth,
+
+    /// Enable authentication
+    EnableAuth,
+
+    /// Add an authorized client public key (for Ed25519 signature auth)
+    AddClient {
+        /// Friendly name for the client
+        #[arg(short, long)]
+        name: String,
+
+        /// Base64-encoded Ed25519 public key (from 'monitor-client gen-keys')
+        #[arg(short, long)]
+        public_key: String,
+    },
+
+    /// Export the current configuration to a backup file
+    ExportConfig {
+        /// Destination path for the backup
+        #[arg(short, long)]
+        output: String,
+    },
+
+    /// Import, validate and apply a configuration backup
+    ImportConfig {
+        /// Path of the backup to import
+        #[arg(short, long)]
+        input: String,
+    },
+}
+
+#[cfg(not(all(test, feature = "unit-doubles")))]
+const CLI_ARGS: fn() -> Args = Args::parse;
+#[cfg(all(test, feature = "unit-doubles"))]
+const CLI_ARGS: fn() -> Args = unit_server_bootstrap::parse;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../../client/tests/doubles/console.rs"]
+mod unit_console;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/server_bootstrap.rs"]
+mod unit_server_bootstrap;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Parse command line arguments
+    let args = CLI_ARGS();
+
+    // Handle subcommands first (before setting up logging for cleaner output)
+    if let Some(cmd) = &args.command {
+        return handle_command(cmd, &args.config);
+    }
+
+    // Setup logging
+    let log_level = match args.log_level.as_str() {
+        "trace" => tracing::Level::TRACE,
+        "debug" => tracing::Level::DEBUG,
+        "info" => tracing::Level::INFO,
+        "warn" => tracing::Level::WARN,
+        "error" => tracing::Level::ERROR,
+        _ => tracing::Level::INFO,
+    };
+
+    let json_logging = args.log_json
+        || std::env::var("CODE_MONITOR_LOG_JSON")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+    if json_logging {
+        tracing_subscriber::fmt()
+            .json()
+            .with_max_level(log_level)
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_max_level(log_level).init();
+    }
+
+    info!("Starting system monitoring server...");
+
+    // Load configuration
+    let config = Config::load(&args.config).unwrap_or_else(|e| {
+        warn!("Failed to load config from {}: {}", args.config, e);
+        let mut cfg = Config::default();
+        cfg.generate_access_token();
+        cfg
+    });
+
+    // Show connection info
+    println!();
+    println!("╔══════════════════════════════════════════════════════════════╗");
+    println!("║                   🖥️  SYSTEM MONITOR SERVER                   ║");
+    println!("╠══════════════════════════════════════════════════════════════╣");
+    println!(
+        "║  gRPC:    {:51} ║",
+        format!("{}:{}", args.address, args.port)
+    );
+    if !args.no_health {
+        println!(
+            "║  HTTP:    {:51} ║",
+            format!("{}:{}", args.health_address, args.health_port)
+        );
+    }
+    println!("╠══════════════════════════════════════════════════════════════╣");
+    if config.enable_authentication {
+        println!("║  🔐 Authentication: ENABLED                                   ║");
+        println!("║                                                                ║");
+        println!("║  Run 'monitor-server show-token' to display the access token  ║");
+        println!("║                                                                ║");
+        println!("║  Clients need: IP, Port, and Access Token to connect          ║");
+    } else {
+        println!("║  ⚠️  Authentication: DISABLED (any client can connect)         ║");
+    }
+    println!("╠══════════════════════════════════════════════════════════════╣");
+    if tls::is_tls_available(&config.tls) {
+        println!("║  🔒 TLS:        ENABLED (encrypted gRPC)                      ║");
+        if config.tls.as_ref().unwrap().ca_path.is_some() {
+            println!("║  🔐 mTLS:       ENABLED (client cert required)                ║");
+        }
+    } else {
+        println!("║  ⚠️  TLS:        DISABLED (plaintext gRPC)                     ║");
+    }
+    println!("╠══════════════════════════════════════════════════════════════╣");
+    println!("║  Commands: show-token, new-token, list-clients               ║");
+    println!("╚══════════════════════════════════════════════════════════════╝");
+    println!();
+
+    // Override config with command line arguments
+    let server_config = ServerConfig {
+        address: args.address,
+        port: args.port,
+        update_interval_seconds: config.update_interval_seconds,
+        max_clients: config.max_clients,
+        enable_authentication: config.enable_authentication,
+        log_level: args.log_level,
+    };
+
+    // Create system monitor
+    let monitor = SystemMonitor::new(
+        server_config.update_interval_seconds,
+        config.postgres_clusters.clone(),
+        config.mariadb_clusters.clone(),
+        config.systemd_units.clone(),
+    )
+    .await?
+    .with_tls_dirs(config.tls_certificate_dirs.clone());
+    monitor.start_background_monitoring();
+
+    // Wrap in Arc for sharing
+    let monitor = std::sync::Arc::new(monitor);
+
+    // Create service implementation with config for auth
+    let service = MonitorServiceImpl::from_arc(monitor.clone(), config.clone())?;
+
+    // Parse address
+    let addr: SocketAddr = format!("{}:{}", server_config.address, server_config.port)
+        .parse()
+        .expect("Invalid address format");
+
+    info!("gRPC server listening on {}", addr);
+
+    // Periodic audit feeding /metrics: only useful when the HTTP server runs
+    let audit = if !args.no_health && args.audit_interval > 0 {
+        let shared = audit::new_shared();
+        #[cfg(not(all(test, feature = "unit-doubles")))]
+        audit::spawn(
+            monitor.clone(),
+            std::time::Duration::from_secs(args.audit_interval),
+            args.firewall_snapshot_dir.clone(),
+            config.disk_policy.clone(),
+            config.scheduled_jobs.clone(),
+            shared.clone(),
+        );
+        Some(shared)
+    } else {
+        None
+    };
+
+    // Start health check server in parallel (if enabled)
+    if !args.no_health {
+        let health_port = args.health_port;
+        let health_address = args.health_address;
+        spawn_health(async move {
+            if let Err(e) = health::start_health_server_on(health_address, health_port, audit).await
+            {
+                tracing::error!("Health check server error: {}", e);
+            }
+        });
+    }
+
+    // Start the gRPC server (with optional TLS)
+    let server_builder = if tls::is_tls_available(&config.tls) {
+        info!("TLS enabled for gRPC server");
+        let tls_config = tls::load_tls_config(config.tls.as_ref().unwrap())?;
+        Server::builder().tls_config(tls_config)?
+    } else {
+        Server::builder()
+    };
+
+    server_builder
+        .timeout(std::time::Duration::from_secs(30))
+        .http2_keepalive_interval(Some(std::time::Duration::from_secs(30)))
+        .http2_keepalive_timeout(Some(std::time::Duration::from_secs(10)))
+        .add_service(
+            MonitorServiceServer::new(service)
+                .send_compressed(CompressionEncoding::Gzip)
+                .accept_compressed(CompressionEncoding::Gzip),
+        )
+        .serve_with_shutdown(addr, shutdown_signal())
+        .await?;
+
+    info!("Server stopped");
+    Ok(())
+}
+
+/// Wait for SIGINT (Ctrl+C) or SIGTERM (Unix) to trigger a graceful shutdown
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(e) = signal::ctrl_c().await {
+            warn!("Failed to install Ctrl+C handler: {}", e);
+            std::future::pending::<()>().await;
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match signal::unix::signal(signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(e) => {
+                warn!("Failed to install SIGTERM handler: {}", e);
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => info!("Received Ctrl+C, shutting down gracefully..."),
+        _ = terminate => info!("Received SIGTERM, shutting down gracefully..."),
+    }
+}
+
+fn handle_command(cmd: &Commands, config_path: &str) -> Result<()> {
+    // Init must work without loading/validating the existing configuration.
+    // Other commands load once inside their selected arm.
+    match cmd {
+        Commands::Init { force } => return init_config(config_path, *force),
+        Commands::ShowToken => {
+            let config = Config::load(config_path)?;
+            println!();
+            println!("🔑 Access Token for clients:");
+            println!();
+            println!("   {}", config.access_token);
+            println!();
+            println!("Share this token with clients. They need:");
+            println!("  • Server IP/hostname");
+            println!("  • Port (default: 50051)");
+            println!("  • This access token");
+            println!();
+        }
+        Commands::NewToken => {
+            let mut config = Config::load(config_path)?;
+            config.generate_access_token();
+            config.save(config_path)?;
+            println!();
+            println!("✅ New access token generated:");
+            println!();
+            println!("   {}", config.access_token);
+            println!();
+            println!("⚠️  Old token is now invalid. Update your clients!");
+            println!();
+        }
+        Commands::ListClients => {
+            let config = Config::load(config_path)?;
+            println!();
+            if config.authorized_clients.is_empty() {
+                println!("📋 No authorized clients yet.");
+                println!();
+                println!("Clients will be authorized automatically when they connect");
+                println!("with the correct access token.");
+            } else {
+                println!("📋 Authorized Clients:");
+                println!();
+                for client in &config.authorized_clients {
+                    println!("  • {} (authorized: {})", client.name, client.authorized_at);
+                }
+            }
+            println!();
+        }
+        Commands::RemoveClient { name } => {
+            let mut config = Config::load(config_path)?;
+            if config.remove_authorized_client(name) {
+                config.save(config_path)?;
+                println!("✅ Client '{}' removed.", name);
+            } else {
+                println!("❌ Client '{}' not found.", name);
+            }
+        }
+        Commands::DisableAuth => {
+            let mut config = Config::load(config_path)?;
+            config.enable_authentication = false;
+            config.save(config_path)?;
+            println!();
+            println!("⚠️  Authentication DISABLED");
+            println!("Any client can now connect without a token.");
+            println!();
+        }
+        Commands::EnableAuth => {
+            let mut config = Config::load(config_path)?;
+            config.enable_authentication = true;
+            // Loading already generates and persists any missing token.
+            config.save(config_path)?;
+            println!();
+            println!("✅ Authentication ENABLED");
+            println!();
+            println!("Access Token: {}", config.access_token);
+            println!();
+        }
+        Commands::AddClient { name, public_key } => {
+            let mut config = Config::load(config_path)?;
+            config.add_authorized_client(name.clone(), public_key.clone());
+            config.save(config_path)?;
+            println!("✅ Client '{}' authorized for signature auth.", name);
+        }
+        Commands::ExportConfig { output } => {
+            let config = Config::load(config_path)?;
+            config.save(output)?;
+            println!("✅ Configuration exported to {}", output);
+            println!("⚠️  The backup contains the access token — store it safely.");
+        }
+        Commands::ImportConfig { input } => {
+            Config::load(config_path)?;
+            let imported = Config::load(input)?;
+            imported.save(config_path)?;
+            println!("✅ Configuration imported from {} and applied.", input);
+            println!("Restart the server for the changes to take effect.");
+        }
+    }
+
+    Ok(())
+}
+
+fn init_config(config_path: &str, force: bool) -> Result<()> {
+    #[cfg(all(test, feature = "unit-doubles"))]
+    use crate::unit_console::{self as io, Write};
+    #[cfg(not(all(test, feature = "unit-doubles")))]
+    use std::io::{self, Write};
+    use std::path::Path;
+
+    let path = Path::new(config_path);
+    if path.exists() && !force && !prompt_bool("Config exists. Update it?", true)? {
+        println!("Keeping existing config: {}", config_path);
+        return Ok(());
+    }
+
+    let mut config = if path.exists() {
+        Config::load(path)?
+    } else {
+        Config::default()
+    };
+
+    println!();
+    println!("Code Monitor server setup");
+    println!();
+
+    config.update_interval_seconds =
+        prompt_u64("Update interval seconds", config.update_interval_seconds)?;
+    config.max_clients = prompt_usize("Max clients", config.max_clients)?;
+    config.enable_authentication =
+        prompt_bool("Enable token authentication", config.enable_authentication)?;
+
+    if config.enable_authentication
+        && (config.access_token.is_empty() || prompt_bool("Generate a new access token", false)?)
+    {
+        config.generate_access_token();
+    }
+
+    if prompt_bool("Enable TLS paths in config", config.tls.is_some())? {
+        let current = config.tls.clone();
+        let cert_default = current
+            .as_ref()
+            .map(|tls| tls.cert_path.as_str())
+            .unwrap_or("/etc/code-monitor/certs/server.crt");
+        let key_default = current
+            .as_ref()
+            .map(|tls| tls.key_path.as_str())
+            .unwrap_or("/etc/code-monitor/certs/server.key");
+        let ca_default = current
+            .as_ref()
+            .and_then(|tls| tls.ca_path.as_deref())
+            .unwrap_or("");
+
+        let cert_path = prompt_string("Server certificate path", cert_default)?;
+        let key_path = prompt_string("Server private key path", key_default)?;
+        let ca_path = prompt_string("Client CA path for mTLS (blank to disable)", ca_default)?;
+
+        config.tls = Some(config::TlsConfig {
+            cert_path,
+            key_path,
+            ca_path: blank_to_none(ca_path),
+        });
+    } else {
+        config.tls = None;
+    }
+
+    let units_default = if config.systemd_units.is_empty() {
+        String::new()
+    } else {
+        config.systemd_units.join(",")
+    };
+    let units = prompt_string(
+        "systemd units to watch, comma-separated (blank for none)",
+        &units_default,
+    )?;
+    config.systemd_units = units
+        .split(',')
+        .map(str::trim)
+        .filter(|unit| !unit.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    config.save(path)?;
+
+    println!();
+    println!("Server config written to {}", config_path);
+    if config.enable_authentication {
+        println!();
+        println!("Access token:");
+        println!("{}", config.access_token);
+        println!();
+        println!("Use this token when adding the server on monitor-client.");
+    }
+    println!();
+    println!("Start server:");
+    println!("monitor-server --config {}", config_path);
+    println!();
+
+    io::stdout().flush()?;
+    Ok(())
+}
+
+fn prompt_string(label: &str, default: &str) -> Result<String> {
+    #[cfg(all(test, feature = "unit-doubles"))]
+    use crate::unit_console::{self as io, Write};
+    #[cfg(not(all(test, feature = "unit-doubles")))]
+    use std::io::{self, Write};
+
+    if default.is_empty() {
+        print!("{}: ", label);
+    } else {
+        print!("{} [{}]: ", label, default);
+    }
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let input = input.trim();
+    if input.is_empty() {
+        Ok(default.to_string())
+    } else {
+        Ok(input.to_string())
+    }
+}
+
+fn prompt_bool(label: &str, default: bool) -> Result<bool> {
+    let suffix = if default { "Y/n" } else { "y/N" };
+    loop {
+        let answer = prompt_string(&format!("{} ({})", label, suffix), "")?;
+        if answer.is_empty() {
+            return Ok(default);
+        }
+        match answer.to_ascii_lowercase().as_str() {
+            "y" | "yes" | "s" | "sim" => return Ok(true),
+            "n" | "no" | "nao" | "não" => return Ok(false),
+            _ => println!("Please answer yes or no."),
+        }
+    }
+}
+
+fn prompt_u64(label: &str, default: u64) -> Result<u64> {
+    loop {
+        let answer = prompt_string(label, &default.to_string())?;
+        match answer.parse() {
+            Ok(value) => return Ok(value),
+            Err(_) => println!("Please enter a valid number."),
+        }
+    }
+}
+
+fn prompt_usize(label: &str, default: usize) -> Result<usize> {
+    loop {
+        let answer = prompt_string(label, &default.to_string())?;
+        match answer.parse() {
+            Ok(value) => return Ok(value),
+            Err(_) => println!("Please enter a valid number."),
+        }
+    }
+}
+
+fn blank_to_none(value: String) -> Option<String> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    fn create_test_config_file() -> (NamedTempFile, String) {
+        let temp_file = NamedTempFile::new().unwrap();
+        let path = temp_file.path().to_string_lossy().to_string();
+        let config = Config {
+            access_token: "test-token-123".to_string(),
+            ..Default::default()
+        };
+        config.save(&path).unwrap();
+        (temp_file, path)
+    }
+
+    #[test]
+    fn test_handle_command_show_token() {
+        let (_temp, path) = create_test_config_file();
+        let result = handle_command(&Commands::ShowToken, &path);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_handle_command_new_token() {
+        let (_temp, path) = create_test_config_file();
+        let old_config = Config::load(&path).unwrap();
+        let old_token = old_config.access_token.clone();
+
+        let result = handle_command(&Commands::NewToken, &path);
+        assert!(result.is_ok());
+
+        let new_config = Config::load(&path).unwrap();
+        assert_ne!(new_config.access_token, old_token);
+        assert!(!new_config.access_token.is_empty());
+    }
+
+    #[test]
+    fn test_handle_command_disable_auth() {
+        let (_temp, path) = create_test_config_file();
+        let result = handle_command(&Commands::DisableAuth, &path);
+        assert!(result.is_ok());
+
+        let config = Config::load(&path).unwrap();
+        assert!(!config.enable_authentication);
+    }
+
+    #[test]
+    fn test_handle_command_enable_auth() {
+        let (_temp, path) = create_test_config_file();
+        // First disable
+        handle_command(&Commands::DisableAuth, &path).unwrap();
+
+        // Then enable
+        let result = handle_command(&Commands::EnableAuth, &path);
+        assert!(result.is_ok());
+
+        let config = Config::load(&path).unwrap();
+        assert!(config.enable_authentication);
+        assert!(!config.access_token.is_empty());
+    }
+
+    #[test]
+    fn test_handle_command_enable_auth_generates_token() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let path = temp_file.path().to_string_lossy().to_string();
+        let config = Config {
+            enable_authentication: false,
+            access_token: String::new(),
+            ..Default::default()
+        };
+        config.save(&path).unwrap();
+
+        let result = handle_command(&Commands::EnableAuth, &path);
+        assert!(result.is_ok());
+
+        let config = Config::load(&path).unwrap();
+        assert!(config.enable_authentication);
+        assert!(!config.access_token.is_empty());
+    }
+
+    #[test]
+    fn test_handle_command_list_clients_empty() {
+        let (_temp, path) = create_test_config_file();
+        let result = handle_command(&Commands::ListClients, &path);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_handle_command_remove_client() {
+        let (_temp, path) = create_test_config_file();
+        let mut config = Config::load(&path).unwrap();
+        config.authorized_clients.push(config::AuthorizedClient {
+            name: "test-client".to_string(),
+            public_key: "pk123".to_string(),
+            authorized_at: "2024-01-01T00:00:00Z".to_string(),
+        });
+        config.save(&path).unwrap();
+
+        let result = handle_command(
+            &Commands::RemoveClient {
+                name: "test-client".to_string(),
+            },
+            &path,
+        );
+        assert!(result.is_ok());
+
+        let config = Config::load(&path).unwrap();
+        assert!(config.authorized_clients.is_empty());
+    }
+
+    #[test]
+    fn test_handle_command_remove_client_not_found() {
+        let (_temp, path) = create_test_config_file();
+        let result = handle_command(
+            &Commands::RemoveClient {
+                name: "nonexistent".to_string(),
+            },
+            &path,
+        );
+        assert!(result.is_ok());
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/server_main_units.rs"]
+mod campaign_main_units;

@@ -1,0 +1,1011 @@
+//! Configuration management for the monitoring server
+
+use anyhow::Result;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD as BASE64, Engine as _};
+#[cfg(all(test, feature = "unit-doubles"))]
+use campaign_io_units::{fs, toml};
+use rand::rngs::OsRng;
+use rand::RngCore;
+use serde::{Deserialize, Serialize};
+#[cfg(not(all(test, feature = "unit-doubles")))]
+use std::fs;
+use std::path::Path;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Config {
+    pub update_interval_seconds: u64,
+    pub max_clients: usize,
+    pub enable_authentication: bool,
+    pub log_level: String,
+    /// Access token that clients must provide to connect
+    /// If empty, a new one will be generated on startup
+    #[serde(default)]
+    pub access_token: String,
+    /// Additional tokens with read-only (viewer) role.
+    /// All current RPCs are reads, so viewers can call everything today;
+    /// future mutating RPCs will require the admin token (access_token).
+    #[serde(default)]
+    pub viewer_tokens: Vec<String>,
+    /// List of authorized client public keys (base64 encoded)
+    #[serde(default)]
+    pub authorized_clients: Vec<AuthorizedClient>,
+    /// Postgres clusters to monitor
+    #[serde(default)]
+    pub postgres_clusters: Vec<PostgresClusterConfig>,
+    /// MariaDB clusters to monitor
+    #[serde(default)]
+    pub mariadb_clusters: Vec<MariaDBClusterConfig>,
+    /// Systemd units to monitor
+    #[serde(default)]
+    pub systemd_units: Vec<String>,
+    #[serde(default)]
+    pub disk_policy: shared::operations::DiskPolicy,
+    #[serde(default)]
+    pub scheduled_jobs: Vec<shared::operations::ScheduledJobConfig>,
+    /// Directories holding TLS certificate lineages
+    ///
+    /// Empty means the Let's Encrypt default, `/etc/letsencrypt/live`.
+    #[serde(default)]
+    pub tls_certificate_dirs: Vec<String>,
+    /// TLS configuration
+    #[serde(default)]
+    pub tls: Option<TlsConfig>,
+}
+
+/// TLS configuration for the server
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TlsConfig {
+    /// Path to the server certificate (PEM)
+    pub cert_path: String,
+    /// Path to the server private key (PEM)
+    pub key_path: String,
+    /// Path to the CA certificate for client verification (optional, enables mTLS)
+    pub ca_path: Option<String>,
+}
+
+/// Configuration for a Postgres cluster to monitor
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PostgresClusterConfig {
+    /// Friendly name for this cluster
+    pub name: String,
+    /// Connection host (default: localhost)
+    #[serde(default = "default_localhost")]
+    pub host: String,
+    /// Connection port (default: 5432)
+    #[serde(default = "default_pg_port")]
+    pub port: u16,
+    /// Database name to connect to (default: postgres)
+    #[serde(default = "default_postgres_db")]
+    pub database: String,
+    /// Username (default: code-monitor)
+    #[serde(default = "default_pg_user")]
+    pub user: String,
+    /// Password (optional; prefer socket+peer auth)
+    pub password: Option<String>,
+    /// Unix socket path (alternative to TCP)
+    pub socket_path: Option<String>,
+    /// Whether this cluster is enabled
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+/// Configuration for a MariaDB cluster to monitor
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MariaDBClusterConfig {
+    /// Friendly name for this cluster
+    pub name: String,
+    /// Connection host (default: localhost)
+    #[serde(default = "default_localhost")]
+    pub host: String,
+    /// Connection port (default: 3306)
+    #[serde(default = "default_mysql_port")]
+    pub port: u16,
+    /// Username (default: code-monitor)
+    #[serde(default = "default_mysql_user")]
+    pub user: String,
+    /// Password (optional)
+    pub password: Option<String>,
+    /// Unix socket path (alternative to TCP)
+    pub socket_path: Option<String>,
+    /// Whether this cluster is enabled
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_mysql_port() -> u16 {
+    3306
+}
+fn default_mysql_user() -> String {
+    "code-monitor".to_string()
+}
+
+fn default_localhost() -> String {
+    "localhost".to_string()
+}
+fn default_pg_port() -> u16 {
+    5432
+}
+fn default_postgres_db() -> String {
+    "postgres".to_string()
+}
+fn default_pg_user() -> String {
+    "code-monitor".to_string()
+}
+fn default_true() -> bool {
+    true
+}
+
+/// Role granted to an authenticated caller (RBAC)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Role {
+    /// Full access, including future mutating RPCs
+    Admin,
+    /// Read-only access
+    Viewer,
+}
+
+impl Role {
+    /// Whether this role can call mutating/administrative RPCs
+    #[allow(dead_code)]
+    pub fn can_write(&self) -> bool {
+        matches!(self, Role::Admin)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthorizedClient {
+    /// Friendly name for this client
+    pub name: String,
+    /// Base64 encoded public key
+    pub public_key: String,
+    /// When this client was authorized
+    #[serde(default = "default_timestamp")]
+    pub authorized_at: String,
+}
+
+fn default_timestamp() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            update_interval_seconds: 5,
+            max_clients: 100,
+            enable_authentication: true,
+            log_level: "warn".to_string(),
+            access_token: String::new(),
+            viewer_tokens: Vec::new(),
+            authorized_clients: Vec::new(),
+            postgres_clusters: Vec::new(),
+            mariadb_clusters: Vec::new(),
+            systemd_units: Vec::new(),
+            disk_policy: Default::default(),
+            scheduled_jobs: Vec::new(),
+            tls_certificate_dirs: Vec::new(),
+            tls: None,
+        }
+    }
+}
+
+impl Config {
+    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let path = path.as_ref();
+
+        if !path.exists() {
+            let mut config = Self::default();
+            config.generate_access_token();
+            config.save(path)?;
+            return Ok(config);
+        }
+
+        let content = fs::read_to_string(path)?;
+        let mut config: Config = toml::from_str(&content)?;
+
+        // Generate access token if empty
+        if config.access_token.is_empty() {
+            config.generate_access_token();
+            config.save(path)?;
+        }
+
+        config.apply_env_overrides();
+
+        config
+            .validate()
+            .map_err(|e| anyhow::anyhow!("Invalid configuration in {}: {}", path.display(), e))?;
+
+        Ok(config)
+    }
+
+    /// Override configuration values from CODE_MONITOR_* environment variables.
+    /// Useful for containers and systemd drop-ins without editing config.toml.
+    pub fn apply_env_overrides(&mut self) {
+        if let Ok(v) = std::env::var("CODE_MONITOR_UPDATE_INTERVAL") {
+            if let Ok(n) = v.parse() {
+                self.update_interval_seconds = n;
+            }
+        }
+        if let Ok(v) = std::env::var("CODE_MONITOR_MAX_CLIENTS") {
+            if let Ok(n) = v.parse() {
+                self.max_clients = n;
+            }
+        }
+        if let Ok(v) = std::env::var("CODE_MONITOR_LOG_LEVEL") {
+            self.log_level = v;
+        }
+        if let Ok(v) = std::env::var("CODE_MONITOR_ACCESS_TOKEN") {
+            if !v.is_empty() {
+                self.access_token = v;
+            }
+        }
+        if let Ok(v) = std::env::var("CODE_MONITOR_ENABLE_AUTH") {
+            self.enable_authentication = v == "1" || v.eq_ignore_ascii_case("true");
+        }
+    }
+
+    pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        let content = toml::to_string_pretty(self)?;
+        fs::write(path, content)?;
+        Ok(())
+    }
+
+    /// Generate a user-friendly access token using the OS cryptographic RNG
+    pub fn generate_access_token(&mut self) {
+        let mut bytes = [0u8; 32];
+        OsRng.fill_bytes(&mut bytes);
+        self.access_token = BASE64.encode(bytes);
+    }
+
+    /// Validate configuration values, returning a descriptive error on the first violation
+    pub fn validate(&self) -> Result<()> {
+        if self.update_interval_seconds < 1 {
+            anyhow::bail!("update_interval_seconds must be at least 1");
+        }
+        if self.max_clients < 1 || self.max_clients > 10_000 {
+            anyhow::bail!(
+                "max_clients must be between 1 and 10000 (got {})",
+                self.max_clients
+            );
+        }
+        if !self.disk_policy.defaults.validate()
+            || self
+                .disk_policy
+                .mounts
+                .iter()
+                .any(|m| m.mount.is_empty() || !m.thresholds.validate())
+        {
+            anyhow::bail!("invalid disk thresholds");
+        }
+        if self.scheduled_jobs.len() > 25 {
+            anyhow::bail!("at most 25 scheduled jobs are supported");
+        }
+        let mut names = std::collections::BTreeSet::new();
+        for job in &self.scheduled_jobs {
+            let safe = |s: &str| {
+                !s.is_empty()
+                    && s.len() <= 128
+                    && s.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"_.@:-".contains(&b))
+            };
+            if !safe(&job.name)
+                || !safe(&job.service)
+                || !safe(&job.timer)
+                || !job.service.ends_with(".service")
+                || !job.timer.ends_with(".timer")
+                || job.max_interval_seconds == 0
+                || job.max_interval_seconds > 31_536_000
+                || !names.insert(&job.name)
+                || job.status_file.is_some() != job.metric_prefix.is_some()
+                || job.metric_prefix.as_ref().is_some_and(|p| !safe(p))
+            {
+                anyhow::bail!("invalid scheduled job configuration");
+            }
+        }
+        const VALID_LEVELS: [&str; 5] = ["trace", "debug", "info", "warn", "error"];
+        if !VALID_LEVELS.contains(&self.log_level.as_str()) {
+            anyhow::bail!(
+                "log_level must be one of trace, debug, info, warn, error (got '{}')",
+                self.log_level
+            );
+        }
+        for cluster in &self.postgres_clusters {
+            if cluster.port == 0 {
+                anyhow::bail!("postgres cluster '{}' has invalid port 0", cluster.name);
+            }
+        }
+        for cluster in &self.mariadb_clusters {
+            if cluster.port == 0 {
+                anyhow::bail!("mariadb cluster '{}' has invalid port 0", cluster.name);
+            }
+        }
+        if let Some(tls) = &self.tls {
+            if tls.cert_path.trim().is_empty() {
+                anyhow::bail!("tls.cert_path must not be empty when TLS is configured");
+            }
+            if tls.key_path.trim().is_empty() {
+                anyhow::bail!("tls.key_path must not be empty when TLS is configured");
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate an access token
+    pub fn validate_access_token(&self, token: &str) -> bool {
+        self.token_role(token).is_some()
+    }
+
+    /// Resolve the role granted by a token.
+    /// Returns None when the token is not valid.
+    pub fn token_role(&self, token: &str) -> Option<Role> {
+        if !self.enable_authentication {
+            return Some(Role::Admin);
+        }
+        if self.access_token == token {
+            return Some(Role::Admin);
+        }
+        if self.viewer_tokens.iter().any(|t| t == token) {
+            return Some(Role::Viewer);
+        }
+        None
+    }
+
+    /// Add an authorized client
+    #[allow(dead_code)]
+    pub fn add_authorized_client(&mut self, name: String, public_key: String) {
+        // Check if already exists
+        if self
+            .authorized_clients
+            .iter()
+            .any(|c| c.public_key == public_key)
+        {
+            return;
+        }
+
+        self.authorized_clients.push(AuthorizedClient {
+            name,
+            public_key,
+            authorized_at: chrono::Utc::now().to_rfc3339(),
+        });
+    }
+
+    /// Remove an authorized client by name
+    pub fn remove_authorized_client(&mut self, name: &str) -> bool {
+        let original_len = self.authorized_clients.len();
+        self.authorized_clients.retain(|c| c.name != name);
+        self.authorized_clients.len() != original_len
+    }
+
+    /// Check if a public key is authorized
+    #[allow(dead_code)]
+    pub fn is_client_authorized(&self, public_key: &str) -> bool {
+        if !self.enable_authentication {
+            return true;
+        }
+        self.authorized_clients
+            .iter()
+            .any(|c| c.public_key == public_key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    /// Serialises every test that touches the process-wide environment.
+    ///
+    /// Cargo runs tests as threads of one process, so a test that sets
+    /// `CODE_MONITOR_*` leaks into any `Config::load` running concurrently —
+    /// `load` applies env overrides. Without this the suite fails
+    /// intermittently, which is worse than failing outright.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Take the environment lock, tolerating a previous test's panic.
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[test]
+    fn scheduled_configuration_rejects_duplicates_options_and_unbounded_polling() {
+        let job = shared::operations::ScheduledJobConfig {
+            name: "backup".into(),
+            service: "backup.service".into(),
+            timer: "backup.timer".into(),
+            max_interval_seconds: 3600,
+            status_file: None,
+            metric_prefix: None,
+        };
+        let mut config = Config {
+            scheduled_jobs: vec![job.clone()],
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+        config.scheduled_jobs.push(job);
+        assert!(config.validate().is_err());
+        config.scheduled_jobs.pop();
+        config.scheduled_jobs[0].service = "--help.service".into();
+        assert!(config.validate().is_ok()); // '--' terminates options in the collector.
+        config.scheduled_jobs[0].max_interval_seconds = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_save_load() {
+        let _env = env_guard();
+        let temp_file = NamedTempFile::new().unwrap();
+        let path = temp_file.path();
+
+        let config = Config {
+            update_interval_seconds: 10,
+            max_clients: 50,
+            enable_authentication: false,
+            log_level: "debug".to_string(),
+            access_token: "test-token".to_string(),
+            viewer_tokens: Vec::new(),
+            authorized_clients: Vec::new(),
+            postgres_clusters: Vec::new(),
+            mariadb_clusters: Vec::new(),
+            systemd_units: Vec::new(),
+            disk_policy: Default::default(),
+            scheduled_jobs: Vec::new(),
+            tls_certificate_dirs: Vec::new(),
+            tls: None,
+        };
+
+        config.save(path).unwrap();
+        let loaded_config = Config::load(path).unwrap();
+
+        assert_eq!(
+            config.update_interval_seconds,
+            loaded_config.update_interval_seconds
+        );
+        assert_eq!(config.max_clients, loaded_config.max_clients);
+        assert_eq!(
+            config.enable_authentication,
+            loaded_config.enable_authentication
+        );
+        assert_eq!(config.log_level, loaded_config.log_level);
+    }
+
+    #[test]
+    fn test_access_token_generation() {
+        let mut config = Config::default();
+        assert!(config.access_token.is_empty());
+        config.generate_access_token();
+        assert!(!config.access_token.is_empty());
+        assert!(config.access_token.len() >= 20);
+    }
+
+    #[test]
+    fn test_validate_access_token_disabled() {
+        let config = Config {
+            enable_authentication: false,
+            access_token: "secret".to_string(),
+            ..Default::default()
+        };
+        assert!(config.validate_access_token("anything"));
+    }
+
+    #[test]
+    fn test_validate_access_token_enabled_valid() {
+        let config = Config {
+            enable_authentication: true,
+            access_token: "secret".to_string(),
+            ..Default::default()
+        };
+        assert!(config.validate_access_token("secret"));
+    }
+
+    #[test]
+    fn test_validate_access_token_enabled_invalid() {
+        let config = Config {
+            enable_authentication: true,
+            access_token: "secret".to_string(),
+            ..Default::default()
+        };
+        assert!(!config.validate_access_token("wrong"));
+    }
+
+    #[test]
+    fn test_remove_authorized_client() {
+        let mut config = Config::default();
+        config.authorized_clients.push(AuthorizedClient {
+            name: "client-1".to_string(),
+            public_key: "pk1".to_string(),
+            authorized_at: "2024-01-01T00:00:00Z".to_string(),
+        });
+        config.authorized_clients.push(AuthorizedClient {
+            name: "client-2".to_string(),
+            public_key: "pk2".to_string(),
+            authorized_at: "2024-01-01T00:00:00Z".to_string(),
+        });
+
+        assert!(config.remove_authorized_client("client-1"));
+        assert_eq!(config.authorized_clients.len(), 1);
+        assert!(!config.remove_authorized_client("client-1"));
+    }
+
+    #[test]
+    fn test_add_authorized_client_deduplicate() {
+        let mut config = Config::default();
+        config.add_authorized_client("client-1".to_string(), "pk1".to_string());
+        config.add_authorized_client("client-1-again".to_string(), "pk1".to_string());
+        assert_eq!(config.authorized_clients.len(), 1);
+    }
+
+    #[test]
+    fn test_is_client_authorized_disabled() {
+        let config = Config {
+            enable_authentication: false,
+            ..Default::default()
+        };
+        assert!(config.is_client_authorized("any"));
+    }
+
+    #[test]
+    fn test_is_client_authorized_enabled() {
+        let mut config = Config {
+            enable_authentication: true,
+            ..Default::default()
+        };
+        config.authorized_clients.push(AuthorizedClient {
+            name: "client-1".to_string(),
+            public_key: "pk1".to_string(),
+            authorized_at: "2024-01-01T00:00:00Z".to_string(),
+        });
+        assert!(config.is_client_authorized("pk1"));
+        assert!(!config.is_client_authorized("pk2"));
+    }
+
+    #[test]
+    fn test_postgres_cluster_config_defaults() {
+        let config: PostgresClusterConfig = toml::from_str(
+            r#"
+            name = "test"
+        "#,
+        )
+        .unwrap();
+        assert_eq!(config.name, "test");
+        assert_eq!(config.host, "localhost");
+        assert_eq!(config.port, 5432);
+        assert_eq!(config.database, "postgres");
+        assert_eq!(config.user, "code-monitor");
+        assert!(config.enabled);
+    }
+
+    #[test]
+    fn test_mariadb_cluster_config_defaults() {
+        let config: MariaDBClusterConfig = toml::from_str(
+            r#"
+            name = "test"
+        "#,
+        )
+        .unwrap();
+        assert_eq!(config.name, "test");
+        assert_eq!(config.host, "localhost");
+        assert_eq!(config.port, 3306);
+        assert_eq!(config.user, "code-monitor");
+        assert!(config.enabled);
+    }
+
+    #[test]
+    fn test_config_default_values() {
+        let config = Config::default();
+        assert_eq!(config.update_interval_seconds, 5);
+        assert_eq!(config.max_clients, 100);
+        assert!(config.enable_authentication);
+        assert_eq!(config.log_level, "warn");
+        assert!(config.access_token.is_empty());
+        assert!(config.tls.is_none());
+    }
+
+    #[test]
+    fn test_config_load_creates_default_when_missing() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let path = temp_dir.path().join("nonexistent-config.toml");
+
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.update_interval_seconds, 5);
+        assert_eq!(config.max_clients, 100);
+        assert!(config.enable_authentication);
+        assert!(
+            !config.access_token.is_empty(),
+            "Token should be auto-generated"
+        );
+
+        // File should have been created
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn test_config_load_regenerates_empty_token() {
+        let _env = env_guard();
+        let temp_file = NamedTempFile::new().unwrap();
+        let path = temp_file.path();
+
+        let config = Config {
+            access_token: String::new(),
+            ..Default::default()
+        };
+        config.save(path).unwrap();
+
+        let loaded = Config::load(path).unwrap();
+        assert!(
+            !loaded.access_token.is_empty(),
+            "Empty token should be regenerated on load"
+        );
+    }
+
+    #[test]
+    fn test_config_full_roundtrip() {
+        let _env = env_guard();
+        let temp_file = NamedTempFile::new().unwrap();
+        let path = temp_file.path();
+
+        let config = Config {
+            update_interval_seconds: 30,
+            max_clients: 200,
+            enable_authentication: true,
+            log_level: "warn".to_string(),
+            access_token: "my-secret-token".to_string(),
+            viewer_tokens: vec!["viewer-token".to_string()],
+            authorized_clients: vec![AuthorizedClient {
+                name: "client-1".to_string(),
+                public_key: "abc123".to_string(),
+                authorized_at: "2024-06-01T12:00:00Z".to_string(),
+            }],
+            postgres_clusters: vec![PostgresClusterConfig {
+                name: "pg-main".to_string(),
+                host: "pg.example.com".to_string(),
+                port: 5433,
+                database: "app".to_string(),
+                user: "monitor".to_string(),
+                password: Some("secret".to_string()),
+                socket_path: Some("/run/pg".to_string()),
+                enabled: false,
+            }],
+            mariadb_clusters: vec![MariaDBClusterConfig {
+                name: "maria-main".to_string(),
+                host: "maria.example.com".to_string(),
+                port: 3307,
+                user: "monitor".to_string(),
+                password: Some("secret".to_string()),
+                socket_path: None,
+                enabled: true,
+            }],
+            disk_policy: Default::default(),
+            scheduled_jobs: vec![],
+            systemd_units: vec![
+                "nginx.service".to_string(),
+                "postgresql.service".to_string(),
+            ],
+            tls_certificate_dirs: vec!["/etc/letsencrypt/live".to_string()],
+            tls: Some(TlsConfig {
+                cert_path: "/etc/ssl/server.crt".to_string(),
+                key_path: "/etc/ssl/server.key".to_string(),
+                ca_path: Some("/etc/ssl/ca.crt".to_string()),
+            }),
+        };
+
+        config.save(path).unwrap();
+        let loaded = Config::load(path).unwrap();
+
+        assert_eq!(loaded.update_interval_seconds, 30);
+        assert_eq!(loaded.max_clients, 200);
+        assert_eq!(loaded.log_level, "warn");
+        assert_eq!(loaded.access_token, "my-secret-token");
+        assert_eq!(loaded.authorized_clients.len(), 1);
+        assert_eq!(loaded.postgres_clusters.len(), 1);
+        assert_eq!(loaded.mariadb_clusters.len(), 1);
+        assert_eq!(loaded.systemd_units.len(), 2);
+        assert!(loaded.tls.is_some());
+
+        let tls = loaded.tls.unwrap();
+        assert_eq!(tls.cert_path, "/etc/ssl/server.crt");
+        assert_eq!(tls.key_path, "/etc/ssl/server.key");
+        assert_eq!(tls.ca_path, Some("/etc/ssl/ca.crt".to_string()));
+
+        let pg = &loaded.postgres_clusters[0];
+        assert_eq!(pg.name, "pg-main");
+        assert_eq!(pg.host, "pg.example.com");
+        assert_eq!(pg.port, 5433);
+        assert_eq!(pg.database, "app");
+        assert_eq!(pg.user, "monitor");
+        assert_eq!(pg.password, Some("secret".to_string()));
+        assert_eq!(pg.socket_path, Some("/run/pg".to_string()));
+        assert!(!pg.enabled);
+
+        let maria = &loaded.mariadb_clusters[0];
+        assert_eq!(maria.name, "maria-main");
+        assert_eq!(maria.host, "maria.example.com");
+        assert_eq!(maria.port, 3307);
+        assert_eq!(maria.user, "monitor");
+        assert_eq!(maria.password, Some("secret".to_string()));
+        assert!(maria.enabled);
+    }
+
+    #[test]
+    fn test_tls_config_roundtrip() {
+        let _env = env_guard();
+        let tls = TlsConfig {
+            cert_path: "/certs/server.crt".to_string(),
+            key_path: "/certs/server.key".to_string(),
+            ca_path: None,
+        };
+
+        let serialized = toml::to_string_pretty(&tls).unwrap();
+        let deserialized: TlsConfig = toml::from_str(&serialized).unwrap();
+
+        assert_eq!(deserialized.cert_path, tls.cert_path);
+        assert_eq!(deserialized.key_path, tls.key_path);
+        assert_eq!(deserialized.ca_path, tls.ca_path);
+    }
+
+    #[test]
+    fn test_authorized_client_default_timestamp() {
+        let client = AuthorizedClient {
+            name: "test".to_string(),
+            public_key: "pk".to_string(),
+            authorized_at: default_timestamp(),
+        };
+        assert!(!client.authorized_at.is_empty());
+        assert!(client.authorized_at.contains('T'));
+    }
+
+    #[test]
+    fn test_add_authorized_client_new() {
+        let mut config = Config::default();
+        config.add_authorized_client("client-a".to_string(), "pk-a".to_string());
+        assert_eq!(config.authorized_clients.len(), 1);
+        assert_eq!(config.authorized_clients[0].name, "client-a");
+        assert_eq!(config.authorized_clients[0].public_key, "pk-a");
+    }
+
+    #[test]
+    fn test_is_client_authorized_empty_list() {
+        let config = Config {
+            enable_authentication: true,
+            ..Default::default()
+        };
+        assert!(!config.is_client_authorized("any-key"));
+    }
+
+    #[test]
+    fn test_postgres_cluster_config_with_overrides() {
+        let config: PostgresClusterConfig = toml::from_str(
+            r#"
+            name = "custom"
+            host = "203.0.113.50"
+            port = 5433
+            database = "metrics"
+            user = "admin"
+            enabled = false
+        "#,
+        )
+        .unwrap();
+        assert_eq!(config.name, "custom");
+        assert_eq!(config.host, "203.0.113.50");
+        assert_eq!(config.port, 5433);
+        assert_eq!(config.database, "metrics");
+        assert_eq!(config.user, "admin");
+        assert!(!config.enabled);
+    }
+
+    #[test]
+    fn test_mariadb_cluster_config_with_overrides() {
+        let config: MariaDBClusterConfig = toml::from_str(
+            r#"
+            name = "custom"
+            host = "203.0.113.60"
+            port = 3307
+            user = "admin"
+            enabled = false
+        "#,
+        )
+        .unwrap();
+        assert_eq!(config.name, "custom");
+        assert_eq!(config.host, "203.0.113.60");
+        assert_eq!(config.port, 3307);
+        assert_eq!(config.user, "admin");
+        assert!(!config.enabled);
+    }
+
+    #[test]
+    fn test_token_role_admin_and_viewer() {
+        let config = Config {
+            enable_authentication: true,
+            access_token: "admin-tok".to_string(),
+            viewer_tokens: vec!["viewer-tok".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(config.token_role("admin-tok"), Some(Role::Admin));
+        assert_eq!(config.token_role("viewer-tok"), Some(Role::Viewer));
+        assert_eq!(config.token_role("wrong"), None);
+        assert!(config.validate_access_token("viewer-tok"));
+        assert!(Role::Admin.can_write());
+        assert!(!Role::Viewer.can_write());
+    }
+
+    #[test]
+    fn test_token_role_auth_disabled_grants_admin() {
+        let config = Config {
+            enable_authentication: false,
+            ..Default::default()
+        };
+        assert_eq!(config.token_role("anything"), Some(Role::Admin));
+    }
+
+    #[test]
+    fn test_env_overrides() {
+        let _env = env_guard();
+        // The lock, not this ordering, is what prevents races: any concurrent
+        // Config::load would otherwise pick these up.
+        std::env::set_var("CODE_MONITOR_UPDATE_INTERVAL", "42");
+        std::env::set_var("CODE_MONITOR_MAX_CLIENTS", "7");
+        std::env::set_var("CODE_MONITOR_LOG_LEVEL", "warn");
+        std::env::set_var("CODE_MONITOR_ACCESS_TOKEN", "env-token");
+        std::env::set_var("CODE_MONITOR_ENABLE_AUTH", "false");
+
+        let mut config = Config::default();
+        config.apply_env_overrides();
+
+        std::env::remove_var("CODE_MONITOR_UPDATE_INTERVAL");
+        std::env::remove_var("CODE_MONITOR_MAX_CLIENTS");
+        std::env::remove_var("CODE_MONITOR_LOG_LEVEL");
+        std::env::remove_var("CODE_MONITOR_ACCESS_TOKEN");
+        std::env::remove_var("CODE_MONITOR_ENABLE_AUTH");
+
+        assert_eq!(config.update_interval_seconds, 42);
+        assert_eq!(config.max_clients, 7);
+        assert_eq!(config.log_level, "warn");
+        assert_eq!(config.access_token, "env-token");
+        assert!(!config.enable_authentication);
+    }
+
+    #[test]
+    fn test_validate_default_config() {
+        assert!(Config::default().validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_interval() {
+        let config = Config {
+            update_interval_seconds: 0,
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_invalid_max_clients() {
+        let config = Config {
+            max_clients: 0,
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+
+        let config = Config {
+            max_clients: 20_000,
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_invalid_log_level() {
+        let config = Config {
+            log_level: "verbose".to_string(),
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_port_cluster() {
+        let mut config = Config::default();
+        config.postgres_clusters.push(PostgresClusterConfig {
+            name: "bad".to_string(),
+            host: "localhost".to_string(),
+            port: 0,
+            database: "postgres".to_string(),
+            user: "code-monitor".to_string(),
+            password: None,
+            socket_path: None,
+            enabled: true,
+        });
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_tls_paths() {
+        let config = Config {
+            tls: Some(TlsConfig {
+                cert_path: "".to_string(),
+                key_path: "/etc/ssl/key.pem".to_string(),
+                ca_path: None,
+            }),
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_load_rejects_invalid_values() {
+        let _env = env_guard();
+        let temp_file = NamedTempFile::new().unwrap();
+        let path = temp_file.path();
+
+        let config = Config {
+            update_interval_seconds: 0,
+            access_token: "tok".to_string(),
+            ..Default::default()
+        };
+        config.save(path).unwrap();
+        assert!(Config::load(path).is_err());
+    }
+
+    #[test]
+    fn test_generated_token_is_unique() {
+        let mut a = Config::default();
+        let mut b = Config::default();
+        a.generate_access_token();
+        b.generate_access_token();
+        assert_ne!(a.access_token, b.access_token);
+        // 32 random bytes -> 43 chars of URL-safe base64 without padding
+        assert_eq!(a.access_token.len(), 43);
+    }
+
+    #[test]
+    fn test_config_load_invalid_toml() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let path = temp_file.path();
+        fs::write(path, "this is not valid toml [[[").unwrap();
+        let result = Config::load(path);
+        assert!(result.is_err());
+    }
+    #[test]
+    fn test_valid_cluster_ports_and_nonempty_tls_paths() {
+        let mut config = Config::default();
+        config
+            .postgres_clusters
+            .push(toml::from_str("name = 'unit-pg'").unwrap());
+        config
+            .mariadb_clusters
+            .push(toml::from_str("name = 'unit-maria'").unwrap());
+        config.tls = Some(TlsConfig {
+            cert_path: "unit-cert.pem".into(),
+            key_path: "unit-key.pem".into(),
+            ca_path: None,
+        });
+        assert!(config.validate().is_ok());
+    }
+    #[test]
+    fn test_invalid_mariadb_port_and_empty_tls_key() {
+        let mut config = Config::default();
+        let mut cluster: MariaDBClusterConfig = toml::from_str("name = 'unit'").unwrap();
+        cluster.port = 0;
+        config.mariadb_clusters.push(cluster);
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("mariadb cluster 'unit' has invalid port 0"));
+        config.mariadb_clusters.clear();
+        config.tls = Some(TlsConfig {
+            cert_path: "unit.pem".into(),
+            key_path: " ".into(),
+            ca_path: None,
+        });
+        assert_eq!(
+            config.validate().unwrap_err().to_string(),
+            "tls.key_path must not be empty when TLS is configured"
+        );
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/config_io_units.rs"]
+pub(crate) mod campaign_io_units;

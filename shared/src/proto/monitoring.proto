@@ -1,0 +1,450 @@
+syntax = "proto3";
+
+package monitoring;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+
+// System monitoring service
+service MonitorService {
+    // Get current system information
+    rpc GetSystemInfo(google.protobuf.Empty) returns (SystemInfoResponse);
+    
+    // Get running processes
+    rpc GetProcesses(ProcessesRequest) returns (ProcessesResponse);
+    
+    // Get service information
+    rpc GetServices(google.protobuf.Empty) returns (ServicesResponse);
+    
+    // Get network information
+    rpc GetNetworkInfo(google.protobuf.Empty) returns (NetworkInfoResponse);
+    
+    // Get Docker containers
+    rpc GetContainers(ContainersRequest) returns (ContainersResponse);
+    
+    // Get Postgres cluster info
+    rpc GetPostgresInfo(google.protobuf.Empty) returns (PostgresInfoResponse);
+    
+    // Get MariaDB cluster info
+    rpc GetMariaDBInfo(google.protobuf.Empty) returns (MariaDBInfoResponse);
+    
+    // Get systemd units info
+    rpc GetSystemdInfo(google.protobuf.Empty) returns (SystemdInfoResponse);
+
+    // Get TLS certificate inventory and renewal health
+    rpc GetTlsInfo(google.protobuf.Empty) returns (TlsInfoResponse);
+
+    // Get sockets in the listening state and how widely they are bound
+    rpc GetListeningPorts(google.protobuf.Empty) returns (ListeningPortsResponse);
+
+    // Stream system updates
+    rpc StreamSystemUpdates(UpdatesRequest) returns (stream SystemUpdate);
+    
+}
+
+// System information response
+message SystemInfoResponse {
+    string hostname = 1;
+    string os = 2;
+    string kernel_version = 3;
+    uint64 uptime_seconds = 4;
+    uint32 cpu_count = 5;
+    double cpu_usage_percent = 6;
+    uint64 memory_total_bytes = 7;
+    uint64 memory_used_bytes = 8;
+    uint64 memory_available_bytes = 9;
+    repeated DiskInfo disk_info = 10;
+    google.protobuf.Timestamp timestamp = 11;
+
+    uint64 swap_total_bytes = 12;
+    uint64 swap_used_bytes = 13;
+
+    // Paging rate, derived from /proc/vmstat. Unlike swap occupancy — which is
+    // a historical high-water mark — this measures pressure happening now.
+    double swap_in_pages_per_sec = 14;
+    double swap_out_pages_per_sec = 15;
+
+    // Memory pressure from /proc/pressure/memory. Absent on kernels built
+    // without CONFIG_PSI.
+    optional double psi_memory_some_avg60 = 16;
+    optional double psi_memory_full_avg60 = 17;
+    // Cumulative stall time, the fairest way to compare two hosts
+    optional double psi_memory_full_total_seconds = 18;
+}
+
+// Disk information
+message DiskInfo {
+    string device = 1;
+    string mount_point = 2;
+    string filesystem_type = 3;
+    uint64 total_bytes = 4;
+    uint64 used_bytes = 5;
+    uint64 available_bytes = 6;
+    double usage_percent = 7;
+}
+
+// Processes request
+message ProcessesRequest {
+    uint32 limit = 1;
+    string filter = 2;
+}
+
+// Processes response
+message ProcessesResponse {
+    repeated ProcessInfo processes = 1;
+    google.protobuf.Timestamp timestamp = 2;
+}
+
+// Process information
+message ProcessInfo {
+    uint32 pid = 1;
+    string name = 2;
+    string user = 3;
+    double cpu_usage_percent = 4;
+    uint64 memory_usage_bytes = 5;
+    string command_line = 6;
+    google.protobuf.Timestamp start_time = 7;
+    string status = 8;
+    // VmSwap from /proc/[pid]/status. Absent where the platform cannot report
+    // it, which is not the same as zero.
+    optional uint64 swap_bytes = 9;
+}
+
+// Services response
+message ServicesResponse {
+    repeated ServiceInfo services = 1;
+    google.protobuf.Timestamp timestamp = 2;
+}
+
+// Service information
+message ServiceInfo {
+    string name = 1;
+    string status = 2;
+    uint32 pid = 3;
+    double cpu_usage_percent = 4;
+    uint64 memory_usage_bytes = 5;
+    string user = 6;
+    uint64 uptime_seconds = 7;
+}
+
+// Network information response
+message NetworkInfoResponse {
+    repeated NetworkInfo interfaces = 1;
+    google.protobuf.Timestamp timestamp = 2;
+}
+
+// Network information
+message NetworkInfo {
+    string interface = 1;
+    string ip_address = 2;
+    string mac_address = 3;
+    bool is_up = 4;
+    uint64 bytes_sent = 5;
+    uint64 bytes_received = 6;
+    uint64 packets_sent = 7;
+    uint64 packets_received = 8;
+}
+
+// Updates request
+message UpdatesRequest {
+    uint64 update_interval_seconds = 1;
+}
+
+// Container information
+message ContainerInfo {
+    string id = 1;
+    string name = 2;
+    string image = 3;
+    string status = 4;
+    string state = 5;
+    string health = 6;
+    double cpu_percent = 7;
+    uint64 memory_usage_bytes = 8;
+    uint64 memory_limit_bytes = 9;
+    // Absent when the container has no memory limit. Docker reports the host's
+    // total RAM as the limit in that case, which makes an unprotected container
+    // look comfortable; a missing value says so honestly.
+    optional double memory_percent = 10;
+    uint32 restart_count = 11;
+    uint64 network_rx_bytes = 12;
+    uint64 network_tx_bytes = 13;
+    repeated string networks = 14;
+
+    // Whether HostConfig.Memory is actually set
+    bool memory_limit_set = 15;
+
+    // Health check detail, needed to tell a sick app from a broken healthcheck
+    uint32 failing_streak = 16;
+    string last_health_output = 17;
+    int32 last_health_exit_code = 18;
+    google.protobuf.Timestamp last_health_checked_at = 19;
+
+    // Swap held by the container's processes. Absent where unavailable.
+    optional uint64 swap_bytes = 20;
+
+    // Image drift status against remote registry
+    optional ImageVersionInfo image_version = 21;
+}
+
+// Status of image version comparison
+enum ImageVersionStatus {
+    IMAGE_VERSION_STATUS_UNKNOWN = 0;
+    IMAGE_VERSION_STATUS_UP_TO_DATE = 1;
+    IMAGE_VERSION_STATUS_DRIFTED = 2;
+    IMAGE_VERSION_STATUS_LOCAL_BUILD = 3;
+}
+
+// Container image version check info
+message ImageVersionInfo {
+    string image_ref = 1;
+    string registry = 2;
+    string repository = 3;
+    string tag = 4;
+    optional string local_digest = 5;
+    optional string remote_digest = 6;
+    ImageVersionStatus status = 7;
+    google.protobuf.Timestamp checked_at = 8;
+    optional string error = 9;
+}
+
+// Containers request
+message ContainersRequest {
+    string filter = 1;
+}
+
+// Containers response
+message ContainersResponse {
+    repeated ContainerInfo containers = 1;
+    google.protobuf.Timestamp timestamp = 2;
+}
+
+// Postgres database info
+message PostgresDatabaseInfo {
+    string name = 1;
+    uint64 size_bytes = 2;
+    uint32 num_backends = 3;
+    double cache_hit_ratio = 4;
+
+    // Transactions since the statistics were last reset. Unlike a table's
+    // update time — NULL on InnoDB and unavailable here — this is a reliable
+    // proxy for whether anything still uses the database.
+    uint64 transactions = 5;
+    // When the counters were last reset, so "zero transactions" can be read
+    // against how long it has been zero
+    google.protobuf.Timestamp stats_reset_at = 6;
+}
+
+// Connection state count
+message ConnectionStateCount {
+    string state = 1;
+    uint32 count = 2;
+}
+
+// Top query info
+message TopQuery {
+    string query = 1;
+    uint64 calls = 2;
+    double total_exec_time_ms = 3;
+    double mean_exec_time_ms = 4;
+}
+
+// A single postgres runtime setting and where its value came from
+message PostgresSetting {
+    string name = 1;
+    string value = 2;
+    string unit = 3;
+    // How postgres resolved it: default, configuration file, command line,
+    // database, override...
+    string source = 4;
+    // The file that actually supplied it. ALTER SYSTEM writes to
+    // postgresql.auto.conf, which overrides postgresql.conf — reading the
+    // latter alone leads to the wrong conclusion.
+    string source_file = 5;
+    int32 source_line = 6;
+}
+
+// Postgres cluster info
+message PostgresClusterInfo {
+    string name = 1;
+    string host = 2;
+    uint32 port = 3;
+    repeated PostgresDatabaseInfo databases = 4;
+    uint32 connections_total = 5;
+    repeated ConnectionStateCount connections_by_state = 6;
+    double cache_hit_ratio = 7;
+    repeated TopQuery top_queries = 8;
+    google.protobuf.Timestamp timestamp = 9;
+    repeated PostgresSetting settings = 10;
+}
+
+// Postgres info response
+message PostgresInfoResponse {
+    repeated PostgresClusterInfo clusters = 1;
+    google.protobuf.Timestamp timestamp = 2;
+}
+
+// MariaDB schema info
+message MariaDBSchemaInfo {
+    string name = 1;
+    uint64 size_bytes = 2;
+    uint32 table_count = 3;
+
+    // Latest write across the schema's tables, when the engine reports one.
+    // InnoDB leaves update_time NULL, so its absence proves nothing and must
+    // not be read as "never written".
+    google.protobuf.Timestamp last_write_at = 4;
+    // Whether any table could report a write time at all
+    bool write_time_available = 5;
+}
+
+// MariaDB process info
+message MariaDBProcessInfo {
+    uint64 id = 1;
+    string user = 2;
+    string host = 3;
+    string db = 4;
+    string command = 5;
+    uint32 time_seconds = 6;
+    string state = 7;
+    string info = 8;
+}
+
+// MariaDB cluster info
+message MariaDBClusterInfo {
+    string name = 1;
+    string host = 2;
+    uint32 port = 3;
+    repeated MariaDBSchemaInfo schemas = 4;
+    uint32 connections_active = 5;
+    uint32 connections_total = 6;
+    string innodb_status = 7;
+    repeated MariaDBProcessInfo processes = 8;
+    google.protobuf.Timestamp timestamp = 9;
+}
+
+// MariaDB info response
+message MariaDBInfoResponse {
+    repeated MariaDBClusterInfo clusters = 1;
+    google.protobuf.Timestamp timestamp = 2;
+}
+
+// Systemd unit info
+message SystemdUnitInfo {
+    string name = 1;
+    string status = 2;
+    bool is_active = 3;
+    uint32 pid = 4;
+    uint64 memory_current_bytes = 5;
+    google.protobuf.Timestamp started_at = 6;
+}
+
+// A systemd unit currently in the "failed" state.
+//
+// Reported for every failed unit on the host, independently of the units
+// configured for monitoring.
+message SystemdFailedUnit {
+    string name = 1;
+    string description = 2;
+    // When the unit entered its current state, if systemd reports it
+    google.protobuf.Timestamp since = 3;
+}
+
+// Systemd info response
+message SystemdInfoResponse {
+    repeated SystemdUnitInfo units = 1;
+    google.protobuf.Timestamp timestamp = 2;
+    repeated SystemdFailedUnit failed_units = 3;
+    repeated ScheduledJobInfo scheduled_jobs = 4;
+    bool scheduled_jobs_supported = 5;
+}
+
+// Read-only scheduled job evidence. Zero timestamps mean unknown.
+message ScheduledJobInfo {
+    string name = 1;
+    string service = 2;
+    string timer = 3;
+    uint64 max_interval_seconds = 4;
+    bool collection_up = 5;
+    bool timer_active = 6;
+    bool running = 7;
+    int64 last_run = 8;
+    int64 last_success = 9;
+    int64 next_run = 10;
+    string result = 11;
+    int32 exit_code = 12;
+}
+
+// A TLS certificate found on the host
+message TlsCertificateInfo {
+    // Certificate name, typically the lineage or the probed endpoint
+    string name = 1;
+    // Subject Alternative Names
+    repeated string domains = 2;
+    string issuer = 3;
+    google.protobuf.Timestamp not_after = 4;
+    // Negative once expired
+    int64 days_until_expiry = 5;
+    // Where it came from: a file path, or host:port when probed over TLS
+    string source = 6;
+    // Renewed forever although no active vhost serves it
+    bool orphaned = 7;
+}
+
+// TLS info response
+message TlsInfoResponse {
+    repeated TlsCertificateInfo certificates = 1;
+    google.protobuf.Timestamp timestamp = 2;
+    // State of the renewal unit (certbot.timer/service), when one is present.
+    // A broken renewal is what turns a healthy certificate into an outage.
+    optional string renewal_unit_name = 3;
+    optional string renewal_unit_status = 4;
+}
+
+// How widely a listening socket is bound
+enum BindScope {
+    BIND_SCOPE_UNSPECIFIED = 0;
+    // 127.0.0.0/8 or ::1 — reachable only from the host
+    BIND_SCOPE_LOOPBACK = 1;
+    // RFC1918 or other private address, such as a VPN interface
+    BIND_SCOPE_PRIVATE = 2;
+    // 0.0.0.0 or :: — every interface, including any public one
+    BIND_SCOPE_ALL_INTERFACES = 3;
+    // A specific routable address: bound to one interface, but still reachable
+    // from outside the host
+    BIND_SCOPE_PUBLIC = 4;
+}
+
+// A socket in the listening state
+message ListeningPortInfo {
+    string address = 1;
+    uint32 port = 2;
+    // tcp or tcp6
+    string protocol = 3;
+    BindScope bind_scope = 4;
+    uint32 pid = 5;
+    string process_name = 6;
+    // A well-known database, cache or search port, which has no business
+    // listening on every interface
+    bool sensitive = 7;
+}
+
+// Listening ports response
+message ListeningPortsResponse {
+    repeated ListeningPortInfo ports = 1;
+    google.protobuf.Timestamp timestamp = 2;
+}
+
+// System update (for streaming)
+message SystemUpdate {
+    oneof update_type {
+        SystemInfoResponse system_info = 1;
+        ProcessInfo process_update = 2;
+        ServiceInfo service_update = 3;
+        NetworkInfo network_update = 4;
+        ContainerInfo container_update = 5;
+        PostgresClusterInfo postgres_update = 6;
+        MariaDBClusterInfo mariadb_update = 7;
+        SystemdUnitInfo systemd_update = 8;
+    }
+    google.protobuf.Timestamp timestamp = 9;
+}

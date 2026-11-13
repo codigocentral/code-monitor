@@ -1,0 +1,38 @@
+groups:
+  - name: code_monitor_disk_jobs
+    rules:
+      - alert: CodeMonitorDiskPressureWarning
+        expr: code_monitor_finding{check="disk_pressure",severity="warning"} == 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Disk pressure on {{ $labels.host }} {{ $labels.target }}'
+      - alert: CodeMonitorDiskPressureCritical
+        expr: code_monitor_finding{check="disk_pressure",severity="critical"} == 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Critical disk pressure on {{ $labels.host }} {{ $labels.target }}'
+      - alert: CodeMonitorScheduledJobFailed
+        expr: code_monitor_finding{check=~"scheduled_job_failed|scheduled_job_disabled"} == 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Scheduled job failed or disabled on {{ $labels.host }}: {{ $labels.target }}'
+      - alert: CodeMonitorScheduledJobOverdue
+        expr: code_monitor_finding{check="scheduled_job_overdue"} == 1
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Scheduled job overdue on {{ $labels.host }}: {{ $labels.target }}'
+      - alert: CodeMonitorScheduledJobUnavailable
+        expr: code_monitor_scheduled_job_collection_up == 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Scheduled job evidence unavailable on {{ $labels.host }}: {{ $labels.job_name }}'

@@ -1,0 +1,718 @@
+//! Client implementation for connecting to monitoring servers
+//!
+//! This module handles the gRPC communication with monitoring servers
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+use crate::unit_grpc::{Channel, MonitorServiceClient, Streaming};
+use anyhow::{Context, Result};
+use chrono::{DateTime, TimeZone, Utc};
+#[cfg(any(not(test), not(feature = "unit-doubles")))]
+use shared::proto::monitoring::monitor_service_client::MonitorServiceClient;
+use shared::proto::monitoring::{
+    ImageVersionStatus as ProtoImageVersionStatus, ProcessesRequest, SystemUpdate, UpdatesRequest,
+};
+use shared::types::{
+    BindScope, ConnectionStateCount, ContainerHealthDetail, ContainerInfo, DiskInfo,
+    ListeningPortInfo, MariaDBClusterInfo, MariaDBProcessInfo, MariaDBSchemaInfo, MemoryPressure,
+    NetworkInfo, PostgresClusterInfo, PostgresDatabaseInfo, PostgresSetting, ProcessInfo,
+    ServiceInfo, ServiceStatus, SwapInfo, SystemInfo, SystemdFailedUnit, SystemdSnapshot,
+    SystemdUnitInfo, TlsCertificateInfo, TlsSnapshot, TopQuery,
+};
+use tonic::metadata::MetadataValue;
+#[cfg(any(not(test), not(feature = "unit-doubles")))]
+use tonic::{transport::Channel, Streaming};
+use tracing::info;
+#[cfg(any(not(test), not(feature = "unit-doubles")))]
+const NOW: fn() -> DateTime<Utc> = Utc::now;
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+const NOW: fn() -> DateTime<Utc> = crate::unit_sqlite::now;
+
+fn timestamp_to_datetime(ts: prost_types::Timestamp) -> DateTime<Utc> {
+    Utc.timestamp_opt(ts.seconds, ts.nanos as u32)
+        .single()
+        .unwrap_or_else(NOW)
+}
+
+pub struct MonitorClient {
+    channel: Channel,
+    #[allow(dead_code)]
+    update_interval: u64,
+    auto_reconnect: bool,
+    /// Access token for authentication
+    access_token: Option<String>,
+}
+
+impl MonitorClient {
+    pub async fn connect(
+        server_address: &str,
+        update_interval: u64,
+        auto_reconnect: bool,
+    ) -> Result<Self> {
+        Self::connect_with_token(server_address, update_interval, auto_reconnect, None, None).await
+    }
+
+    pub async fn connect_with_token(
+        server_address: &str,
+        update_interval: u64,
+        auto_reconnect: bool,
+        access_token: Option<&str>,
+        tls_config: Option<&shared::types::ClientTlsConfig>,
+    ) -> Result<Self> {
+        let endpoint =
+            Channel::from_shared(server_address.to_string()).context("Invalid server address")?;
+
+        let (endpoint, custom_connector) = if let Some(tls) = tls_config {
+            if crate::tls::is_tls_valid(Some(tls)) {
+                let setup = crate::tls::configure_tls(endpoint, tls)?;
+                (setup.endpoint, setup.connector)
+            } else {
+                (endpoint, None)
+            }
+        } else {
+            (endpoint, None)
+        };
+
+        let channel = if let Some(connector) = custom_connector {
+            endpoint
+                .connect_with_connector(connector)
+                .await
+                .context("Failed to connect to server")?
+        } else {
+            endpoint
+                .connect()
+                .await
+                .context("Failed to connect to server")?
+        };
+
+        info!("Connected to monitoring server at {}", server_address);
+
+        Ok(Self {
+            channel,
+            update_interval,
+            auto_reconnect,
+            access_token: access_token.map(String::from),
+        })
+    }
+
+    /// Set the access token for this client
+    #[allow(dead_code)]
+    pub fn set_access_token(&mut self, token: Option<String>) {
+        self.access_token = token;
+    }
+
+    /// Create a request with authentication metadata
+    fn create_request<T>(&self, payload: T) -> tonic::Request<T> {
+        Self::create_request_with_token(payload, self.access_token.as_deref())
+    }
+
+    /// Create a request with optional authentication token
+    fn create_request_with_token<T>(payload: T, access_token: Option<&str>) -> tonic::Request<T> {
+        let mut request = tonic::Request::new(payload);
+
+        if let Some(token) = access_token {
+            if let Ok(value) = MetadataValue::try_from(token) {
+                request.metadata_mut().insert("x-access-token", value);
+            }
+        }
+
+        request
+    }
+
+    pub fn is_auto_reconnect(&self) -> bool {
+        self.auto_reconnect
+    }
+
+    /// Build a gRPC client with gzip compression enabled in both directions
+    fn grpc_client(&self) -> MonitorServiceClient<Channel> {
+        MonitorServiceClient::new(self.channel.clone())
+            .send_compressed(tonic::codec::CompressionEncoding::Gzip)
+            .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+    }
+
+    pub async fn get_system_info(&mut self) -> Result<SystemInfo> {
+        let mut client = self.grpc_client();
+
+        let request = self.create_request(());
+        let response = client
+            .get_system_info(request)
+            .await
+            .context("Failed to get system info")?;
+
+        let resp = response.into_inner();
+
+        let disk_info: Vec<DiskInfo> = resp
+            .disk_info
+            .into_iter()
+            .map(|disk| DiskInfo {
+                device: disk.device,
+                mount_point: disk.mount_point,
+                filesystem_type: disk.filesystem_type,
+                total_bytes: disk.total_bytes,
+                used_bytes: disk.used_bytes,
+                available_bytes: disk.available_bytes,
+                usage_percent: disk.usage_percent,
+            })
+            .collect();
+
+        let system_info = SystemInfo {
+            hostname: resp.hostname,
+            os: resp.os,
+            kernel_version: resp.kernel_version,
+            uptime_seconds: resp.uptime_seconds,
+            cpu_count: resp.cpu_count,
+            cpu_usage_percent: resp.cpu_usage_percent,
+            memory_total_bytes: resp.memory_total_bytes,
+            memory_used_bytes: resp.memory_used_bytes,
+            memory_available_bytes: resp.memory_available_bytes,
+            disk_info,
+            timestamp: resp
+                .timestamp
+                .map(timestamp_to_datetime)
+                .unwrap_or_else(NOW),
+            swap: SwapInfo {
+                total_bytes: resp.swap_total_bytes,
+                used_bytes: resp.swap_used_bytes,
+                in_pages_per_sec: resp.swap_in_pages_per_sec,
+                out_pages_per_sec: resp.swap_out_pages_per_sec,
+            },
+            // PSI is only present when the server's kernel reports it; all
+            // three fields travel together.
+            memory_pressure: match (
+                resp.psi_memory_some_avg60,
+                resp.psi_memory_full_avg60,
+                resp.psi_memory_full_total_seconds,
+            ) {
+                (Some(some_avg60), Some(full_avg60), Some(full_total_seconds)) => {
+                    Some(MemoryPressure {
+                        some_avg60,
+                        full_avg60,
+                        full_total_seconds,
+                    })
+                }
+                _ => None,
+            },
+        };
+
+        Ok(system_info)
+    }
+
+    pub async fn get_processes(
+        &mut self,
+        limit: u32,
+        filter: Option<String>,
+    ) -> Result<Vec<ProcessInfo>> {
+        let mut client = self.grpc_client();
+
+        let request = self.create_request(ProcessesRequest {
+            limit,
+            filter: filter.unwrap_or_default(),
+        });
+
+        let response = client
+            .get_processes(request)
+            .await
+            .context("Failed to get processes")?;
+
+        let resp = response.into_inner();
+
+        let processes: Vec<ProcessInfo> = resp
+            .processes
+            .into_iter()
+            .map(|proc| ProcessInfo {
+                pid: proc.pid,
+                name: proc.name,
+                user: proc.user,
+                cpu_usage_percent: proc.cpu_usage_percent,
+                memory_usage_bytes: proc.memory_usage_bytes,
+                command_line: proc.command_line,
+                start_time: proc
+                    .start_time
+                    .map(timestamp_to_datetime)
+                    .unwrap_or_else(NOW),
+                status: proc.status,
+                swap_bytes: proc.swap_bytes,
+            })
+            .collect();
+
+        Ok(processes)
+    }
+
+    pub async fn get_services(&mut self) -> Result<Vec<ServiceInfo>> {
+        let mut client = self.grpc_client();
+
+        let request = self.create_request(());
+        let response = client
+            .get_services(request)
+            .await
+            .context("Failed to get services")?;
+
+        let resp = response.into_inner();
+
+        let services: Vec<ServiceInfo> = resp
+            .services
+            .into_iter()
+            .map(|service| ServiceInfo {
+                name: service.name,
+                status: match service.status.as_str() {
+                    "Running" => ServiceStatus::Running,
+                    "Stopped" => ServiceStatus::Stopped,
+                    "Failed" => ServiceStatus::Failed,
+                    _ => ServiceStatus::Unknown,
+                },
+                pid: if service.pid > 0 {
+                    Some(service.pid)
+                } else {
+                    None
+                },
+                cpu_usage_percent: service.cpu_usage_percent,
+                memory_usage_bytes: service.memory_usage_bytes,
+                user: service.user,
+                uptime_seconds: if service.uptime_seconds > 0 {
+                    Some(service.uptime_seconds)
+                } else {
+                    None
+                },
+            })
+            .collect();
+
+        Ok(services)
+    }
+
+    pub async fn get_network_info(&mut self) -> Result<Vec<NetworkInfo>> {
+        let mut client = self.grpc_client();
+
+        let request = self.create_request(());
+        let response = client
+            .get_network_info(request)
+            .await
+            .context("Failed to get network info")?;
+
+        let resp = response.into_inner();
+
+        let networks: Vec<NetworkInfo> = resp
+            .interfaces
+            .into_iter()
+            .map(|net| NetworkInfo {
+                interface: net.interface,
+                ip_address: net.ip_address,
+                mac_address: net.mac_address,
+                is_up: net.is_up,
+                bytes_sent: net.bytes_sent,
+                bytes_received: net.bytes_received,
+                packets_sent: net.packets_sent,
+                packets_received: net.packets_received,
+            })
+            .collect();
+
+        Ok(networks)
+    }
+
+    pub async fn get_containers(&mut self, filter: Option<String>) -> Result<Vec<ContainerInfo>> {
+        let mut client = self.grpc_client();
+
+        let request = self.create_request(shared::proto::monitoring::ContainersRequest {
+            filter: filter.unwrap_or_default(),
+        });
+        let response = client
+            .get_containers(request)
+            .await
+            .context("Failed to get containers")?;
+
+        let resp = response.into_inner();
+
+        let containers: Vec<ContainerInfo> = resp
+            .containers
+            .into_iter()
+            .map(|c| ContainerInfo {
+                id: c.id,
+                name: c.name,
+                image: c.image,
+                status: c.status,
+                state: c.state,
+                health: c.health,
+                cpu_percent: c.cpu_percent,
+                memory_usage_bytes: c.memory_usage_bytes,
+                memory_limit_bytes: c.memory_limit_bytes,
+                memory_percent: c.memory_percent,
+                restart_count: c.restart_count,
+                network_rx_bytes: c.network_rx_bytes,
+                network_tx_bytes: c.network_tx_bytes,
+                networks: c.networks,
+                memory_limit_set: c.memory_limit_set,
+                health_detail: Some(ContainerHealthDetail {
+                    failing_streak: c.failing_streak,
+                    last_output: c.last_health_output,
+                    last_exit_code: c.last_health_exit_code,
+                    last_checked_at: c.last_health_checked_at.map(timestamp_to_datetime),
+                })
+                .filter(|h| h.failing_streak > 0 || !h.last_output.is_empty()),
+                swap_bytes: c.swap_bytes,
+                image_version: c.image_version.map(|v| {
+                    let status = match v.status() {
+                        ProtoImageVersionStatus::UpToDate => shared::types::VersionStatus::UpToDate,
+                        ProtoImageVersionStatus::Drifted => shared::types::VersionStatus::Drifted,
+                        ProtoImageVersionStatus::LocalBuild => {
+                            shared::types::VersionStatus::LocalBuild
+                        }
+                        _ => shared::types::VersionStatus::Unknown,
+                    };
+                    shared::types::ImageVersionInfo {
+                        image_ref: v.image_ref,
+                        registry: v.registry,
+                        repository: v.repository,
+                        tag: v.tag,
+                        local_digest: v.local_digest,
+                        remote_digest: v.remote_digest,
+                        status,
+                        checked_at: v.checked_at.map(timestamp_to_datetime),
+                        error: v.error,
+                    }
+                }),
+            })
+            .collect();
+
+        Ok(containers)
+    }
+
+    pub async fn get_postgres_info(&mut self) -> Result<Vec<PostgresClusterInfo>> {
+        let mut client = self.grpc_client();
+
+        let request = self.create_request(());
+        let response = client
+            .get_postgres_info(request)
+            .await
+            .context("Failed to get postgres info")?;
+
+        let resp = response.into_inner();
+
+        let clusters: Vec<PostgresClusterInfo> = resp
+            .clusters
+            .into_iter()
+            .map(|c| PostgresClusterInfo {
+                name: c.name,
+                host: c.host,
+                port: c.port as u16,
+                databases: c
+                    .databases
+                    .into_iter()
+                    .map(|d| PostgresDatabaseInfo {
+                        transactions: d.transactions,
+                        stats_reset_at: d.stats_reset_at.map(timestamp_to_datetime),
+                        name: d.name,
+                        size_bytes: d.size_bytes,
+                        num_backends: d.num_backends,
+                        cache_hit_ratio: d.cache_hit_ratio,
+                    })
+                    .collect(),
+                connections_total: c.connections_total,
+                connections_by_state: c
+                    .connections_by_state
+                    .into_iter()
+                    .map(|s| ConnectionStateCount {
+                        state: s.state,
+                        count: s.count,
+                    })
+                    .collect(),
+                cache_hit_ratio: c.cache_hit_ratio,
+                top_queries: c
+                    .top_queries
+                    .into_iter()
+                    .map(|q| TopQuery {
+                        query: q.query,
+                        calls: q.calls,
+                        total_exec_time_ms: q.total_exec_time_ms,
+                        mean_exec_time_ms: q.mean_exec_time_ms,
+                    })
+                    .collect(),
+                timestamp: c.timestamp.map(timestamp_to_datetime).unwrap_or_else(NOW),
+                settings: c
+                    .settings
+                    .into_iter()
+                    .map(|setting| PostgresSetting {
+                        name: setting.name,
+                        value: setting.value,
+                        unit: Some(setting.unit).filter(|u| !u.is_empty()),
+                        source: setting.source,
+                        source_file: Some(setting.source_file).filter(|f| !f.is_empty()),
+                        source_line: if setting.source_line > 0 {
+                            Some(setting.source_line)
+                        } else {
+                            None
+                        },
+                    })
+                    .collect(),
+            })
+            .collect();
+
+        Ok(clusters)
+    }
+
+    pub async fn get_mariadb_info(&mut self) -> Result<Vec<MariaDBClusterInfo>> {
+        let mut client = self.grpc_client();
+
+        let request = self.create_request(());
+        let response = client
+            .get_maria_db_info(request)
+            .await
+            .context("Failed to get MariaDB info")?;
+
+        let resp = response.into_inner();
+
+        let clusters: Vec<MariaDBClusterInfo> = resp
+            .clusters
+            .into_iter()
+            .map(|c| MariaDBClusterInfo {
+                name: c.name,
+                host: c.host,
+                port: c.port as u16,
+                schemas: c
+                    .schemas
+                    .into_iter()
+                    .map(|s| MariaDBSchemaInfo {
+                        last_write_at: s.last_write_at.map(timestamp_to_datetime),
+                        write_time_available: s.write_time_available,
+                        name: s.name,
+                        size_bytes: s.size_bytes,
+                        table_count: s.table_count,
+                    })
+                    .collect(),
+                connections_active: c.connections_active,
+                connections_total: c.connections_total,
+                innodb_status: if c.innodb_status.is_empty() {
+                    None
+                } else {
+                    Some(c.innodb_status)
+                },
+                processes: c
+                    .processes
+                    .into_iter()
+                    .map(|p| MariaDBProcessInfo {
+                        id: p.id,
+                        user: p.user,
+                        host: p.host,
+                        db: if p.db.is_empty() { None } else { Some(p.db) },
+                        command: p.command,
+                        time_seconds: p.time_seconds,
+                        state: p.state,
+                        info: if p.info.is_empty() {
+                            None
+                        } else {
+                            Some(p.info)
+                        },
+                    })
+                    .collect(),
+                timestamp: c.timestamp.map(timestamp_to_datetime).unwrap_or_else(NOW),
+            })
+            .collect();
+
+        Ok(clusters)
+    }
+
+    pub async fn get_systemd_info(&mut self) -> Result<SystemdSnapshot> {
+        let mut client = self.grpc_client();
+
+        let request = self.create_request(());
+        let response = client
+            .get_systemd_info(request)
+            .await
+            .context("Failed to get systemd info")?;
+
+        let resp = response.into_inner();
+
+        let units: Vec<SystemdUnitInfo> = resp
+            .units
+            .into_iter()
+            .map(|u| SystemdUnitInfo {
+                name: u.name,
+                status: u.status,
+                is_active: u.is_active,
+                pid: if u.pid > 0 { Some(u.pid) } else { None },
+                memory_current_bytes: u.memory_current_bytes,
+                started_at: u.started_at.map(timestamp_to_datetime),
+            })
+            .collect();
+
+        let failed_units: Vec<SystemdFailedUnit> = resp
+            .failed_units
+            .into_iter()
+            .map(|u| SystemdFailedUnit {
+                name: u.name,
+                description: u.description,
+                since: u.since.map(timestamp_to_datetime),
+            })
+            .collect();
+
+        Ok(SystemdSnapshot {
+            units,
+            failed_units,
+            scheduled_jobs: resp.scheduled_jobs.into_iter().map(Into::into).collect(),
+            scheduled_jobs_supported: resp.scheduled_jobs_supported,
+        })
+    }
+
+    #[allow(dead_code)] // Consumed once the TLS tab lands
+    pub async fn get_tls_info(&mut self) -> Result<TlsSnapshot> {
+        let mut client = self.grpc_client();
+
+        let request = self.create_request(());
+        let response = client
+            .get_tls_info(request)
+            .await
+            .context("Failed to get TLS info")?;
+
+        let resp = response.into_inner();
+
+        let certificates: Vec<TlsCertificateInfo> = resp
+            .certificates
+            .into_iter()
+            .map(|c| TlsCertificateInfo {
+                name: c.name,
+                domains: c.domains,
+                issuer: c.issuer,
+                not_after: c.not_after.map(timestamp_to_datetime),
+                days_until_expiry: c.days_until_expiry,
+                source: c.source,
+                orphaned: c.orphaned,
+            })
+            .collect();
+
+        Ok(TlsSnapshot {
+            certificates,
+            renewal_unit_name: resp.renewal_unit_name,
+            renewal_unit_status: resp.renewal_unit_status,
+        })
+    }
+
+    #[allow(dead_code)] // Consumed once the network exposure view lands
+    pub async fn get_listening_ports(&mut self) -> Result<Vec<ListeningPortInfo>> {
+        let mut client = self.grpc_client();
+
+        let request = self.create_request(());
+        let response = client
+            .get_listening_ports(request)
+            .await
+            .context("Failed to get listening ports")?;
+
+        let ports: Vec<ListeningPortInfo> = response
+            .into_inner()
+            .ports
+            .into_iter()
+            .map(|p| ListeningPortInfo {
+                address: p.address,
+                port: p.port as u16,
+                protocol: p.protocol,
+                bind_scope: BindScope::from_wire(p.bind_scope),
+                pid: if p.pid > 0 { Some(p.pid) } else { None },
+                process_name: p.process_name,
+                sensitive: p.sensitive,
+            })
+            .collect();
+
+        Ok(ports)
+    }
+
+    #[allow(dead_code)]
+    pub async fn stream_system_updates(&mut self) -> Result<Streaming<SystemUpdate>> {
+        let mut client = self.grpc_client();
+
+        let request = self.create_request(UpdatesRequest {
+            update_interval_seconds: self.update_interval,
+        });
+
+        let response = client
+            .stream_system_updates(request)
+            .await
+            .context("Failed to start system updates stream")?;
+
+        Ok(response.into_inner())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_create_request_without_token() {
+        let request = MonitorClient::create_request_with_token((), None);
+        assert!(!request.metadata().contains_key("x-access-token"));
+    }
+
+    #[test]
+    fn test_create_request_with_token() {
+        let request = MonitorClient::create_request_with_token((), Some("my-secret-token"));
+        let token = request
+            .metadata()
+            .get("x-access-token")
+            .expect("Token should be present");
+        assert_eq!(token.to_str().unwrap(), "my-secret-token");
+    }
+
+    #[test]
+    fn test_create_request_with_special_chars_token() {
+        let request = MonitorClient::create_request_with_token((), Some("token-with-chars_123"));
+        let token = request
+            .metadata()
+            .get("x-access-token")
+            .expect("Token should be present");
+        assert_eq!(token.to_str().unwrap(), "token-with-chars_123");
+    }
+
+    #[test]
+    fn test_create_request_with_invalid_token_chars() {
+        // Characters not allowed in gRPC metadata should be silently ignored
+        let request = MonitorClient::create_request_with_token((), Some("token\nwith\nnewlines"));
+        assert!(!request.metadata().contains_key("x-access-token"));
+    }
+
+    #[test]
+    fn test_timestamp_to_datetime_valid() {
+        let ts = prost_types::Timestamp {
+            seconds: 1_700_000_000,
+            nanos: 500_000_000,
+        };
+        let dt = timestamp_to_datetime(ts);
+        assert_eq!(dt.timestamp(), 1_700_000_000);
+        assert_eq!(dt.timestamp_subsec_nanos(), 500_000_000);
+    }
+
+    #[test]
+    fn test_timestamp_to_datetime_zero() {
+        let ts = prost_types::Timestamp {
+            seconds: 0,
+            nanos: 0,
+        };
+        let dt = timestamp_to_datetime(ts);
+        assert_eq!(dt.timestamp(), 0);
+    }
+
+    #[test]
+    fn test_timestamp_to_datetime_negative_seconds() {
+        let ts = prost_types::Timestamp {
+            seconds: -100,
+            nanos: 0,
+        };
+        let dt = timestamp_to_datetime(ts);
+        assert_eq!(dt.timestamp(), -100);
+    }
+
+    #[test]
+    fn test_timestamp_to_datetime_invalid_nanos() {
+        // prost_types::Timestamp normalizes nanos, but we test the fallback path
+        let ts = prost_types::Timestamp {
+            seconds: 1_700_000_000,
+            nanos: 2_000_000_000,
+        };
+        let dt = timestamp_to_datetime(ts);
+        // Utc.timestamp_opt with out-of-range nanos falls back to Utc::now
+        // We just verify it doesn't panic
+        let _ = dt;
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "unit-doubles")]
+#[path = "../tests/doubles/client_units.rs"]
+mod campaign_rpc_units;

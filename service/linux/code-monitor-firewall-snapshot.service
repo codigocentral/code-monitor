@@ -1,0 +1,50 @@
+# Saves the packet filter for the code-monitor audit, so the agent itself
+# never needs CAP_NET_ADMIN (which would also let it change the rules).
+# Triggered every minute by code-monitor-firewall-snapshot.timer; the agent
+# treats a snapshot older than 5 minutes as unavailable.
+[Unit]
+Description=Code Monitor firewall snapshot (iptables-save for the audit)
+Documentation=https://github.com/codigocentral/code-monitor
+After=network.target
+
+[Service]
+Type=oneshot
+# root to read the rules; group code-monitor so the files come out
+# root:code-monitor and the agent (and nobody else) can read them
+User=root
+Group=code-monitor
+UMask=0027
+StateDirectory=code-monitor/firewall
+StateDirectoryMode=0750
+Environment=PATH=/usr/sbin:/usr/bin:/sbin:/bin
+# Each file is written to a temporary name in the same directory and renamed,
+# so the agent never reads half a rule set.
+ExecStart=/bin/sh -c 'd=/var/lib/code-monitor/firewall; rc=0; \
+  for t in iptables ip6tables; do \
+    tmp=$$(mktemp "$$d/.$$t.rules.XXXXXX") || exit 1; \
+    if "$$t-save" > "$$tmp" && chmod 0640 "$$tmp" && mv -f "$$tmp" "$$d/$$t.rules"; then :; \
+    else rm -f "$$tmp"; echo "$$t-save failed" >&2; rc=1; fi; \
+  done; exit $$rc'
+TimeoutStartSec=30
+
+# Hardening: only the snapshot directory is writable
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/code-monitor/firewall
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+SystemCallArchitectures=native

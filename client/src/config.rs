@@ -1,0 +1,509 @@
+//! Client configuration management
+
+use anyhow::Result;
+#[cfg(test)]
+use campaign_path_units::fs;
+#[cfg(test)]
+use campaign_path_units::toml;
+use shared::types::*;
+#[cfg(not(test))]
+use std::fs;
+use uuid::Uuid;
+
+pub struct ClientConfigManager {
+    config_path: std::path::PathBuf,
+}
+
+impl ClientConfigManager {
+    pub fn new(config_path: &std::path::Path) -> Result<Self> {
+        let manager = Self {
+            config_path: config_path.to_path_buf(),
+        };
+
+        // Create default config if it doesn't exist
+        if !config_path.exists() {
+            manager.create_default_config()?;
+        }
+
+        Ok(manager)
+    }
+
+    fn create_default_config(&self) -> Result<()> {
+        let default_config = ClientConfig {
+            servers: Vec::new(),
+            update_interval_seconds: 5, // Default 5 seconds as requested
+            auto_reconnect: true,
+            reconnect_delay_seconds: 5,
+            private_key_path: None,
+            public_key_path: None,
+            tls: None,
+            notifications: shared::notifications::NotificationConfig::default(),
+        };
+
+        self.save_config(&default_config)?;
+        Ok(())
+    }
+
+    pub fn load_config(&self) -> Result<ClientConfig> {
+        if !self.config_path.exists() {
+            return Ok(ClientConfig {
+                servers: Vec::new(),
+                update_interval_seconds: 5,
+                auto_reconnect: true,
+                reconnect_delay_seconds: 5,
+                private_key_path: None,
+                public_key_path: None,
+                tls: None,
+                notifications: shared::notifications::NotificationConfig::default(),
+            });
+        }
+
+        let content = fs::read_to_string(&self.config_path)?;
+        let config: ClientConfig = toml::from_str(&content)?;
+        Ok(config)
+    }
+
+    pub fn save_config(&self, config: &ClientConfig) -> Result<()> {
+        let content = toml::to_string_pretty(config)?;
+        fs::write(&self.config_path, content)?;
+
+        // The config stores server access tokens: restrict it to the owner.
+        // On Windows the file inherits the user-profile NTFS ACLs, which
+        // already keep other non-admin users out.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&self.config_path)?.permissions();
+            perms.set_mode(0o600);
+            fs::set_permissions(&self.config_path, perms)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn config_path(&self) -> &std::path::Path {
+        &self.config_path
+    }
+
+    pub fn add_server(&mut self, server: ServerEndpoint) -> Result<()> {
+        let mut config = self.load_config()?;
+
+        // Check if server with same address and port already exists
+        if config
+            .servers
+            .iter()
+            .any(|s| s.address == server.address && s.port == server.port)
+        {
+            return Err(anyhow::anyhow!(
+                "Server with address {}:{} already exists",
+                server.address,
+                server.port
+            ));
+        }
+
+        config.servers.push(server);
+        self.save_config(&config)?;
+        Ok(())
+    }
+
+    pub fn remove_server(&mut self, id: Uuid) -> Result<()> {
+        let mut config = self.load_config()?;
+
+        let original_len = config.servers.len();
+        config.servers.retain(|s| s.id != id);
+
+        if config.servers.len() == original_len {
+            return Err(anyhow::anyhow!("Server with ID {} not found", id));
+        }
+
+        self.save_config(&config)?;
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub fn update_server(&mut self, id: Uuid, updated_server: ServerEndpoint) -> Result<()> {
+        let mut config = self.load_config()?;
+
+        if let Some(server) = config.servers.iter_mut().find(|s| s.id == id) {
+            *server = updated_server;
+            self.save_config(&config)?;
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Server with ID {} not found", id))
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn get_server(&self, id: Uuid) -> Result<ServerEndpoint> {
+        let config = self.load_config()?;
+
+        config
+            .servers
+            .into_iter()
+            .find(|s| s.id == id)
+            .ok_or_else(|| anyhow::anyhow!("Server with ID {} not found", id))
+    }
+
+    #[allow(dead_code)]
+    pub fn list_servers(&self) -> Result<Vec<ServerEndpoint>> {
+        let config = self.load_config()?;
+        Ok(config.servers)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[cfg(unix)]
+    #[test]
+    fn test_save_config_restricts_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("perm-config.toml");
+        let _manager = ClientConfigManager::new(&config_path).unwrap();
+
+        let mode = fs::metadata(&config_path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "config file must be owner-only");
+    }
+
+    #[test]
+    fn test_config_manager() {
+        // Use a temp directory and a config file path that doesn't exist yet
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("test-config.toml");
+
+        // File doesn't exist yet, so ClientConfigManager will create a default config
+        let mut manager = ClientConfigManager::new(&config_path).unwrap();
+
+        // Test adding a server
+        let server = ServerEndpoint {
+            id: uuid::Uuid::new_v4(),
+            name: "test-server".to_string(),
+            address: "203.0.113.100".to_string(),
+            port: 50051,
+            description: Some("Test server".to_string()),
+            access_token: None,
+        };
+
+        assert!(manager.add_server(server.clone()).is_ok());
+
+        // Test loading and listing servers
+        let servers = manager.list_servers().unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "test-server");
+
+        // Test removing server
+        assert!(manager.remove_server(server.id).is_ok());
+
+        let servers = manager.list_servers().unwrap();
+        assert_eq!(servers.len(), 0);
+    }
+
+    #[test]
+    fn test_config_manager_duplicate_server() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("test-config.toml");
+        let mut manager = ClientConfigManager::new(&config_path).unwrap();
+
+        let server1 = ServerEndpoint {
+            id: uuid::Uuid::new_v4(),
+            name: "server-1".to_string(),
+            address: "203.0.113.100".to_string(),
+            port: 50051,
+            description: None,
+            access_token: None,
+        };
+        let server2 = ServerEndpoint {
+            id: uuid::Uuid::new_v4(),
+            name: "server-2".to_string(),
+            address: "203.0.113.100".to_string(),
+            port: 50051,
+            description: None,
+            access_token: None,
+        };
+
+        assert!(manager.add_server(server1).is_ok());
+        let result = manager.add_server(server2);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn test_config_manager_update_server() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("test-config.toml");
+        let mut manager = ClientConfigManager::new(&config_path).unwrap();
+
+        let server = ServerEndpoint {
+            id: uuid::Uuid::new_v4(),
+            name: "old-name".to_string(),
+            address: "203.0.113.100".to_string(),
+            port: 50051,
+            description: None,
+            access_token: None,
+        };
+        manager.add_server(server.clone()).unwrap();
+
+        let updated = ServerEndpoint {
+            id: server.id,
+            name: "new-name".to_string(),
+            address: "203.0.113.200".to_string(),
+            port: 50052,
+            description: Some("Updated".to_string()),
+            access_token: Some("token".to_string()),
+        };
+
+        assert!(manager.update_server(server.id, updated).is_ok());
+        let retrieved = manager.get_server(server.id).unwrap();
+        assert_eq!(retrieved.name, "new-name");
+        assert_eq!(retrieved.address, "203.0.113.200");
+        assert_eq!(retrieved.port, 50052);
+    }
+
+    #[test]
+    fn test_config_manager_get_server_not_found() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("test-config.toml");
+        let manager = ClientConfigManager::new(&config_path).unwrap();
+
+        let result = manager.get_server(uuid::Uuid::new_v4());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_config_manager_remove_nonexistent() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("test-config.toml");
+        let mut manager = ClientConfigManager::new(&config_path).unwrap();
+
+        let result = manager.remove_server(uuid::Uuid::new_v4());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_config_manager_load_default_when_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("nonexistent-config.toml");
+        let manager = ClientConfigManager::new(&config_path).unwrap();
+
+        let config = manager.load_config().unwrap();
+        assert!(config.servers.is_empty());
+        assert_eq!(config.update_interval_seconds, 5);
+        assert!(config.auto_reconnect);
+    }
+
+    #[test]
+    fn test_config_manager_load_config_file_deleted() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("deleted-config.toml");
+        let manager = ClientConfigManager::new(&config_path).unwrap();
+
+        // Delete the file after creation to exercise the early-return path
+        std::fs::remove_file(&config_path).unwrap();
+
+        let config = manager.load_config().unwrap();
+        assert!(config.servers.is_empty());
+        assert_eq!(config.update_interval_seconds, 5);
+        assert!(config.auto_reconnect);
+        assert_eq!(config.reconnect_delay_seconds, 5);
+        assert!(config.private_key_path.is_none());
+        assert!(config.public_key_path.is_none());
+        assert!(config.tls.is_none());
+    }
+
+    #[test]
+    fn test_config_manager_update_server_not_found() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("test-config.toml");
+        let mut manager = ClientConfigManager::new(&config_path).unwrap();
+
+        let updated = ServerEndpoint {
+            id: uuid::Uuid::new_v4(),
+            name: "new-name".to_string(),
+            address: "203.0.113.200".to_string(),
+            port: 50052,
+            description: Some("Updated".to_string()),
+            access_token: Some("token".to_string()),
+        };
+
+        let result = manager.update_server(updated.id, updated);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_config_manager_save_and_load() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("test-config.toml");
+        let manager = ClientConfigManager::new(&config_path).unwrap();
+
+        let server = ServerEndpoint {
+            id: uuid::Uuid::new_v4(),
+            name: "test-server".to_string(),
+            address: "203.0.113.100".to_string(),
+            port: 50051,
+            description: Some("Test".to_string()),
+            access_token: Some("token".to_string()),
+        };
+
+        let mut config = manager.load_config().unwrap();
+        config.servers.push(server);
+        manager.save_config(&config).unwrap();
+
+        let loaded = manager.load_config().unwrap();
+        assert_eq!(loaded.servers.len(), 1);
+        assert_eq!(loaded.servers[0].name, "test-server");
+        assert_eq!(loaded.servers[0].access_token.as_ref().unwrap(), "token");
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod campaign_path_units {
+    use super::*;
+    #[test]
+    fn exposes_the_exact_config_path_and_propagates_initial_write_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("unit.toml");
+        let manager = ClientConfigManager::new(&path).unwrap();
+        assert_eq!(manager.config_path(), path);
+        let existing = ClientConfigManager::new(&path).unwrap();
+        assert_eq!(existing.config_path(), path);
+        assert!(manager.load_config().unwrap().servers.is_empty());
+        assert!(ClientConfigManager::new(&temp.path().join("missing-parent/unit.toml")).is_err());
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    pub(crate) enum Fault {
+        None,
+        Serialize,
+        Write,
+        Metadata,
+        Permissions,
+    }
+    thread_local! { static FAULT: std::cell::Cell<Fault> = const { std::cell::Cell::new(Fault::None) }; }
+    pub(crate) struct FaultGuard;
+    impl FaultGuard {
+        pub(crate) fn arm(value: Fault) -> Self {
+            FAULT.with(|fault| fault.set(value));
+            Self
+        }
+    }
+    impl Drop for FaultGuard {
+        fn drop(&mut self) {
+            FAULT.with(|fault| fault.set(Fault::None));
+        }
+    }
+    fn fails(value: Fault) -> bool {
+        FAULT.with(|fault| fault.get() == value)
+    }
+    fn error() -> std::io::Error {
+        std::io::Error::other("unit provider failure")
+    }
+
+    // Only external providers are replaced. Unarmed calls use owned fixtures;
+    // the production configuration parsing, mutations and error handling run.
+    pub mod fs {
+        use super::{error, fails, Fault};
+        pub use std::fs::{read_to_string, Permissions};
+        pub fn write(
+            path: impl AsRef<std::path::Path>,
+            content: impl AsRef<[u8]>,
+        ) -> std::io::Result<()> {
+            if fails(Fault::Write) {
+                Err(error())
+            } else {
+                std::fs::write(path, content)
+            }
+        }
+        pub fn metadata(path: impl AsRef<std::path::Path>) -> std::io::Result<std::fs::Metadata> {
+            if fails(Fault::Metadata) {
+                Err(error())
+            } else {
+                std::fs::metadata(path)
+            }
+        }
+        pub fn set_permissions(
+            path: impl AsRef<std::path::Path>,
+            permissions: Permissions,
+        ) -> std::io::Result<()> {
+            if fails(Fault::Permissions) {
+                Err(error())
+            } else {
+                std::fs::set_permissions(path, permissions)
+            }
+        }
+    }
+    pub mod toml {
+        pub use ::toml::from_str;
+        pub fn to_string_pretty<T: serde::Serialize>(
+            value: &T,
+        ) -> Result<String, ::toml::ser::Error> {
+            if super::fails(super::Fault::Serialize) {
+                Err(serde::ser::Error::custom("unit serializer failure"))
+            } else {
+                ::toml::to_string_pretty(value)
+            }
+        }
+    }
+
+    fn endpoint() -> ServerEndpoint {
+        ServerEndpoint {
+            id: Uuid::new_v4(),
+            name: "unit".into(),
+            address: "fixture.invalid".into(),
+            port: 1,
+            description: None,
+            access_token: None,
+        }
+    }
+
+    #[test]
+    fn all_readers_propagate_invalid_configuration_without_overwriting_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        std::fs::write(&path, "invalid = [").unwrap();
+        let mut manager = ClientConfigManager::new(&path).unwrap();
+        let server = endpoint();
+        assert!(manager.load_config().is_err());
+        assert!(manager.add_server(server.clone()).is_err());
+        assert!(manager.remove_server(server.id).is_err());
+        assert!(manager.update_server(server.id, server.clone()).is_err());
+        assert!(manager.get_server(server.id).is_err());
+        assert!(manager.list_servers().is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "invalid = [");
+        let directory_manager = ClientConfigManager::new(temp.path()).unwrap();
+        assert!(directory_manager.load_config().is_err());
+    }
+
+    #[test]
+    fn every_save_stage_propagates_provider_failures() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        let mut manager = ClientConfigManager::new(&path).unwrap();
+        let server = endpoint();
+        manager.add_server(server.clone()).unwrap();
+        let config = manager.load_config().unwrap();
+        for stage in [
+            Fault::Serialize,
+            Fault::Write,
+            Fault::Metadata,
+            Fault::Permissions,
+        ] {
+            let _guard = FaultGuard::arm(stage);
+            let error = manager.save_config(&config).unwrap_err().to_string();
+            assert!(error.contains("unit"));
+        }
+        // Mutation errors must propagate after successful reads, too.
+        let _guard = FaultGuard::arm(Fault::Write);
+        let other = ServerEndpoint {
+            port: 2,
+            ..endpoint()
+        };
+        assert!(manager.add_server(other).is_err());
+        assert!(manager.remove_server(server.id).is_err());
+        assert!(manager.update_server(server.id, server).is_err());
+    }
+}

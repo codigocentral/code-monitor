@@ -1,0 +1,27 @@
+[Unit]
+Description=Code Monitor Server
+Documentation=https://github.com/codigocentral/code-monitor
+After=network.target
+
+[Service]
+Type=simple
+User=code-monitor
+Group=code-monitor
+WorkingDirectory=/etc/code-monitor
+ExecStart=/usr/local/bin/monitor-server --config /etc/code-monitor/config.toml
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=code-monitor-server
+
+# Security hardening
+NoNewPrivileges=true
+# No capabilities: the firewall is read from the files that
+# code-monitor-firewall-snapshot.timer (root) saves in /var/lib/code-monitor/firewall.
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/etc/code-monitor /var/lib/code-monitor
+
+[Install]
+WantedBy=multi-user.target

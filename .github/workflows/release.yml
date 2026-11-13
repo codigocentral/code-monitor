@@ -1,0 +1,130 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive_name: linux-x86_64
+            use_cross: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive_name: linux-aarch64
+            use_cross: true
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive_name: windows-x86_64
+            use_cross: false
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive_name: macos-x86_64
+            use_cross: false
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive_name: macos-aarch64
+            use_cross: false
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install protobuf compiler
+        if: runner.os == 'Linux' && matrix.use_cross != true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Install protobuf compiler (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      - name: Install protobuf compiler (Windows)
+        if: runner.os == 'Windows'
+        run: choco install protoc
+
+      - name: Install cross
+        if: matrix.use_cross == true
+        uses: taiki-e/install-action@903f26e8b95aae0a27e09ef88bbd23ace6415d8e # cross
+
+      - name: Build release binaries with cross
+        if: matrix.use_cross == true
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Build release binaries
+        if: matrix.use_cross != true
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package binaries (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/monitor-server dist/
+          cp target/${{ matrix.target }}/release/monitor-client dist/
+          cp install.sh dist/ 2>/dev/null || true
+          cp generate-certs.sh dist/ 2>/dev/null || true
+          cp README.md dist/
+          cd dist
+          tar czf "monitor-${{ matrix.archive_name }}.tar.gz" *
+
+      - name: Package binaries (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item target/${{ matrix.target }}/release/monitor-server.exe dist/
+          Copy-Item target/${{ matrix.target }}/release/monitor-client.exe dist/
+          Copy-Item install.ps1 dist/
+          Copy-Item README.md dist/
+          cd dist
+          Compress-Archive -Path * -DestinationPath "monitor-${{ matrix.archive_name }}.zip"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ matrix.archive_name }}
+          path: |
+            dist/monitor-*.tar.gz
+            dist/monitor-*.zip
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
+        with:
+          files: |
+            artifacts/**/*
+            install.sh
+            install.ps1
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
