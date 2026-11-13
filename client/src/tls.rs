@@ -338,13 +338,7 @@ mod tests {
 
     #[test]
     fn test_skip_verify_connector_poll_ready() {
-        use std::sync::Arc;
-        use std::task::{Context, Wake, Waker};
-
-        struct DummyWaker;
-        impl Wake for DummyWaker {
-            fn wake(self: Arc<Self>) {}
-        }
+        use std::task::{Context, Waker};
 
         let tls = TlsConfig {
             ca_cert_path: "/nonexistent/ca.pem".to_string(),
@@ -356,8 +350,7 @@ mod tests {
         let setup = configure_tls(endpoint, &tls).unwrap();
         let mut connector = setup.connector.unwrap();
 
-        let waker = Waker::from(Arc::new(DummyWaker));
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(Waker::noop());
         let result = connector.poll_ready(&mut cx);
         assert!(matches!(result, Poll::Ready(Ok(()))));
     }
