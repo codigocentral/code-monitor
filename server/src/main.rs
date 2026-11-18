@@ -19,6 +19,7 @@ use unit_server_bootstrap::Server;
 #[cfg(all(test, feature = "unit-doubles"))]
 use unit_server_bootstrap::{logging as tracing_subscriber, signal, spawn as spawn_health};
 
+use crate::collectors::versions::VersionsCollector;
 use crate::config::Config;
 #[cfg(not(all(test, feature = "unit-doubles")))]
 use crate::monitor::SystemMonitor;
@@ -341,7 +342,8 @@ async fn main() -> Result<()> {
         config.systemd_units.clone(),
     )
     .await?
-    .with_tls_dirs(config.tls_certificate_dirs.clone());
+    .with_tls_dirs(config.tls_certificate_dirs.clone())
+    .with_image_versions(VersionsCollector::from_config(&config.image_versions));
     monitor.start_background_monitoring();
 
     // Wrap in Arc for sharing
@@ -367,6 +369,7 @@ async fn main() -> Result<()> {
             args.firewall_snapshot_dir.clone(),
             config.disk_policy.clone(),
             config.scheduled_jobs.clone(),
+            config.compose_drift.clone(),
             shared.clone(),
         );
         Some(shared)

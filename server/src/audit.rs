@@ -158,6 +158,39 @@ pub fn render(report: Option<&AuditReport>, out: &mut String) {
 
     render_findings(report, out);
     render_collectors(snapshot, out);
+    render_compose(snapshot, out);
+}
+
+/// Running containers by compose verdict, every state always present.
+///
+/// `undeclared` (no compose labels) and `pending` (seen diverging once) are
+/// not findings, but are visible here.
+fn render_compose(snapshot: &HostSnapshot, out: &mut String) {
+    let Some(assessments) = snapshot
+        .compose
+        .as_ref()
+        .filter(|_| snapshot.has(Source::Docker))
+    else {
+        return;
+    };
+    header(
+        out,
+        "code_monitor_compose_services",
+        "gauge",
+        "Running containers by comparison with their compose file",
+    );
+    for state in shared::compose::ComposeStatus::LABELS {
+        let count = assessments
+            .iter()
+            .filter(|a| a.status.label() == *state)
+            .count();
+        sample(
+            out,
+            "code_monitor_compose_services",
+            &[("state", state)],
+            count as f64,
+        );
+    }
 }
 
 fn render_findings(report: &AuditReport, out: &mut String) {
@@ -609,6 +642,7 @@ pub async fn collect(
     firewall_snapshot_dir: &std::path::Path,
     disk_policy: &shared::operations::DiskPolicy,
     jobs: &[shared::operations::ScheduledJobConfig],
+    compose: &mut crate::collectors::compose::ComposeAudit,
 ) -> HostSnapshot {
     use tracing::warn;
 
@@ -643,14 +677,17 @@ pub async fn collect(
         })
         .and_then(|_| read_network_state());
 
+    // An unreachable daemon returns an empty list, not an error: report
+    // the source as down rather than as a host with no containers.
+    let containers =
+        keep("docker", monitor.get_containers().await).filter(|_| monitor.docker_reachable());
+    let compose = collect_compose(monitor, containers.is_some(), compose).await;
+
     HostSnapshot {
         system: keep("system", monitor.get_system_info()),
         disk_policy: disk_policy.clone(),
         scheduled_jobs: Some(crate::scheduled::collect(jobs).await),
-        // An unreachable daemon returns an empty list, not an error: report
-        // the source as down rather than as a host with no containers.
-        containers: keep("docker", monitor.get_containers().await)
-            .filter(|_| monitor.docker_reachable()),
+        containers,
         processes,
         postgres: keep("postgres", monitor.get_postgres_clusters().await),
         mariadb: keep("mariadb", monitor.get_mariadb_clusters().await),
@@ -659,7 +696,22 @@ pub async fn collect(
         ports: keep("ports", monitor.get_listening_ports().await),
         firewall: Some(read_firewall(firewall_snapshot_dir)),
         network,
+        compose,
     }
+}
+
+/// Compose verdicts for the containers the same pass just inspected, or
+/// `None` when Docker could not be read (or the check is disabled).
+#[cfg(not(all(test, feature = "unit-doubles")))]
+async fn collect_compose(
+    monitor: &crate::monitor::SystemMonitor,
+    docker_read: bool,
+    compose: &mut crate::collectors::compose::ComposeAudit,
+) -> Option<Vec<shared::compose::ComposeAssessment>> {
+    if !docker_read {
+        return None;
+    }
+    compose.assess(&monitor.compose_runtimes().await)
 }
 
 /// Where the iptables tools live on the distributions this agent targets;
@@ -756,16 +808,10 @@ fn read_firewall(dir: &std::path::Path) -> shared::firewall::FirewallSnapshot {
     snapshot
 }
 
-#[cfg(all(unix, not(all(test, feature = "unit-doubles"))))]
+#[cfg(not(all(test, feature = "unit-doubles")))]
 fn running_as_root() -> bool {
     // SAFETY: geteuid has no preconditions and cannot fail
     unsafe { libc::geteuid() == 0 }
-}
-
-/// There is no effective-uid concept on Windows; the Linux-only audits never run as root there.
-#[cfg(all(not(unix), not(all(test, feature = "unit-doubles"))))]
-fn running_as_root() -> bool {
-    false
 }
 
 /// What networkd reports now, or `None` without networkctl.
@@ -788,15 +834,25 @@ pub fn spawn(
     firewall_snapshot_dir: std::path::PathBuf,
     disk_policy: shared::operations::DiskPolicy,
     jobs: Vec<shared::operations::ScheduledJobConfig>,
+    compose_config: crate::collectors::compose::ComposeDriftConfig,
     shared: SharedAudit,
 ) {
     tokio::spawn(async move {
+        // Kept across passes: a divergence is confirmed by the next pass
+        let mut compose = crate::collectors::compose::ComposeAudit::new(compose_config);
         let mut timer = tokio::time::interval(interval);
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             timer.tick().await;
             let started = std::time::Instant::now();
-            let snapshot = collect(&monitor, &firewall_snapshot_dir, &disk_policy, &jobs).await;
+            let snapshot = collect(
+                &monitor,
+                &firewall_snapshot_dir,
+                &disk_policy,
+                &jobs,
+                &mut compose,
+            )
+            .await;
             let report = AuditReport::new(
                 snapshot,
                 chrono::Utc::now(),
@@ -1170,6 +1226,7 @@ mod tests {
                 network: None,
                 disk_policy: Default::default(),
                 scheduled_jobs: Some(vec![]),
+                compose: Some(vec![]),
             },
             now(),
             1.25,
@@ -1194,5 +1251,71 @@ mod tests {
             assert!(name.starts_with("code_monitor_"), "{line}");
             value.parse::<f64>().expect(line);
         }
+    }
+
+    #[test]
+    fn test_compose_states_are_counted_and_confirmed_drift_is_a_finding() {
+        use shared::compose::{ComposeAssessment, ComposeDifference, ComposeField, ComposeStatus};
+        let assessment = |target: &str, status| ComposeAssessment {
+            target: target.into(),
+            container: format!("{target}-1"),
+            status,
+        };
+        let report = AuditReport::new(
+            HostSnapshot {
+                containers: Some(vec![]),
+                compose: Some(vec![
+                    assessment("shop/web", ComposeStatus::InSync),
+                    assessment("shop/db", ComposeStatus::Pending),
+                    assessment("adhoc", ComposeStatus::Undeclared),
+                    assessment(
+                        "shop/api",
+                        ComposeStatus::Drifted {
+                            differences: vec![ComposeDifference {
+                                field: ComposeField::Restart,
+                                item: String::new(),
+                                declared: "always".into(),
+                                running: "no".into(),
+                            }],
+                            downgrade: None,
+                        },
+                    ),
+                ]),
+                ..Default::default()
+            },
+            now(),
+            0.1,
+        );
+        let out = rendered(Some(&report));
+        for (state, count) in [
+            ("in_sync", 1),
+            ("pending", 1),
+            ("undeclared", 1),
+            ("drifted", 1),
+            ("unreadable", 0),
+            ("silenced", 0),
+        ] {
+            assert!(
+                out.contains(&format!(
+                    "code_monitor_compose_services{{state=\"{state}\"}} {count}\n"
+                )),
+                "{state}"
+            );
+        }
+        assert!(out.contains(
+            "code_monitor_finding{check=\"compose_drift\",severity=\"warning\",target=\"shop/api\"} 1\n"
+        ));
+        assert!(out.contains("code_monitor_findings{check=\"compose_drift\"} 1\n"));
+
+        // Docker blind: no compose gauge and no compose finding
+        let blind = AuditReport::new(
+            HostSnapshot {
+                compose: report.snapshot.compose.clone(),
+                ..Default::default()
+            },
+            now(),
+            0.1,
+        );
+        assert!(!rendered(Some(&blind)).contains("code_monitor_compose_services"));
     }
 }

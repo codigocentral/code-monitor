@@ -20,7 +20,7 @@ pub struct MariaDBCollector {
 /// Parse a `DATETIME` as MariaDB renders it, `2026-07-31 13:39:13`.
 ///
 /// The server stores these without a zone; they are read as UTC, which is what
-/// servers are expected to run on. A value that cannot be parsed is reported as
+/// the fleet's hosts run on. A value that cannot be parsed is reported as
 /// unknown rather than guessed at.
 fn parse_mysql_datetime(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     let trimmed = value.trim();

@@ -356,6 +356,9 @@ impl MonitorClient {
                         ProtoImageVersionStatus::LocalBuild => {
                             shared::types::VersionStatus::LocalBuild
                         }
+                        ProtoImageVersionStatus::NewerAvailable => {
+                            shared::types::VersionStatus::NewerAvailable
+                        }
                         _ => shared::types::VersionStatus::Unknown,
                     };
                     shared::types::ImageVersionInfo {
@@ -366,6 +369,7 @@ impl MonitorClient {
                         local_digest: v.local_digest,
                         remote_digest: v.remote_digest,
                         status,
+                        latest_tag: v.latest_tag,
                         checked_at: v.checked_at.map(timestamp_to_datetime),
                         error: v.error,
                     }

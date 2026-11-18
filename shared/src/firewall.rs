@@ -273,29 +273,34 @@ pub fn parse_iptables_save(text: &str) -> Ruleset {
             current = None;
             continue;
         }
-        let Some(table) = current.as_ref().and_then(|t| ruleset.tables.get_mut(t)) else {
-            continue;
-        };
-        if let Some(declaration) = line.strip_prefix(':') {
-            let mut parts = declaration.split_whitespace();
-            if let Some(name) = parts.next() {
-                let policy = parts.next().filter(|p| *p != "-").map(str::to_string);
-                table.chains.entry(name.to_string()).or_default().policy = policy;
-            }
-            continue;
-        }
-        let words = split_words(line);
-        if words.len() >= 2 && (words[0] == "-A" || words[0] == "--append") {
-            let rule = parse_rule(&words[2..]);
-            table
-                .chains
-                .entry(words[1].clone())
-                .or_default()
-                .rules
-                .push(rule);
+        if let Some(table) = current.as_ref().and_then(|t| ruleset.tables.get_mut(t)) {
+            apply_table_line(table, line);
         }
     }
     ruleset
+}
+
+/// Apply one chain declaration (`:CHAIN POLICY`) or appended rule
+/// (`-A CHAIN ...`) to the table it belongs to. Anything else is ignored.
+fn apply_table_line(table: &mut Table, line: &str) {
+    if let Some(declaration) = line.strip_prefix(':') {
+        let mut parts = declaration.split_whitespace();
+        if let Some(name) = parts.next() {
+            let policy = parts.next().filter(|p| *p != "-").map(str::to_string);
+            table.chains.entry(name.to_string()).or_default().policy = policy;
+        }
+        return;
+    }
+    let words = split_words(line);
+    if words.len() >= 2 && (words[0] == "-A" || words[0] == "--append") {
+        let rule = parse_rule(&words[2..]);
+        table
+            .chains
+            .entry(words[1].clone())
+            .or_default()
+            .rules
+            .push(rule);
+    }
 }
 
 /// Interfaces that hold a default route in `/proc/net/route`.
@@ -982,7 +987,7 @@ COMMIT
 -A DOCKER -i docker0 -j RETURN
 -A DOCKER ! -i br-0123456789ab -p tcp -m tcp --dport 5433 -j DNAT --to-destination 172.18.0.2:5432
 -A DOCKER -d 127.0.0.1/32 ! -i docker0 -p tcp -m tcp --dport 9121 -j DNAT --to-destination 172.17.0.2:9121
--A DOCKER -d 198.51.100.8/32 ! -i docker0 -p tcp -m tcp --dport 3307 -j DNAT --to-destination 172.17.0.3:3306
+-A DOCKER -d 192.168.10.8/32 ! -i docker0 -p tcp -m tcp --dport 3307 -j DNAT --to-destination 172.17.0.3:3306
 COMMIT
 "#;
 
@@ -1186,9 +1191,9 @@ COMMIT
     fn default_route_interfaces() {
         let route =
             "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n\
-eth0\t00000000\t016433C6\t0003\t0\t0\t0\t00000000\t0\t0\t0\n\
-eth0\t006433C6\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n\
-wg0\t0000140A\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n";
+eth0\t00000000\t0100A8C0\t0003\t0\t0\t0\t00000000\t0\t0\t0\n\
+eth0\t0000A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n\
+wg0\t00000A0A\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n";
         assert_eq!(parse_ipv4_default_ifaces(route), vec!["eth0"]);
         let route6 = "00000000000000000000000000000000 00 00000000000000000000000000000000 00 fe800000000000000000000000000001 00000400 00000001 00000000 00000003 eth0\n\
 00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 ffffffff 00000001 00000000 00200200 lo\n\

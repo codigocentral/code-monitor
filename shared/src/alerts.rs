@@ -470,7 +470,7 @@ impl AlertManager {
     /// Takes `(name, days_until_expiry)` pairs plus the renewal unit's status.
     /// Both matter, and they fail independently: renewal can be dead for weeks
     /// while every certificate still looks fine, which is exactly the state
-    /// several servers were found in during an audit.
+    /// three servers in the fleet were found in.
     pub fn process_tls_certificates(
         &mut self,
         server_id: &str,
@@ -631,7 +631,7 @@ impl AlertManager {
     /// Alert on memory pressure, judged by activity rather than occupancy.
     ///
     /// Swap occupancy is deliberately not an input. It is a high-water mark
-    /// from some past spike: a daily report coloured a host at 65%
+    /// from some past spike: the fleet's daily report coloured a host at 65%
     /// occupancy that was paging nothing, and ignored one at 55% that had
     /// paged 500 times more and spent 17 hours stalled. Rates and stall time
     /// are what separate them.
@@ -1691,7 +1691,7 @@ mod tests {
 
     #[test]
     fn test_broken_renewal_alerts_even_with_healthy_certificates() {
-        // A real-world state: 97 certificates all perfectly valid, and
+        // The fleet's actual state: 97 certificates all perfectly valid, and
         // certbot.service dead on three hosts. This is the leading indicator.
         let mut manager = AlertManager::new();
         let alerts = manager.process_tls_certificates(

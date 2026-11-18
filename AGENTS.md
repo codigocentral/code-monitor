@@ -4,7 +4,7 @@
 
 Code Monitor is a **high-performance, cross-platform system monitoring application** built in Rust. It uses a client-server architecture where `monitor-server` collects system metrics on target machines and `monitor-client` displays them via a rich Terminal User Interface (TUI) dashboard. Communication happens over gRPC (optionally with TLS/mTLS).
 
-All code, comments, and documentation are in English.
+The project originated from a Portuguese requirements document (`necessidade.md`), but **all code, comments, and documentation are in English**.
 
 ### Architecture
 
@@ -108,12 +108,12 @@ The server also starts an HTTP health check server on port `8080` (unless `--no-
 ./target/release/monitor-client
 
 # Quick connect to a new server
-./target/release/monitor-client connect 203.0.113.31 --port 50051
+./target/release/monitor-client connect 192.168.0.31 --port 50051
 
 # Add a server manually
 ./target/release/monitor-client add \
     --name "Linux Server" \
-    --address 203.0.113.31 \
+    --address 192.168.0.31 \
     --port 50051 \
     --token "<access-token-from-server>"
 
@@ -164,7 +164,7 @@ reconnect_delay_seconds = 5
 [[servers]]
 id = "uuid-here"
 name = "Linux Server"
-address = "203.0.113.31"
+address = "192.168.0.31"
 port = 50051
 description = "Main production server"
 access_token = "token-from-server"
@@ -331,9 +331,11 @@ make release-check   # runs fmt --check, clippy -D warnings, and test --all
 
 ### GitHub Actions Workflows
 
-- **`.github/workflows/ci.yml`** (runs on push to `main` and on pull requests):
-  - **Lint job**: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and the same with `--all-features` (unit-doubles)
-  - **Test job**: `cargo test --workspace` on `ubuntu-latest`, skipping the host-dependent integration tests
+- **`.github/workflows/ci.yml`** (runs on push/PR to `main`/`master`):
+  - **Lint job**: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`
+  - **Test job**: Builds and tests on `ubuntu-latest` and `windows-latest` with `protoc` installed
+  - **Coverage job**: Uses `cargo-tarpaulin` to generate XML coverage and uploads to Codecov
+  - **Security audit job**: Runs `cargo audit` via `rustsec/audit-check`
 
 - **`.github/workflows/release.yml`** (triggers on `v*` tags):
   - Cross-platform release builds for:
@@ -368,7 +370,7 @@ make docker-clean
 
 3. **Token Storage**: Client stores access tokens in plain text TOML (`client-config.toml`). This is intentional for ease of use but not suitable for high-security environments.
 
-4. **Dependencies**: run `cargo audit` locally before releases to catch known vulnerabilities in dependencies.
+4. **Dependencies**: CI runs `cargo audit` on every push/PR to catch known vulnerabilities in dependencies.
 
 ## Common Development Tasks
 
@@ -470,7 +472,7 @@ make certs
 | `install.sh` | Server installer with systemd integration |
 | `install.ps1` | Windows PowerShell installer |
 | `generate-certs.sh` | Self-signed certificate generator |
-| `.github/workflows/ci.yml` | CI pipeline (fmt, clippy, test) |
+| `.github/workflows/ci.yml` | CI pipeline (lint, test, coverage, security audit) |
 | `.github/workflows/release.yml` | Cross-platform release builds on tags |
 | `Dockerfile.server` / `Dockerfile.client` | Multi-stage Docker builds |
 | `docker-compose.yml` | Local Docker orchestration |
@@ -480,3 +482,4 @@ make certs
 | `README.md` | User-facing documentation |
 | `BUILD.md` | Build and deployment guide |
 | `WINDOWS_BUILD.md` | Windows-specific build instructions |
+| `necessidade.md` | Original requirements (Portuguese) |

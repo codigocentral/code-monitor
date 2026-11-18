@@ -349,7 +349,8 @@ async fn construction_filters_disabled_collectors_and_keeps_supplied_directories
     )
     .await
     .unwrap()
-    .with_tls_dirs(vec!["owned-unit-certs".into()]);
+    .with_tls_dirs(vec!["owned-unit-certs".into()])
+    .with_image_versions(VersionsCollector::default());
     assert_eq!(monitor.update_interval, Duration::from_secs(7));
     assert_eq!(refreshes.load(AtomicOrdering::Relaxed), 1);
     assert!(!monitor.is_running.load(AtomicOrdering::SeqCst));
@@ -367,6 +368,7 @@ async fn construction_filters_disabled_collectors_and_keeps_supplied_directories
     assert!(state
         .tls_dirs
         .contains(&vec!["owned-unit-certs".to_owned()]));
+    assert!(state.calls.iter().any(|c| c == "versions_collector"));
     assert!(!logs.lock().unwrap().is_empty());
 }
 

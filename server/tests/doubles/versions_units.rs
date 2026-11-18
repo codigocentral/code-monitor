@@ -217,3 +217,293 @@ fn parser_and_digest_fallbacks_cover_empty_references_and_nonmatching_repositori
     http::STATE.with(|s| assert_eq!(s.borrow().builder_timeouts, [Duration::from_secs(15)]));
     http::reset();
 }
+fn tags(list: &[&str]) -> http::Response {
+    let body = serde_json::json!({ "name": "unit", "tags": list }).to_string();
+    http::Response::new(200, &body)
+}
+fn tags_page(list: &[&str], next: &str) -> http::Response {
+    let mut response = tags(list);
+    response.headers.insert(
+        "Link",
+        http::header::HeaderValue::from_str(&format!("<{next}>; rel=\"next\"")).unwrap(),
+    );
+    response
+}
+/// Pinned image whose digest matches: the registry is asked for its tags.
+async fn pinned(
+    collector: &VersionsCollector,
+    docker: &Docker,
+    state: &sdk::SharedState,
+    name: &str,
+    listing: io_result::Reply,
+) -> ImageVersionInfo {
+    image(state, name, Some("sha256:1"));
+    http::reply(Ok(digest(b"sha256:1")));
+    http::reply(listing);
+    collector.check_image(docker, name).await
+}
+mod io_result {
+    pub type Reply = std::io::Result<super::http::Response>;
+}
+#[tokio::test]
+async fn pinned_tags_report_the_newest_tag_in_their_line() {
+    http::reset();
+    let (docker, state) = docker();
+    let collector = VersionsCollector::default();
+    let line = [
+        "26.0", "26.1", "26.3", "26.4", "26.5-rc1", "27.0", "latest", "26.4.2",
+    ];
+    let info = pinned(
+        &collector,
+        &docker,
+        &state,
+        "fixture.invalid/sso:26.1",
+        Ok(tags(&line)),
+    )
+    .await;
+    assert_eq!(info.status, VersionStatus::NewerAvailable);
+    assert_eq!(info.latest_tag.as_deref(), Some("26.4"));
+    assert_eq!(info.remote_digest.as_deref(), Some("sha256:1"));
+    assert!(info.error.is_none());
+    http::STATE.with(|s| {
+        let s = s.borrow();
+        let call = s.calls.last().unwrap();
+        assert_eq!(call.method, "GET");
+        assert_eq!(call.url, "https://fixture.invalid/v2/sso/tags/list?n=1000");
+        assert_eq!(call.timeout, Duration::from_secs(15));
+    });
+
+    // Same repository, another pinned tag: the tag list comes from its cache
+    image(&state, "fixture.invalid/sso:26.4", Some("sha256:1"));
+    http::reply(Ok(digest(b"sha256:1")));
+    let info = collector
+        .check_image(&docker, "fixture.invalid/sso:26.4")
+        .await;
+    assert_eq!(info.status, VersionStatus::UpToDate, "27.0 is a new major");
+    assert!(info.latest_tag.is_none());
+
+    // Variant suffix and pre-releases
+    let web = [
+        "1.27.3-alpine",
+        "1.27.4",
+        "1.27.5-rc1-alpine",
+        "1.27.4-alpine",
+    ];
+    let info = pinned(
+        &collector,
+        &docker,
+        &state,
+        "fixture.invalid/web:1.27.3-alpine",
+        Ok(tags(&web)),
+    )
+    .await;
+    assert_eq!(info.latest_tag.as_deref(), Some("1.27.4-alpine"));
+    http::STATE.with(|s| assert!(s.borrow().responses.is_empty()));
+}
+#[tokio::test]
+async fn floating_and_non_semver_tags_never_list_tags() {
+    http::reset();
+    let (docker, state) = docker();
+    let collector = VersionsCollector::default();
+    for (name, remote, status) in [
+        (
+            "fixture.invalid/unit:latest",
+            "sha256:2",
+            VersionStatus::Drifted,
+        ),
+        (
+            "fixture.invalid/unit:16",
+            "sha256:1",
+            VersionStatus::UpToDate,
+        ),
+        (
+            "fixture.invalid/unit:2024-01-15",
+            "sha256:1",
+            VersionStatus::UpToDate,
+        ),
+        (
+            "fixture.invalid/unit:stable",
+            "sha256:1",
+            VersionStatus::UpToDate,
+        ),
+    ] {
+        image(&state, name, Some("sha256:1"));
+        http::reply(Ok(digest(remote.as_bytes())));
+        let info = collector.check_image(&docker, name).await;
+        assert_eq!(info.status, status, "{name}");
+        assert!(info.latest_tag.is_none());
+    }
+    http::STATE.with(|s| {
+        let s = s.borrow();
+        assert!(s.calls.iter().all(|c| c.method == "HEAD"));
+        assert!(s.responses.is_empty());
+    });
+}
+#[tokio::test]
+async fn tag_listing_failures_are_unknown_and_drift_still_wins() {
+    http::reset();
+    let (docker, state) = docker();
+    let collector = VersionsCollector::default();
+    for (name, reply, prefix) in [
+        (
+            "fixture.invalid/a:1.2",
+            Ok(http::Response::new(429, "")),
+            "Tag listing failed: Registry returned HTTP 429",
+        ),
+        (
+            "fixture.invalid/b:1.2",
+            Err(std::io::Error::other("unit offline")),
+            "Tag listing failed: Network error: unit offline",
+        ),
+        (
+            "fixture.invalid/c:1.2",
+            Ok(http::Response::new(200, "not json")),
+            "Tag listing failed: Invalid tag list",
+        ),
+    ] {
+        let info = pinned(&collector, &docker, &state, name, reply).await;
+        assert_eq!(info.status, VersionStatus::Unknown, "{name}");
+        assert!(info.error.as_deref().unwrap().starts_with(prefix), "{name}");
+        assert_eq!(info.remote_digest.as_deref(), Some("sha256:1"));
+    }
+    // A failed listing is not cached: the next check asks again
+    let expired = VersionsCollector::new(Duration::ZERO, vec![]);
+    for reply in [Ok(http::Response::new(429, "")), Ok(tags(&["1.3"]))] {
+        let info = pinned(&expired, &docker, &state, "fixture.invalid/a:1.2", reply).await;
+        assert!(matches!(
+            info.status,
+            VersionStatus::Unknown | VersionStatus::NewerAvailable
+        ));
+    }
+    // Missing "tags" is an empty list, not an error
+    let info = pinned(
+        &collector,
+        &docker,
+        &state,
+        "fixture.invalid/d:1.2",
+        Ok(http::Response::new(200, "{\"tags\":null}")),
+    )
+    .await;
+    assert_eq!(info.status, VersionStatus::UpToDate);
+
+    // Drift and a newer tag at once: drift wins, the newer tag is kept
+    image(&state, "fixture.invalid/e:1.2", Some("sha256:1"));
+    http::reply(Ok(digest(b"sha256:2")));
+    http::reply(Err(std::io::Error::other("unit offline")));
+    let info = collector
+        .check_image(&docker, "fixture.invalid/e:1.2")
+        .await;
+    assert_eq!(info.status, VersionStatus::Drifted);
+    assert!(info.error.is_none());
+    image(&state, "fixture.invalid/f:1.2", Some("sha256:1"));
+    http::reply(Ok(digest(b"sha256:2")));
+    http::reply(Ok(tags(&["1.2", "1.5"])));
+    let info = collector
+        .check_image(&docker, "fixture.invalid/f:1.2")
+        .await;
+    assert_eq!(info.status, VersionStatus::Drifted);
+    assert_eq!(info.latest_tag.as_deref(), Some("1.5"));
+    http::STATE.with(|s| assert!(s.borrow().responses.is_empty()));
+}
+#[tokio::test]
+async fn tag_listing_follows_pages_with_the_same_token() {
+    http::reset();
+    let collector = VersionsCollector::default();
+    http::reply(Ok(http::Response::new(200, "{\"token\":\"unit-token\"}")));
+    http::reply(Ok(tags_page(
+        &["1.0", "1.1"],
+        "/v2/unit/app/tags/list?last=1.1&n=1000",
+    )));
+    http::reply(Ok(tags(&["1.2"])));
+    assert_eq!(
+        collector.fetch_tags("ghcr.io", "unit/app").await.unwrap(),
+        ["1.0", "1.1", "1.2"]
+    );
+    http::STATE.with(|s| {
+        let s = s.borrow();
+        let urls: Vec<_> = s.calls.iter().map(|c| c.url.as_str()).collect();
+        assert_eq!(
+            urls[1..],
+            [
+                "https://ghcr.io/v2/unit/app/tags/list?n=1000",
+                "https://ghcr.io/v2/unit/app/tags/list?last=1.1&n=1000",
+            ]
+        );
+        for call in &s.calls[1..] {
+            assert_eq!(
+                call.headers,
+                [("Authorization".into(), "Bearer unit-token".into())]
+            );
+        }
+    });
+    // A registry that keeps paginating is cut off, keeping what it sent
+    http::reset();
+    for _ in 0..MAX_TAG_PAGES {
+        http::reply(Ok(tags_page(&["9.9"], "/v2/unit/tags/list?last=9.9")));
+    }
+    let listed = collector
+        .fetch_tags("fixture.invalid", "unit")
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), MAX_TAG_PAGES);
+    http::STATE.with(|s| assert!(s.borrow().responses.is_empty()));
+}
+#[tokio::test]
+async fn configuration_sets_ttls_prereleases_and_skip_patterns() {
+    http::reset();
+    let config = crate::config::ImageVersionsConfig {
+        digest_cache_ttl_hours: 48,
+        tag_cache_ttl_hours: 24,
+        include_prereleases: true,
+        skip_patterns: vec!["fixture.invalid/frozen".into()],
+    };
+    let collector = VersionsCollector::from_config(&config);
+    assert_eq!(collector.cache_ttl, Duration::from_secs(48 * 3600));
+    assert_eq!(
+        collector.tag_cache_ttl,
+        Duration::from_secs(48 * 3600),
+        "never below the digest TTL"
+    );
+    assert!(collector.include_prereleases);
+    let default = VersionsCollector::default();
+    assert_eq!(default.tag_cache_ttl, DEFAULT_TAG_CACHE_TTL);
+    assert!(!default.include_prereleases);
+
+    let (docker, state) = docker();
+    let skipped = collector
+        .check_image(&docker, "fixture.invalid/frozen:1.2")
+        .await;
+    assert_eq!(skipped.status, VersionStatus::Unknown);
+    assert!(skipped.latest_tag.is_none());
+    assert!(state.lock().unwrap().calls.is_empty());
+
+    let info = pinned(
+        &collector,
+        &docker,
+        &state,
+        "fixture.invalid/app:1.2",
+        Ok(tags(&["1.2", "1.3-rc1"])),
+    )
+    .await;
+    assert_eq!(info.latest_tag.as_deref(), Some("1.3-rc1"));
+
+    // Poisoned tag cache: lookups still work, uncached
+    let poisoned = VersionsCollector::new(Duration::ZERO, vec![]);
+    let lock = poisoned.tag_cache.clone();
+    assert!(std::thread::spawn(move || {
+        let _guard = lock.write().unwrap();
+        panic!("unit tag cache poisoned");
+    })
+    .join()
+    .is_err());
+    let info = pinned(
+        &poisoned,
+        &docker,
+        &state,
+        "fixture.invalid/app:1.2",
+        Ok(tags(&["1.4"])),
+    )
+    .await;
+    assert_eq!(info.latest_tag.as_deref(), Some("1.4"));
+    http::STATE.with(|s| assert!(s.borrow().responses.is_empty()));
+}

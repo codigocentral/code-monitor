@@ -1,0 +1,206 @@
+# ==============================================
+# GITLAB CI/CD - code-monitor
+# ==============================================
+# MR e main:  lint (fmt + clippy) -> test (cargo test, lcov) -> build (binários
+#             Linux x86_64 estáticos, musl, versionados) -> sonar (só aviso)
+# main e development: os binários vão também para o Package Registry genérico do projeto,
+#             em code-monitor/<versão>-<sha>/, para o playbook do code-monitor-ops
+#             instalar exatamente a mesma build em todos os hosts.
+#
+# A versão embutida (`monitor-server --version`) é "<versão do Cargo> (<sha curto>)",
+# lida pelo build.rs a partir de CODE_MONITOR_GIT_SHA.
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    # Evita pipeline duplicado: branch com MR aberto roda só o pipeline do MR.
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS && $CI_PIPELINE_SOURCE == "push"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+    - if: '$CI_COMMIT_TAG'
+
+stages:
+  - lint
+  - test
+  - build
+  - quality
+  - publish
+
+variables:
+  RUST_VERSION: "1.91"
+  CARGO_LLVM_COV_VERSION: "0.9.1"
+  CARGO_HOME: "$CI_PROJECT_DIR/.cargo-home"
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CODE_MONITOR_GIT_SHA: "$CI_COMMIT_SHORT_SHA"
+  MUSL_TARGET: x86_64-unknown-linux-musl
+  SONAR_HOST_URL: "https://sonar.didaticos.com"
+
+.rust:
+  image: rust:$RUST_VERSION-slim-bookworm
+  tags:
+    - docker
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends protobuf-compiler libprotobuf-dev pkg-config curl git >/dev/null
+  cache:
+    key: cargo-$CI_JOB_NAME
+    paths:
+      - .cargo-home/registry/index
+      - .cargo-home/registry/cache
+      - .cargo-home/git/db
+      - target/
+
+lint:
+  extends: .rust
+  stage: lint
+  script:
+    - rustup component add rustfmt clippy
+    - cargo fmt --all -- --check
+    - cargo clippy --workspace --all-targets -- -D warnings
+    # The unit-doubles feature swaps the external SDKs for in-memory doubles;
+    # lint that configuration too so neither build rots.
+    - cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+# As units systemd do produto (agente e timer do firewall) passam pelo
+# systemd-analyze verify: erro de sintaxe ou diretiva desconhecida quebra aqui,
+# não no host.
+lint:systemd:
+  stage: lint
+  image: debian:bookworm-slim
+  tags:
+    - docker
+  needs: []
+  script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends systemd iptables >/dev/null
+    - groupadd --system code-monitor && useradd --system --no-create-home -g code-monitor code-monitor
+    # verify confere se o ExecStart existe; o binário real não importa aqui
+    - install -m 755 /bin/true /usr/local/bin/monitor-server && mkdir -p /etc/code-monitor /var/lib/code-monitor/firewall
+    - systemd-analyze verify service/linux/code-monitor-server.service service/linux/code-monitor-firewall-snapshot.service service/linux/code-monitor-firewall-snapshot.timer
+    # O agente nunca recebe a capability que permitiria alterar o firewall
+    - "! grep -rn 'CAP_NET_ADMIN' service/linux/code-monitor-server.service"
+
+test:
+  extends: .rust
+  stage: test
+  timeout: 30m
+  script:
+    # cargo test instrumentado: o lcov vai para o sonar. Binário fixo do
+    # cargo-llvm-cov (compilar com cargo install custaria minutos a cada job).
+    - rustup component add llvm-tools-preview
+    - curl -fsSL "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v${CARGO_LLVM_COV_VERSION}/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz" | tar xz -C /usr/local/cargo/bin
+    # Sem --skip: o teste de systemd se desliga sozinho onde o systemd não é o
+    # init (container), e cada chamada gRPC dos test_integration_* tem prazo de
+    # 30 s, então um coletor travado falha rápido com o nome da chamada (#16).
+    - cargo llvm-cov --workspace --lcov --output-path lcov.info
+    - sed -i "s#^SF:$PWD/#SF:#" lcov.info
+    - cargo llvm-cov report --summary-only
+  coverage: '/^TOTAL\s+(?:\d+\s+\d+\s+[\d.]+%\s+){2}\d+\s+\d+\s+([\d.]+)%/'
+  artifacts:
+    paths:
+      - lcov.info
+    expire_in: 7 days
+
+build:linux-x86_64:
+  extends: .rust
+  stage: build
+  needs: []
+  script:
+    - apt-get install -y -qq --no-install-recommends musl-tools file >/dev/null
+    - rustup target add "$MUSL_TARGET"
+    - cargo build --release --locked --target "$MUSL_TARGET" -p monitor-server -p monitor-client
+    - VERSION="$(grep -m1 '^version' server/Cargo.toml | cut -d'"' -f2)"
+    - test -n "$VERSION"
+    - PKG_VERSION="${VERSION}-${CI_COMMIT_SHORT_SHA}"
+    - mkdir -p dist
+    - |
+      for bin in monitor-server monitor-client; do
+        cp "target/$MUSL_TARGET/release/$bin" "dist/$bin-x86_64-linux-musl"
+        strip "dist/$bin-x86_64-linux-musl" || true
+      done
+    # Units do agente e do timer root que salva o firewall (iptables-save) para
+    # a auditoria: o pacote leva tudo que a instalação precisa.
+    - cp service/linux/code-monitor-firewall-snapshot.service service/linux/code-monitor-firewall-snapshot.timer dist/
+    - file dist/*
+    # Estático de verdade: sem interpretador dinâmico, roda em qualquer distro
+    - "! file dist/monitor-server-x86_64-linux-musl | grep -q 'dynamically linked'"
+    - dist/monitor-server-x86_64-linux-musl --version | tee dist/VERSION
+    - grep -q "$CI_COMMIT_SHORT_SHA" dist/VERSION
+    - (cd dist && sha256sum monitor-* code-monitor-firewall-snapshot.* > SHA256SUMS)
+    - echo "PKG_VERSION=$PKG_VERSION" > build.env
+  artifacts:
+    name: "code-monitor-$CI_COMMIT_SHORT_SHA-x86_64-linux-musl"
+    paths:
+      - dist/
+    reports:
+      dotenv: build.env
+    expire_in: 30 days
+
+# ==============================================
+# QUALITY — SonarQube (só aviso: allow_failure e fora de qualquer needs)
+# ==============================================
+sonarqube:
+  stage: quality
+  image: sonarsource/sonar-scanner-cli:12.2.0.4256_8.1.0
+  tags:
+    - docker
+  needs:
+    - { job: test, optional: true, artifacts: true }
+  allow_failure: true
+  rules:
+    - if: '$SONAR_TOKEN'
+  variables:
+    SONAR_USER_HOME: "$CI_PROJECT_DIR/.sonar"
+    GIT_DEPTH: "0"
+  cache:
+    key: sonar-$CI_JOB_NAME
+    paths:
+      - .sonar/cache
+  script:
+    - |
+      if sonar-scanner \
+        -Dsonar.projectKey=codigocentral_code-monitor \
+        -Dsonar.host.url="$SONAR_HOST_URL" \
+        -Dsonar.token="$SONAR_TOKEN" \
+        -Dsonar.sources=shared/src,server/src,client/src \
+        -Dsonar.exclusions="target/**,coverage/**" \
+        -Dsonar.rust.lcov.reportPaths=lcov.info \
+        -Dsonar.qualitygate.wait=true; then
+        echo "Sonar: análise concluída e Quality Gate PASSED"
+      else
+        echo "Sonar: Quality Gate reprovado ou análise falhou (só aviso, não bloqueia)"
+        exit 1
+      fi
+
+# ==============================================
+# PUBLISH — Package Registry genérico (só main e tags)
+# ==============================================
+publish:package:
+  stage: publish
+  image: curlimages/curl:8.10.1
+  tags:
+    - docker
+  needs:
+    - job: build:linux-x86_64
+      artifacts: true
+    - job: test
+      artifacts: false
+    - job: lint
+      artifacts: false
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    # development também publica: cada pacote leva o sha na versão, então o
+    # rollout pode instalar a build do development sem esperar o lançamento.
+    - if: '$CI_COMMIT_BRANCH == "development"'
+    - if: '$CI_COMMIT_TAG'
+  script:
+    - test -n "$PKG_VERSION"
+    - BASE="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/code-monitor/${PKG_VERSION}"
+    - |
+      for f in dist/monitor-server-x86_64-linux-musl dist/monitor-client-x86_64-linux-musl \
+               dist/code-monitor-firewall-snapshot.service dist/code-monitor-firewall-snapshot.timer \
+               dist/SHA256SUMS dist/VERSION; do
+        curl --fail --silent --show-error --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+          --upload-file "$f" "$BASE/$(basename "$f")"
+        echo
+      done
+    - echo "Publicado em $BASE/"

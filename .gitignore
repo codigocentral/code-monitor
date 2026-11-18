@@ -22,6 +22,9 @@ keys/
 *.p12
 *.pfx
 
+# Private operational repositories or local deployment material
+ops-private/
+clientes-private/
 
 # Debug files
 *.pdb

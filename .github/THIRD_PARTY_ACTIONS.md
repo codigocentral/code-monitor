@@ -12,10 +12,15 @@ keep it up to date.
 | `actions/download-artifact` | https://github.com/actions/download-artifact | `d3f86a1...` (v4) | Download artifacts in the release job (official) |
 | `dtolnay/rust-toolchain` | https://github.com/dtolnay/rust-toolchain | `29eef33...` (stable) | Install the Rust toolchain; maintained by a libs-team Rust maintainer |
 | `Swatinem/rust-cache` | https://github.com/Swatinem/rust-cache | `e18b497...` (v2) | Cache cargo registry/target between CI runs |
+| `codecov/codecov-action` | https://github.com/codecov/codecov-action | `ab904c4...` (v3) | Upload tarpaulin coverage reports to Codecov |
+| `rustsec/audit-check` | https://github.com/rustsec/audit-check | `e9159ac...` (v1) | Run `cargo audit` against the RustSec advisory DB |
 | `taiki-e/install-action` | https://github.com/taiki-e/install-action | `903f26e...` (cross) | Install `cross` for aarch64/musl cross-compilation in releases |
 | `softprops/action-gh-release` | https://github.com/softprops/action-gh-release | `de2c0eb...` (v1) | Create the GitHub Release and attach binaries |
+| `actions/configure-pages` | https://github.com/actions/configure-pages | `983d773...` (v5) | Configure GitHub Pages for the product page (official) |
+| `actions/upload-pages-artifact` | https://github.com/actions/upload-pages-artifact | `56afc60...` (v3) | Package `site/` for GitHub Pages (official) |
+| `actions/deploy-pages` | https://github.com/actions/deploy-pages | `d6db901...` (v4) | Deploy the product page to GitHub Pages (official) |
 
-Full SHAs are in `.github/workflows/ci.yml` and `.github/workflows/release.yml`.
+Full SHAs are in `.github/workflows/ci.yml`, `.github/workflows/release.yml` and `.github/workflows/pages.yml`.
 
 ## Update policy
 
@@ -35,6 +40,8 @@ Full SHAs are in `.github/workflows/ci.yml` and `.github/workflows/release.yml`.
 - `actions/*` are first-party GitHub actions.
 - `dtolnay/rust-toolchain`, `Swatinem/rust-cache` and `taiki-e/install-action`
   are de-facto standards in the Rust ecosystem with broad usage.
+- `codecov/codecov-action` had a supply-chain incident in 2021 (bash uploader);
   the action is pinned and only receives a coverage XML, no secrets beyond the
   Codecov token.
+- `rustsec/audit-check` and `softprops/action-gh-release` receive the
   `GITHUB_TOKEN` — keep them pinned and review diffs on updates.

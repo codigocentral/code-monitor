@@ -2,7 +2,7 @@
 name = "monitor-client"
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
+license = "AGPL-3.0-or-later"
 
 [features]
 # Unit-only external provider bindings; normal builds retain native SDKs.

@@ -3,6 +3,7 @@
 //! This collector gathers metrics from Docker containers using the
 //! Docker Engine API via the bollard crate.
 
+use crate::collectors::compose::runtime::{self as compose_runtime, ContainerRuntime};
 use crate::collectors::versions::VersionsCollector;
 #[cfg(all(test, feature = "unit-doubles"))]
 use crate::unit_bollard as bollard;
@@ -14,8 +15,9 @@ use bollard::Docker;
 use chrono::{DateTime, Utc};
 use futures_util::stream::StreamExt;
 use shared::types::{ContainerHealthDetail, ContainerInfo};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tracing::{debug, info, warn};
 
 /// Cap on the stored healthcheck output.
@@ -123,6 +125,11 @@ pub struct DockerCollector {
     /// "no containers": the audit reports the source as down instead.
     last_collect_ok: AtomicBool,
     versions_collector: Arc<VersionsCollector>,
+    /// What the last collection's `inspect` calls said about the running
+    /// containers, for the compose drift audit. Environment keys only.
+    compose_runtimes: Mutex<Vec<ContainerRuntime>>,
+    /// Environment keys each image defines, by image ID (immutable)
+    image_env_keys: Mutex<HashMap<String, BTreeSet<String>>>,
 }
 
 impl DockerCollector {
@@ -134,6 +141,8 @@ impl DockerCollector {
             connection_failed: AtomicBool::new(false),
             last_collect_ok: AtomicBool::new(false),
             versions_collector: Arc::new(VersionsCollector::default()),
+            compose_runtimes: Mutex::default(),
+            image_env_keys: Mutex::default(),
         }
     }
 
@@ -162,6 +171,8 @@ impl DockerCollector {
             connection_failed: AtomicBool::new(false),
             last_collect_ok: AtomicBool::new(false),
             versions_collector: Arc::new(VersionsCollector::default()),
+            compose_runtimes: Mutex::default(),
+            image_env_keys: Mutex::default(),
         }
     }
 
@@ -192,7 +203,15 @@ impl DockerCollector {
             connection_failed: AtomicBool::new(false),
             last_collect_ok: AtomicBool::new(false),
             versions_collector: Arc::new(VersionsCollector::default()),
+            compose_runtimes: Mutex::default(),
+            image_env_keys: Mutex::default(),
         }
+    }
+
+    /// Use a configured image version collector instead of the default one.
+    pub fn with_versions_collector(mut self, versions: VersionsCollector) -> Self {
+        self.versions_collector = Arc::new(versions);
+        self
     }
 
     /// Check if Docker is available
@@ -255,6 +274,7 @@ impl DockerCollector {
         self.last_collect_ok.store(true, Ordering::SeqCst);
 
         let mut container_infos = Vec::new();
+        let mut compose_runtimes = Vec::new();
 
         for container in containers {
             let id = container.id.clone().unwrap_or_default();
@@ -290,7 +310,10 @@ impl DockerCollector {
                 InspectDetails::default()
             } else {
                 match docker.inspect_container(&id, None).await {
-                    Ok(inspect) => extract_inspect_details(&inspect),
+                    Ok(inspect) => {
+                        compose_runtimes.extend(compose_runtime::runtime_from_inspect(&inspect));
+                        extract_inspect_details(&inspect)
+                    }
                     Err(e) => {
                         warn!("Failed to inspect container {}: {}", name, e);
                         InspectDetails::default()
@@ -354,7 +377,62 @@ impl DockerCollector {
             });
         }
 
+        if let Ok(mut slot) = self.compose_runtimes.lock() {
+            *slot = compose_runtimes;
+        }
         Ok(container_infos)
+    }
+
+    /// The running containers of the last collection, for the compose drift
+    /// audit, with the environment keys of each image filled in when known.
+    pub async fn compose_runtimes(&self) -> Vec<ContainerRuntime> {
+        let mut runtimes = self
+            .compose_runtimes
+            .lock()
+            .map(|r| r.clone())
+            .unwrap_or_default();
+        let Some(docker) = &self.docker else {
+            return runtimes;
+        };
+        for runtime in &mut runtimes {
+            runtime.image_env_keys = self.image_env_keys(docker, &runtime.image_id).await;
+        }
+        let live: BTreeSet<&str> = runtimes.iter().map(|r| r.image_id.as_str()).collect();
+        if let Ok(mut cache) = self.image_env_keys.lock() {
+            cache.retain(|id, _| live.contains(id.as_str()));
+        }
+        runtimes
+    }
+
+    /// Keys the image's `ENV` defines; `None` when the image cannot be read.
+    async fn image_env_keys(&self, docker: &Docker, image_id: &str) -> Option<BTreeSet<String>> {
+        if image_id.is_empty() {
+            return None;
+        }
+        let cached = self
+            .image_env_keys
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(image_id).cloned());
+        if cached.is_some() {
+            return cached;
+        }
+        let image = match docker.inspect_image(image_id).await {
+            Ok(image) => image,
+            Err(e) => {
+                debug!("compose: cannot inspect image {}: {}", image_id, e);
+                return None;
+            }
+        };
+        let keys = image
+            .config
+            .and_then(|c| c.env)
+            .map(|env| compose_runtime::env_keys(&env))
+            .unwrap_or_default();
+        if let Ok(mut cache) = self.image_env_keys.lock() {
+            cache.insert(image_id.to_string(), keys.clone());
+        }
+        Some(keys)
     }
 
     /// Returns `(cpu_percent, memory_usage, memory_limit, network_rx, network_tx)`.
@@ -440,6 +518,14 @@ impl Default for DockerCollector {
 mod tests {
     use super::*;
     use crate::collectors::Collector;
+
+    #[test]
+    fn test_with_versions_collector_replaces_the_default() {
+        let collector = DockerCollector::new_none();
+        let before = Arc::as_ptr(&collector.versions_collector);
+        let collector = collector.with_versions_collector(VersionsCollector::default());
+        assert_ne!(before, Arc::as_ptr(&collector.versions_collector));
+    }
 
     #[tokio::test]
     async fn test_docker_collector_unavailable_returns_empty() {

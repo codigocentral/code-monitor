@@ -13,7 +13,7 @@ use super::{format_bytes, format_uptime, Theme};
 
 /// Format a container's swap, marking the ones a `swapoff` would kill.
 ///
-/// This is the pre-flight a real deployment needed: SonarQube was capped at 2000M and
+/// This is the pre-flight the fleet needed: SonarQube was capped at 2000M and
 /// holding ~1.1G in swap, so clearing swap brought it straight past its cgroup
 /// limit and the kernel killed it. Every number needed to predict that was
 /// already in /proc; nothing was reading it.
@@ -155,7 +155,7 @@ const CRASH_LOOP_RESTARTS: u32 = 100;
 
 /// Format a container's restart count, abbreviating the large ones.
 ///
-/// Real crash loops reach six figures (412,813 restarts in one case) — a figure that has to
+/// The fleet's worst offender sat at 412,813 restarts — a figure that has to
 /// fit in a narrow column without pushing the table around.
 fn format_restart_count(restarts: u32) -> String {
     // The bounds stop just short of the next unit so rounding cannot produce a
@@ -195,6 +195,36 @@ fn container_health_icon(
     }
 }
 
+/// Markers after the image name: `↑` the tag moved in the registry (pull it
+/// again), `⇡ <tag>` a newer version tag exists in the same line (bump the
+/// tag), `·` up to date, `?` unknown, `(local)` built on the host.
+fn image_version_spans(ver: &shared::types::ImageVersionInfo) -> Vec<Span<'static>> {
+    use shared::types::VersionStatus;
+    let mut spans = Vec::new();
+    match ver.status {
+        VersionStatus::Drifted => {
+            spans.push(Span::styled(" ↑", Style::default().fg(Theme::WARNING)));
+        }
+        VersionStatus::UpToDate => {
+            spans.push(Span::styled(" ·", Style::default().fg(Theme::SUCCESS)));
+        }
+        VersionStatus::LocalBuild => {
+            spans.push(Span::styled(" (local)", Style::default().fg(Theme::MUTED)));
+        }
+        VersionStatus::Unknown => {
+            spans.push(Span::styled(" ?", Style::default().fg(Theme::MUTED)));
+        }
+        VersionStatus::NewerAvailable => {}
+    }
+    if let Some(latest) = &ver.latest_tag {
+        spans.push(Span::styled(
+            format!(" ⇡ {latest}"),
+            Style::default().fg(Theme::ACCENT),
+        ));
+    }
+    spans
+}
+
 /// Summarise what the container fleet on a host is missing.
 ///
 /// Returns `None` when there is nothing to report, so a well-configured host
@@ -221,6 +251,11 @@ fn summarize_container_risks(containers: &[shared::types::ContainerInfo]) -> Opt
         .filter_map(|c| c.image_version.as_ref())
         .filter(|v| v.status == shared::types::VersionStatus::Drifted)
         .count();
+    let behind = containers
+        .iter()
+        .filter_map(|c| c.image_version.as_ref())
+        .filter(|v| v.latest_tag.is_some())
+        .count();
 
     let mut parts = Vec::new();
     if unlimited > 0 {
@@ -241,6 +276,9 @@ fn summarize_container_risks(containers: &[shared::types::ContainerInfo]) -> Opt
     }
     if drifted > 0 {
         parts.push(format!("{} outdated image(s)", drifted));
+    }
+    if behind > 0 {
+        parts.push(format!("{} image(s) with a newer tag", behind));
     }
 
     if parts.is_empty() {
@@ -1053,26 +1091,7 @@ pub(super) fn draw_containers_tab<B: tui::backend::Backend>(
                     let mut image_spans =
                         vec![Span::styled(image_base, Style::default().fg(Theme::MUTED))];
                     if let Some(ver) = &c.image_version {
-                        match ver.status {
-                            shared::types::VersionStatus::Drifted => {
-                                image_spans
-                                    .push(Span::styled(" ↑", Style::default().fg(Theme::WARNING)));
-                            }
-                            shared::types::VersionStatus::UpToDate => {
-                                image_spans
-                                    .push(Span::styled(" ·", Style::default().fg(Theme::SUCCESS)));
-                            }
-                            shared::types::VersionStatus::LocalBuild => {
-                                image_spans.push(Span::styled(
-                                    " (local)",
-                                    Style::default().fg(Theme::MUTED),
-                                ));
-                            }
-                            shared::types::VersionStatus::Unknown => {
-                                image_spans
-                                    .push(Span::styled(" ?", Style::default().fg(Theme::MUTED)));
-                            }
-                        }
+                        image_spans.extend(image_version_spans(ver));
                     }
 
                     Row::new(vec![
@@ -1901,7 +1920,7 @@ mod tests {
             vec![
                 NetworkInfo {
                     interface: "eth0".to_string(),
-                    ip_address: "203.0.113.10".to_string(),
+                    ip_address: "192.168.1.10".to_string(),
                     mac_address: "aa:bb:cc:dd:ee:ff".to_string(),
                     is_up: true,
                     bytes_sent: 1_000_000,
@@ -1924,7 +1943,7 @@ mod tests {
         let buffer = render_app_to_buffer(&app, draw_network_tab);
         assert!(buffer_contains(&buffer, "eth0"));
         assert!(buffer_contains(&buffer, "eth1"));
-        assert!(buffer_contains(&buffer, "203.0.113.10"));
+        assert!(buffer_contains(&buffer, "192.168.1.10"));
         assert!(buffer_contains(&buffer, "10.0.0.5"));
         assert!(buffer_contains(&buffer, "UP"));
         assert!(buffer_contains(&buffer, "DOWN"));
@@ -2817,12 +2836,62 @@ mod tests {
             local_digest: Some("sha256:111".to_string()),
             remote_digest: Some("sha256:222".to_string()),
             status: shared::types::VersionStatus::Drifted,
+            latest_tag: None,
             checked_at: None,
             error: None,
         });
 
         let summary = summarize_container_risks(&containers).unwrap();
         assert!(summary.contains("1 outdated image(s)"));
+        assert!(!summary.contains("newer tag"));
+    }
+
+    #[test]
+    fn test_risk_summary_counts_images_with_a_newer_tag() {
+        let mut containers = vec![container_fixture("a"), container_fixture("b")];
+        containers[1].image_version = Some(shared::types::ImageVersionInfo {
+            image_ref: "keycloak/keycloak:26.1".to_string(),
+            registry: "quay.io".to_string(),
+            repository: "keycloak/keycloak".to_string(),
+            tag: "26.1".to_string(),
+            local_digest: Some("sha256:111".to_string()),
+            remote_digest: Some("sha256:111".to_string()),
+            status: shared::types::VersionStatus::NewerAvailable,
+            latest_tag: Some("26.4".to_string()),
+            checked_at: None,
+            error: None,
+        });
+
+        let summary = summarize_container_risks(&containers).unwrap();
+        assert!(summary.contains("1 image(s) with a newer tag"));
+        assert!(!summary.contains("outdated image(s)"));
+    }
+
+    #[test]
+    fn test_image_version_spans_tell_drift_from_newer_tag() {
+        let mut ver = shared::types::ImageVersionInfo {
+            image_ref: "nginx:1.27.3-alpine".to_string(),
+            registry: "registry-1.docker.io".to_string(),
+            repository: "library/nginx".to_string(),
+            tag: "1.27.3-alpine".to_string(),
+            local_digest: None,
+            remote_digest: None,
+            status: shared::types::VersionStatus::NewerAvailable,
+            latest_tag: Some("1.27.4-alpine".to_string()),
+            checked_at: None,
+            error: None,
+        };
+        let text = |ver: &shared::types::ImageVersionInfo| {
+            image_version_spans(ver)
+                .iter()
+                .map(|s| s.content.to_string())
+                .collect::<String>()
+        };
+        assert_eq!(text(&ver), " ⇡ 1.27.4-alpine");
+        ver.status = shared::types::VersionStatus::Drifted;
+        assert_eq!(text(&ver), " ↑ ⇡ 1.27.4-alpine");
+        ver.latest_tag = None;
+        assert_eq!(text(&ver), " ↑");
     }
 
     #[test]

@@ -30,7 +30,7 @@ cd client && cargo build --release
 # Add the server you want to monitor
 ./target/release/monitor-client add \
     --name "My Server" \
-    --address 203.0.113.100 \
+    --address 192.168.1.100 \
     --port 50051
 
 # Start monitoring
@@ -42,10 +42,10 @@ cd client && cargo build --release
 ### Test Server Connectivity
 ```bash
 # Test if server is running
-curl http://203.0.113.100:50051/health
+curl http://192.168.1.100:50051/health
 
 # Or use telnet
-telnet 203.0.113.100 50051
+telnet 192.168.1.100 50051
 ```
 
 ### Test Client Connection
@@ -78,7 +78,7 @@ reconnect_delay_seconds = 5
 [[servers]]
 id = "your-server-uuid"
 name = "Production Server"
-address = "203.0.113.100"
+address = "192.168.1.100"
 port = 50051
 description = "Main production server"
 ```
@@ -88,10 +88,10 @@ description = "Main production server"
 ### 1. Server Deployment
 ```bash
 # Copy server binary to target machine
-scp target/release/monitor-server user@203.0.113.100:/usr/local/bin/
+scp target/release/monitor-server user@192.168.1.100:/usr/local/bin/
 
 # SSH to server and start it
-ssh user@203.0.113.100
+ssh user@192.168.1.100
 nohup monitor-server --address 0.0.0.0 --port 50051 &
 ```
 
@@ -136,8 +136,8 @@ cargo tree
 ./monitor-server --log-level debug
 
 # Test network connectivity
-ping 203.0.113.100
-nmap -p 50051 203.0.113.100
+ping 192.168.1.100
+nmap -p 50051 192.168.1.100
 
 # Check authentication
 # Ensure key files exist and have correct permissions

@@ -513,7 +513,7 @@ mod tests {
         let mut app = create_test_app();
         app.input_mode = InputMode::AddServer;
         app.add_server_state.step = AddServerStep::Address;
-        app.input_buffer = "203.0.113.1".to_string();
+        app.input_buffer = "192.168.1.1".to_string();
 
         terminal
             .draw(|f| draw_command_input(f, &app, f.size()))
@@ -521,7 +521,7 @@ mod tests {
 
         let text = buffer_to_string(terminal.backend().buffer());
         assert!(text.contains("Server Address"));
-        assert!(text.contains("203.0.113.1"));
+        assert!(text.contains("192.168.1.1"));
     }
 
     #[test]

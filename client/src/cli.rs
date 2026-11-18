@@ -207,7 +207,7 @@ mod tests {
             "--name",
             "test-server",
             "--address",
-            "203.0.113.100",
+            "192.168.1.100",
             "--port",
             "50051",
         ]);
@@ -221,7 +221,7 @@ mod tests {
                 description,
             }) => {
                 assert_eq!(name, "test-server");
-                assert_eq!(address, "203.0.113.100");
+                assert_eq!(address, "192.168.1.100");
                 assert_eq!(port, 50051);
                 assert_eq!(token, None);
                 assert_eq!(description, None);
@@ -280,14 +280,14 @@ mod tests {
         let args = CliArgs::parse_from(vec![
             "monitor-client",
             "connect",
-            "203.0.113.50",
+            "192.168.1.50",
             "--port",
             "50052",
         ]);
 
         match args.command {
             Some(Commands::Connect { address, port }) => {
-                assert_eq!(address, "203.0.113.50");
+                assert_eq!(address, "192.168.1.50");
                 assert_eq!(port, 50052);
             }
             _ => panic!("Expected Connect command"),

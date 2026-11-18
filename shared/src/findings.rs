@@ -13,8 +13,10 @@
 
 use crate::alerts::{AlertManager, AlertSeverity};
 use crate::commitment::{self, CommitmentLevel, MemoryCommitment};
+use crate::compose::{ComposeAssessment, ComposeDifference, ComposeField, ComposeStatus};
 use crate::firewall::{Exposure, FirewallSnapshot};
 use crate::network::{self, NetworkState};
+use crate::operations::{DiskPolicy, ScheduledJob};
 use crate::types::{
     ContainerInfo, HealthAssessment, ListeningPortInfo, MariaDBClusterInfo, PostgresClusterInfo,
     SystemInfo, SystemdFailedUnit, TlsSnapshot, VersionStatus,
@@ -69,11 +71,20 @@ pub enum Check {
     MariadbSchemaEmpty,
     /// Image whose tag now points to a newer digest in the registry
     ImageDrift,
+    /// Image on a pinned version tag with a newer tag in the same line
+    ImageNewerAvailable,
     DiskPressure,
     ScheduledJobFailed,
     ScheduledJobOverdue,
     ScheduledJobDisabled,
     ScheduledJobUnavailable,
+    /// Running container that differs from the compose file declaring it
+    ComposeDrift,
+    /// The compose file declares an older tag than the one running: the next
+    /// `compose up` is a downgrade
+    ComposeDowngradeRisk,
+    /// The compose file of a running service could not be read or understood
+    ComposeUnreadable,
 }
 
 /// Which collector a check depends on.
@@ -146,11 +157,15 @@ impl Check {
         Check::MariadbInstanceEmpty,
         Check::MariadbSchemaEmpty,
         Check::ImageDrift,
+        Check::ImageNewerAvailable,
         Check::DiskPressure,
         Check::ScheduledJobFailed,
         Check::ScheduledJobOverdue,
         Check::ScheduledJobDisabled,
         Check::ScheduledJobUnavailable,
+        Check::ComposeDrift,
+        Check::ComposeDowngradeRisk,
+        Check::ComposeUnreadable,
     ];
 
     /// Stable identifier, used as the `check` label.
@@ -175,11 +190,15 @@ impl Check {
             Check::MariadbInstanceEmpty => "mariadb_instance_empty",
             Check::MariadbSchemaEmpty => "mariadb_schema_empty",
             Check::ImageDrift => "image_drift",
+            Check::ImageNewerAvailable => "image_newer_available",
             Check::DiskPressure => "disk_pressure",
             Check::ScheduledJobFailed => "scheduled_job_failed",
             Check::ScheduledJobOverdue => "scheduled_job_overdue",
             Check::ScheduledJobDisabled => "scheduled_job_disabled",
             Check::ScheduledJobUnavailable => "scheduled_job_unavailable",
+            Check::ComposeDrift => "compose_drift",
+            Check::ComposeDowngradeRisk => "compose_downgrade_risk",
+            Check::ComposeUnreadable => "compose_unreadable",
         }
     }
 
@@ -192,7 +211,8 @@ impl Check {
             | Check::ContainerUnhealthy
             | Check::ContainersStopped
             | Check::SwapoffWouldExceedLimit
-            | Check::ImageDrift => Source::Docker,
+            | Check::ImageDrift
+            | Check::ImageNewerAvailable => Source::Docker,
             Check::SwapThrashing | Check::MemoryStalled | Check::MemoryOvercommitted => {
                 Source::System
             }
@@ -202,6 +222,9 @@ impl Check {
             Check::ScheduledJobOverdue => Source::ScheduledJobs,
             Check::ScheduledJobDisabled => Source::ScheduledJobs,
             Check::ScheduledJobUnavailable => Source::ScheduledJobs,
+            Check::ComposeDrift | Check::ComposeDowngradeRisk | Check::ComposeUnreadable => {
+                Source::Docker
+            }
 
             Check::TlsCertificateExpiring
             | Check::TlsRenewalBroken
@@ -259,6 +282,30 @@ impl Check {
                 fix_pt_br: "Antes de swapoff, aumente o limite do container (mem_limit) ou reduza o uso dele. Se for warning, aumente o limite ou corrija o consumo agora.",
                 why_en: "The container has pages in swap; if the host's swap is cleared (swapoff) it goes over its limit and the kernel kills it (OOM). A pre-flight check: info normally, warning if the container already sits at its RAM limit living on swap.",
                 fix_en: "Before swapoff, raise the container's limit (mem_limit) or cut its usage. As a warning, raise the limit or fix the consumption now.",
+            },
+            Check::ImageNewerAvailable => Guidance {
+                why_pt_br: "A imagem está numa tag de versão fixa e o registry já publicou uma versão mais nova na mesma linha (mesmo major, mesma variante, sem pré-lançamento). Tag fixa nunca muda de digest, então sem este aviso o atraso passa despercebido.",
+                fix_pt_br: "Leia as notas de versão, troque a tag no compose/manifest para a indicada depois da seta e recrie o container (docker compose pull && docker compose up -d). Se a imagem é congelada de propósito, inclua-a em skip_patterns.",
+                why_en: "The image runs a pinned version tag and the registry has published a newer version in the same line (same major, same variant, no pre-release). A pinned tag never changes digest, so without this the lag goes unnoticed.",
+                fix_en: "Read the release notes, bump the tag in the compose file/manifest to the one after the arrow and recreate the container (docker compose pull && docker compose up -d). If the image is frozen on purpose, add it to skip_patterns.",
+            },
+            Check::ComposeDrift => Guidance {
+                why_pt_br: "O container em execução não bate com o docker-compose que o declara (porta/bind, volume, rede, restart, imagem ou chave de ambiente). Nada falha hoje; o próximo docker compose up recria o container pelo arquivo e desfaz a diferença sem erro e sem log.",
+                fix_pt_br: "Veja o detalhe em /findings e decida qual lado está certo: se o container está certo, leve a mudança para o compose (ou o .env) e versione; se o arquivo está certo, rode docker compose up -d <serviço> numa janela controlada. Divergência intencional: silencie o serviço em [compose_drift] silence no config.toml.",
+                why_en: "The running container does not match the docker-compose file that declares it (port/bind, volume, network, restart, image or environment key). Nothing fails today; the next docker compose up recreates the container from the file and undoes the difference, with no error and no log.",
+                fix_en: "Read the detail in /findings and decide which side is right: if the container is, carry the change into the compose file (or .env) and commit it; if the file is, run docker compose up -d <service> in a controlled window. For an intended divergence, silence the service under [compose_drift] silence in config.toml.",
+            },
+            Check::ComposeDowngradeRisk => Guidance {
+                why_pt_br: "O compose declara uma tag mais antiga do que a imagem em execução (o container foi atualizado sem atualizar o arquivo). O próximo docker compose up reverte a versão; com migrations já aplicadas, binário antigo sobre schema novo é perda de dados, não só downgrade.",
+                fix_pt_br: "Atualize a tag no compose (ou a variável no .env) para a versão em execução e versione o arquivo antes de qualquer compose up. Não rode compose up nesse serviço até corrigir.",
+                why_en: "The compose file declares an older tag than the running image (the container was upgraded without updating the file). The next docker compose up rolls the version back; with migrations already applied, an old binary on a new schema is data loss, not just a downgrade.",
+                fix_en: "Set the tag in the compose file (or the variable in .env) to the running version and commit it before any compose up. Do not run compose up on this service until then.",
+            },
+            Check::ComposeUnreadable => Guidance {
+                why_pt_br: "O agente não conseguiu ler ou entender o compose indicado nos labels do container (permissão, arquivo removido, YAML inválido ou recurso não suportado como extends/include). A divergência desse serviço está indeterminada, não limpa.",
+                fix_pt_br: "Confira o motivo no detalhe. Para permissão, dê leitura ao usuário do code-monitor no diretório do projeto e no compose (por exemplo, grupo com r-x no diretório e r-- nos arquivos). Se o arquivo mudou de lugar, recrie o container a partir do novo caminho.",
+                why_en: "The agent could not read or understand the compose file named in the container's labels (permissions, file removed, invalid YAML or an unsupported feature such as extends/include). Drift for this service is unknown, not clean.",
+                fix_en: "Check the reason in the detail. For permissions, give the code-monitor user read access to the project directory and the compose files (for example a group with r-x on the directory and r-- on the files). If the file moved, recreate the container from the new path.",
             },
             _ => return None,
         };
@@ -327,6 +374,9 @@ pub struct HostSnapshot {
     pub firewall: Option<FirewallSnapshot>,
     /// networkd state, read only when a wait-online unit has failed
     pub network: Option<NetworkState>,
+    /// Running containers compared with their compose files, already
+    /// confirmed across two passes; `None` when the comparison did not run
+    pub compose: Option<Vec<ComposeAssessment>>,
 }
 
 impl HostSnapshot {
@@ -379,18 +429,7 @@ pub fn evaluate(snapshot: &HostSnapshot, now: DateTime<Utc>) -> Vec<Finding> {
 
     if let Some(system) = &snapshot.system {
         system_findings(system, &mut findings);
-        for disk in &system.disk_info {
-            if let Some(severity) = snapshot.disk_policy.severity(disk) {
-                push_detailed(
-                    &mut findings,
-                    Check::DiskPressure,
-                    severity,
-                    &disk.mount_point,
-                    disk.usage_percent,
-                    Some(format!("{} bytes available", disk.available_bytes)),
-                );
-            }
-        }
+        disk_findings(system, &snapshot.disk_policy, &mut findings);
         if let Some(commitment) = snapshot.memory_commitment() {
             commitment_findings(&commitment, system, &mut findings);
         }
@@ -398,6 +437,7 @@ pub fn evaluate(snapshot: &HostSnapshot, now: DateTime<Utc>) -> Vec<Finding> {
     if let Some(containers) = &snapshot.containers {
         container_findings(containers, &mut findings);
     }
+    compose_findings(snapshot, &mut findings);
     if let Some(clusters) = &snapshot.postgres {
         postgres_findings(clusters, now, &mut findings);
     }
@@ -416,49 +456,69 @@ pub fn evaluate(snapshot: &HostSnapshot, now: DateTime<Utc>) -> Vec<Finding> {
 
     if let Some(jobs) = &snapshot.scheduled_jobs {
         for job in jobs {
-            if !job.collection_up {
-                push(
-                    &mut findings,
-                    Check::ScheduledJobUnavailable,
-                    AlertSeverity::Critical,
-                    &job.name,
-                    1.0,
-                );
-                continue;
-            }
-            if !job.timer_active {
-                push(
-                    &mut findings,
-                    Check::ScheduledJobDisabled,
-                    AlertSeverity::Critical,
-                    &job.name,
-                    1.0,
-                );
-            }
-            if job.failed() {
-                push_detailed(
-                    &mut findings,
-                    Check::ScheduledJobFailed,
-                    AlertSeverity::Critical,
-                    &job.name,
-                    job.exit_code as f64,
-                    Some(job.result.clone()),
-                );
-            }
-            if job.last_run <= 0 || job.overdue_seconds(now.timestamp()) > 0 {
-                push(
-                    &mut findings,
-                    Check::ScheduledJobOverdue,
-                    AlertSeverity::Critical,
-                    &job.name,
-                    job.overdue_seconds(now.timestamp()).max(0) as f64,
-                );
-            }
+            scheduled_job_findings(job, now, &mut findings);
         }
     }
     findings.sort_by(|a, b| (a.check, &a.target).cmp(&(b.check, &b.target)));
     findings.dedup_by(|a, b| a.check == b.check && a.target == b.target);
     findings
+}
+
+fn disk_findings(system: &SystemInfo, policy: &DiskPolicy, findings: &mut Vec<Finding>) {
+    for disk in &system.disk_info {
+        if let Some(severity) = policy.severity(disk) {
+            push_detailed(
+                findings,
+                Check::DiskPressure,
+                severity,
+                &disk.mount_point,
+                disk.usage_percent,
+                Some(format!("{} bytes available", disk.available_bytes)),
+            );
+        }
+    }
+}
+
+fn scheduled_job_findings(job: &ScheduledJob, now: DateTime<Utc>, findings: &mut Vec<Finding>) {
+    if !job.collection_up {
+        push(
+            findings,
+            Check::ScheduledJobUnavailable,
+            AlertSeverity::Critical,
+            &job.name,
+            1.0,
+        );
+        return;
+    }
+    if !job.timer_active {
+        push(
+            findings,
+            Check::ScheduledJobDisabled,
+            AlertSeverity::Critical,
+            &job.name,
+            1.0,
+        );
+    }
+    if job.failed() {
+        push_detailed(
+            findings,
+            Check::ScheduledJobFailed,
+            AlertSeverity::Critical,
+            &job.name,
+            job.exit_code as f64,
+            Some(job.result.clone()),
+        );
+    }
+    let overdue = job.overdue_seconds(now.timestamp());
+    if job.last_run <= 0 || overdue > 0 {
+        push(
+            findings,
+            Check::ScheduledJobOverdue,
+            AlertSeverity::Critical,
+            &job.name,
+            overdue.max(0) as f64,
+        );
+    }
 }
 
 fn push(findings: &mut Vec<Finding>, check: Check, severity: AlertSeverity, target: &str, v: f64) {
@@ -671,10 +731,6 @@ fn datastore_findings(
 }
 
 fn container_findings(containers: &[ContainerInfo], findings: &mut Vec<Finding>) {
-    // Several containers often run the same image; drift is a property of the
-    // image, so it is reported once per image rather than once per replica.
-    let mut drifted_images = BTreeSet::new();
-
     let mut stopped = 0usize;
 
     for container in containers {
@@ -718,17 +774,6 @@ fn container_findings(containers: &[ContainerInfo], findings: &mut Vec<Finding>)
         if container.would_exceed_limit_on_swapoff() {
             swapoff_finding(container, findings);
         }
-
-        if let Some(version) = &container.image_version {
-            if version.status == VersionStatus::Drifted {
-                let image = if version.repository.is_empty() {
-                    version.image_ref.clone()
-                } else {
-                    format!("{}:{}", version.repository, version.tag)
-                };
-                drifted_images.insert(image);
-            }
-        }
     }
 
     if stopped > 0 {
@@ -742,7 +787,31 @@ fn container_findings(containers: &[ContainerInfo], findings: &mut Vec<Finding>)
         );
     }
 
-    for image in drifted_images {
+    image_findings(containers, findings);
+}
+
+/// `image_drift` and `image_newer_available`.
+///
+/// Several containers often run the same image; both are properties of the
+/// image, so each is reported once per image rather than once per replica.
+fn image_findings(containers: &[ContainerInfo], findings: &mut Vec<Finding>) {
+    let mut drifted = BTreeSet::new();
+    let mut newer = BTreeSet::new();
+    for version in containers.iter().filter_map(|c| c.image_version.as_ref()) {
+        let image = if version.repository.is_empty() {
+            version.image_ref.clone()
+        } else {
+            format!("{}:{}", version.repository, version.tag)
+        };
+        if let Some(latest) = &version.latest_tag {
+            newer.insert((format!("{image} → {latest}"), latest.clone()));
+        }
+        if version.status == VersionStatus::Drifted {
+            drifted.insert(image);
+        }
+    }
+
+    for image in drifted {
         push(
             findings,
             Check::ImageDrift,
@@ -751,6 +820,105 @@ fn container_findings(containers: &[ContainerInfo], findings: &mut Vec<Finding>)
             1.0,
         );
     }
+    for (target, latest) in newer {
+        push_detailed(
+            findings,
+            Check::ImageNewerAvailable,
+            AlertSeverity::Info,
+            &target,
+            1.0,
+            Some(format!(
+                "{latest} is the newest tag in the same release line"
+            )),
+        );
+    }
+}
+
+/// Longest `detail` of a compose finding; the full list is in the snapshot.
+const COMPOSE_DETAIL_MAX_ITEMS: usize = 8;
+
+/// Compose verdicts that hold after the two-pass confirmation.
+///
+/// A downgrade is its own finding, because it is the one that loses data;
+/// every other difference — and an image that merely differs — counts in
+/// `compose_drift`. Undeclared, silenced, pending and in-sync containers
+/// produce nothing.
+fn compose_findings(snapshot: &HostSnapshot, findings: &mut Vec<Finding>) {
+    // Verdicts from a pass where Docker could not be read are stale
+    let Some(assessments) = snapshot
+        .compose
+        .as_ref()
+        .filter(|_| snapshot.has(Source::Docker))
+    else {
+        return;
+    };
+    for assessment in assessments {
+        match &assessment.status {
+            ComposeStatus::Drifted {
+                differences,
+                downgrade,
+            } => {
+                if let Some(risk) = downgrade {
+                    push_detailed(
+                        findings,
+                        Check::ComposeDowngradeRisk,
+                        AlertSeverity::Warning,
+                        &assessment.target,
+                        1.0,
+                        Some(format!(
+                            "compose declares {}, the container runs {}",
+                            risk.declared, risk.running
+                        )),
+                    );
+                }
+                compose_drift_finding(assessment, differences, downgrade.is_some(), findings);
+            }
+            ComposeStatus::Unreadable { reason } => push_detailed(
+                findings,
+                Check::ComposeUnreadable,
+                AlertSeverity::Info,
+                &assessment.target,
+                1.0,
+                Some(reason.clone()),
+            ),
+            _ => {}
+        }
+    }
+}
+
+fn compose_drift_finding(
+    assessment: &ComposeAssessment,
+    differences: &[ComposeDifference],
+    downgrade: bool,
+    findings: &mut Vec<Finding>,
+) {
+    // The image difference is already the downgrade finding
+    let relevant: Vec<_> = differences
+        .iter()
+        .filter(|d| !(downgrade && d.field == ComposeField::Image))
+        .collect();
+    if relevant.is_empty() {
+        return;
+    }
+    let mut detail: Vec<String> = relevant
+        .iter()
+        .take(COMPOSE_DETAIL_MAX_ITEMS)
+        .map(|d| d.describe())
+        .collect();
+    if relevant.len() > COMPOSE_DETAIL_MAX_ITEMS {
+        detail.push(format!(
+            "and {} more",
+            relevant.len() - COMPOSE_DETAIL_MAX_ITEMS
+        ));
+    }
+    push_detailed(
+        findings,
+        Check::ComposeDrift,
+        AlertSeverity::Warning,
+        &assessment.target,
+        relevant.len() as f64,
+        Some(detail.join("; ")),
+    );
 }
 
 /// RAM use, as a share of the limit, from which a container that also holds
@@ -1111,6 +1279,23 @@ mod tests {
                 local_digest: None,
                 remote_digest: None,
                 status: VersionStatus::Drifted,
+                latest_tag: None,
+                checked_at: None,
+                error: None,
+            });
+            c
+        };
+        let pinned = |name: &str| {
+            let mut c = container(name);
+            c.image_version = Some(ImageVersionInfo {
+                image_ref: "keycloak/keycloak:26.1".into(),
+                registry: "quay.io".into(),
+                repository: "keycloak/keycloak".into(),
+                tag: "26.1".into(),
+                local_digest: None,
+                remote_digest: None,
+                status: VersionStatus::NewerAvailable,
+                latest_tag: Some("26.4".into()),
                 checked_at: None,
                 error: None,
             });
@@ -1126,6 +1311,8 @@ mod tests {
                 swapper,
                 drift("web-1"),
                 drift("web-2"),
+                pinned("sso-1"),
+                pinned("sso-2"),
             ]),
             ..Default::default()
         };
@@ -1139,8 +1326,15 @@ mod tests {
                 ("containers_stopped", "host"),
                 ("swapoff_would_exceed_limit", "swapper"),
                 ("image_drift", "library/nginx:1"),
+                ("image_newer_available", "keycloak/keycloak:26.1 → 26.4"),
             ]
         );
+        let newer = findings
+            .iter()
+            .find(|f| f.check == Check::ImageNewerAvailable)
+            .unwrap();
+        assert_eq!(newer.severity, AlertSeverity::Info);
+        assert!(newer.detail.as_deref().unwrap().contains("26.4"));
         let swap = findings
             .iter()
             .find(|f| f.check == Check::SwapoffWouldExceedLimit)
@@ -1528,6 +1722,7 @@ COMMIT
             Check::ContainersStopped,
             Check::MemoryOvercommitted,
             Check::SwapoffWouldExceedLimit,
+            Check::ImageNewerAvailable,
         ] {
             let g = check.guidance().unwrap_or_else(|| panic!("{check}"));
             for text in [g.why_pt_br, g.fix_pt_br, g.why_en, g.fix_en] {

@@ -259,7 +259,7 @@ install_firewall_snapshot() {
 # treats a snapshot older than 5 minutes as unavailable.
 [Unit]
 Description=Code Monitor firewall snapshot (iptables-save for the audit)
-Documentation=https://github.com/codigocentral/code-monitor
+Documentation=https://gitlab.didaticos.com/codigocentral/code-monitor
 After=network.target
 
 [Service]
@@ -308,7 +308,7 @@ EOF
     cat > "${PREFIX}/etc/systemd/system/code-monitor-firewall-snapshot.timer" <<'EOF'
 [Unit]
 Description=Code Monitor firewall snapshot every minute
-Documentation=https://github.com/codigocentral/code-monitor
+Documentation=https://gitlab.didaticos.com/codigocentral/code-monitor
 
 [Timer]
 OnBootSec=15s

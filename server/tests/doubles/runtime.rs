@@ -30,6 +30,8 @@ pub fn interval(period: Duration) -> Interval {
     Interval { hooks }
 }
 impl Interval {
+    /// Scripted ticks never fall behind, so the policy has nothing to change.
+    pub fn set_missed_tick_behavior(&mut self, _behavior: tokio::time::MissedTickBehavior) {}
     pub async fn tick(&mut self) {
         tokio::task::yield_now().await;
         if let Some(hook) = self.hooks.pop_front() {

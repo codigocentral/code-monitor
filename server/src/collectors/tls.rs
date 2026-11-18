@@ -556,31 +556,37 @@ fn nginx_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
 
 /// Pull `ssl_certificate` paths and `server_name` values out of one file.
 pub fn parse_nginx_config(text: &str, view: &mut NginxView) {
-    for line in text.lines() {
-        let line = line.split('#').next().unwrap_or("");
-        for statement in line.split(';') {
-            let mut words = statement.split_whitespace();
-            match words.next() {
-                Some("ssl_certificate") => {
-                    if let Some(path) = words.next() {
-                        let path = path.trim_matches(|c| c == '"' || c == '\'');
-                        // `$variable` paths are resolved at request time
-                        if !path.contains('$') {
-                            view.certificate_paths.push(PathBuf::from(path));
-                        }
-                    }
-                }
-                Some("server_name") => {
-                    view.server_names.extend(
-                        words
-                            .map(|w| w.trim_matches(|c| c == '"' || c == '\''))
-                            .filter(|w| probeable(w))
-                            .map(str::to_string),
-                    );
-                }
-                _ => {}
+    let statements = text
+        .lines()
+        .map(|line| line.split('#').next().unwrap_or(""))
+        .flat_map(|line| line.split(';'));
+    for statement in statements {
+        apply_nginx_statement(statement, view);
+    }
+}
+
+fn unquote(word: &str) -> &str {
+    word.trim_matches(|c| c == '"' || c == '\'')
+}
+
+fn apply_nginx_statement(statement: &str, view: &mut NginxView) {
+    let mut words = statement.split_whitespace();
+    match words.next() {
+        Some("ssl_certificate") => {
+            // `$variable` paths are resolved at request time
+            if let Some(path) = words.next().map(unquote).filter(|p| !p.contains('$')) {
+                view.certificate_paths.push(PathBuf::from(path));
             }
         }
+        Some("server_name") => {
+            view.server_names.extend(
+                words
+                    .map(unquote)
+                    .filter(|w| probeable(w))
+                    .map(str::to_string),
+            );
+        }
+        _ => {}
     }
 }
 
@@ -1051,21 +1057,21 @@ mod tests {
     fn test_served_certificate_wins_over_stale_files() {
         // The production case: another server (Caddy) renewed the names and
         // serves them, while certbot's lineages expired on disk
-        let stale = certificate(&["shop.example", "www.shop.example"], "01", -35);
-        let fresh = certificate(&["shop.example", "www.shop.example"], "99", 33);
-        let lineages = vec![lineage("shop.example", stale)];
+        let stale = certificate(&["argonova.example", "www.argonova.example"], "01", -35);
+        let fresh = certificate(&["argonova.example", "www.argonova.example"], "99", 33);
+        let lineages = vec![lineage("argonova.example", stale)];
         let served = ServedView {
             listening: true,
             address: "127.0.0.1:443".into(),
             by_domain: [
-                ("shop.example".to_string(), fresh.clone()),
-                ("www.shop.example".to_string(), fresh),
+                ("argonova.example".to_string(), fresh.clone()),
+                ("www.argonova.example".to_string(), fresh),
             ]
             .into_iter()
             .collect(),
         };
         // Even a running nginx pointing at the stale file loses to the listener
-        let nginx = running_nginx(&["/etc/letsencrypt/live/shop.example/fullchain.pem"]);
+        let nginx = running_nginx(&["/etc/letsencrypt/live/argonova.example/fullchain.pem"]);
         let certs = resolve(&lineages, &nginx, &served, now());
 
         assert_eq!(
@@ -1073,7 +1079,7 @@ mod tests {
             2,
             "one stale lineage plus one served certificate"
         );
-        assert!(by_name(&certs, "shop.example").orphaned);
+        assert!(by_name(&certs, "argonova.example").orphaned);
         let live = certs.iter().find(|c| c.source == "127.0.0.1:443").unwrap();
         assert!(!live.orphaned);
         assert_eq!(live.days_until_expiry, 33);

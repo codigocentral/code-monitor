@@ -182,7 +182,7 @@ mod tests {
         let server = ServerEndpoint {
             id: uuid::Uuid::new_v4(),
             name: "test-server".to_string(),
-            address: "203.0.113.100".to_string(),
+            address: "192.168.1.100".to_string(),
             port: 50051,
             description: Some("Test server".to_string()),
             access_token: None,
@@ -211,7 +211,7 @@ mod tests {
         let server1 = ServerEndpoint {
             id: uuid::Uuid::new_v4(),
             name: "server-1".to_string(),
-            address: "203.0.113.100".to_string(),
+            address: "192.168.1.100".to_string(),
             port: 50051,
             description: None,
             access_token: None,
@@ -219,7 +219,7 @@ mod tests {
         let server2 = ServerEndpoint {
             id: uuid::Uuid::new_v4(),
             name: "server-2".to_string(),
-            address: "203.0.113.100".to_string(),
+            address: "192.168.1.100".to_string(),
             port: 50051,
             description: None,
             access_token: None,
@@ -240,7 +240,7 @@ mod tests {
         let server = ServerEndpoint {
             id: uuid::Uuid::new_v4(),
             name: "old-name".to_string(),
-            address: "203.0.113.100".to_string(),
+            address: "192.168.1.100".to_string(),
             port: 50051,
             description: None,
             access_token: None,
@@ -250,7 +250,7 @@ mod tests {
         let updated = ServerEndpoint {
             id: server.id,
             name: "new-name".to_string(),
-            address: "203.0.113.200".to_string(),
+            address: "192.168.1.200".to_string(),
             port: 50052,
             description: Some("Updated".to_string()),
             access_token: Some("token".to_string()),
@@ -259,7 +259,7 @@ mod tests {
         assert!(manager.update_server(server.id, updated).is_ok());
         let retrieved = manager.get_server(server.id).unwrap();
         assert_eq!(retrieved.name, "new-name");
-        assert_eq!(retrieved.address, "203.0.113.200");
+        assert_eq!(retrieved.address, "192.168.1.200");
         assert_eq!(retrieved.port, 50052);
     }
 
@@ -323,7 +323,7 @@ mod tests {
         let updated = ServerEndpoint {
             id: uuid::Uuid::new_v4(),
             name: "new-name".to_string(),
-            address: "203.0.113.200".to_string(),
+            address: "192.168.1.200".to_string(),
             port: 50052,
             description: Some("Updated".to_string()),
             access_token: Some("token".to_string()),
@@ -343,7 +343,7 @@ mod tests {
         let server = ServerEndpoint {
             id: uuid::Uuid::new_v4(),
             name: "test-server".to_string(),
-            address: "203.0.113.100".to_string(),
+            address: "192.168.1.100".to_string(),
             port: 50051,
             description: Some("Test".to_string()),
             access_token: Some("token".to_string()),

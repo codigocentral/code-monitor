@@ -539,11 +539,11 @@ async fn list_servers(config_manager: &ClientConfigManager) -> Result<()> {
         println!();
         println!("Add a server with:");
         println!(
-            "  monitor-client add --name \"My Server\" --address 203.0.113.100 --token <token>"
+            "  monitor-client add --name \"My Server\" --address 192.168.1.100 --token <token>"
         );
         println!();
         println!("Or use quick connect:");
-        println!("  monitor-client connect 203.0.113.100");
+        println!("  monitor-client connect 192.168.1.100");
         println!();
         return Ok(());
     }
@@ -1231,7 +1231,7 @@ mod tests {
 
     #[test]
     fn test_display_system_summary_with_data() {
-        let server = create_test_endpoint("srv", "203.0.113.1", 50051);
+        let server = create_test_endpoint("srv", "192.168.1.1", 50051);
         let info = create_test_system_info();
         display_system_summary(&vec![(server, info)]);
     }
@@ -1247,7 +1247,7 @@ mod tests {
         let result = add_server(
             &mut manager,
             "test-srv".to_string(),
-            "203.0.113.10".to_string(),
+            "192.168.1.10".to_string(),
             50051,
             Some("tok".to_string()),
             Some("desc".to_string()),
@@ -1270,7 +1270,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mut manager = ClientConfigManager::new(&temp.path().join("cfg.toml")).unwrap();
 
-        let ep = create_test_endpoint("srv", "203.0.113.10", 50051);
+        let ep = create_test_endpoint("srv", "192.168.1.10", 50051);
         manager.add_server(ep.clone()).unwrap();
 
         let result = remove_server(&mut manager, ep.id).await;
@@ -1295,7 +1295,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mut manager = ClientConfigManager::new(&temp.path().join("cfg.toml")).unwrap();
 
-        let ep = create_test_endpoint("srv", "203.0.113.10", 50051);
+        let ep = create_test_endpoint("srv", "192.168.1.10", 50051);
         manager.add_server(ep.clone()).unwrap();
 
         let result = set_server_token(&mut manager, ep.id, "new-token".to_string()).await;

@@ -156,8 +156,8 @@ pub fn jvm_heap_bytes(command_line: &str) -> Option<u64> {
 /// Everything a postgres cluster's configuration promises.
 ///
 /// Sort memory is the term that surprises people: `work_mem` is per sort
-/// operation per connection, so it multiplies by `max_connections`. In one audit,
-/// four instances allowed 500 connections; the busiest ever used 71.
+/// operation per connection, so it multiplies by `max_connections`. Four of
+/// the fleet's instances allow 500 connections; the busiest ever used 71.
 pub fn postgres_commitment(cluster: &PostgresClusterInfo) -> Vec<CommitmentComponent> {
     let settings = &cluster.settings;
     let mut components = Vec::new();

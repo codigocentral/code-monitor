@@ -1,42 +1,82 @@
 # Contributing to Code Monitor
 
-Thanks for your interest in contributing!
+Thanks for your interest in contributing! This document explains how to set up
+your environment, the conventions we follow, and how to get your changes merged.
 
-## Setup
+## Development setup
 
-You need the stable Rust toolchain ([rustup](https://rustup.rs/)) and `protoc`
-(Protocol Buffers compiler):
+Prerequisites:
 
-- Debian/Ubuntu: `sudo apt install protobuf-compiler`
-- macOS: `brew install protobuf`
-- Windows: `choco install protoc`
+- **Rust** (stable toolchain) — install via [rustup](https://rustup.rs/)
+- **protoc** (Protocol Buffers compiler) — required to build the gRPC layer
+  - Debian/Ubuntu: `sudo apt install protobuf-compiler`
+  - Windows: `choco install protoc`
+  - macOS: `brew install protobuf`
 
-See [BUILD.md](BUILD.md) for platform details and [AGENTS.md](AGENTS.md) for
-the architecture, crate layout and conventions.
-
-## Before opening a pull request
-
-These are the checks CI runs:
+Build everything:
 
 ```bash
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo build --workspace
+```
+
+See [BUILD.md](BUILD.md) for platform-specific details (including Windows).
+
+## Project layout
+
+| Crate     | Path      | Description                                  |
+|-----------|-----------|----------------------------------------------|
+| `shared`  | `shared/` | Protobuf definitions, shared types, alerts, notifications |
+| `monitor-server` | `server/` | gRPC server, system collectors (Docker, Postgres, MariaDB, systemd) |
+| `monitor-client` | `client/` | TUI dashboard, CLI, SQLite storage |
+
+## Running tests
+
+```bash
 cargo test --workspace
 ```
 
-- No `.unwrap()` / `.expect()` in production paths; collectors must never
-  panic. Both are fine inside `#[cfg(test)]`.
-- New behavior comes with unit tests in the same module.
-- Update `CHANGELOG.md` under `[Unreleased]` and the docs in `docs/` when
-  user-facing behavior changes.
-- Use short, imperative commit subjects (Conventional Commits welcome, e.g.
-  `fix(tls): ...`).
-- Never commit real hostnames, IP addresses, tokens or credentials. Use the
-  documentation ranges (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`)
-  and `example.com` in examples and tests.
+The CI runs tests on Linux and Windows. Please make sure your change passes on
+your platform before opening a PR; cross-platform code should be guarded with
+`#[cfg(...)]` where needed.
+
+## Code style
+
+These are enforced by CI:
+
+```bash
+cargo fmt --all
+cargo clippy --all-targets --all-features
+```
+
+Guidelines:
+
+- No `.unwrap()` / `.expect()` in production code paths — propagate errors with
+  `anyhow`/`thiserror`. They are fine inside `#[cfg(test)]`.
+- Use `saturating_sub` (or checked arithmetic) when subtracting metrics counters.
+- New features should come with unit tests in the same module (`mod tests`).
+
+## Commit messages
+
+Use short, imperative subject lines (e.g. `Add rate limiting to gRPC streams`).
+Reference the tracker issue when applicable (e.g. `CMON-17`).
+
+## Pull request checklist
+
+- [ ] First contribution: the PR states "I have read and agree to the CLA in CLA.md" ([CLA](CLA.md))
+- [ ] `cargo test --workspace` passes
+- [ ] `cargo fmt --all` produces no diff
+- [ ] `cargo clippy --all-targets --all-features` is clean
+- [ ] New behavior is covered by tests
+- [ ] `CHANGELOG.md` updated under `[Unreleased]`
+- [ ] Docs updated (README, `docsx/`) if user-facing behavior changed
 
 ## Reporting issues
 
-Describe what you expected, what happened (run with `--log-level debug`), and
-your OS and install method. For security issues, see [SECURITY.md](SECURITY.md).
+Open an issue describing:
+
+1. What you expected to happen
+2. What actually happened (logs help — run with `--log-level debug`)
+3. OS/platform, and how you installed Code Monitor
+
+Security issues: please do **not** open a public issue; contact the maintainer
+directly instead.

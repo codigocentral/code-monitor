@@ -3,6 +3,7 @@
 //! This module provides traits and implementations for collecting
 //! various types of metrics from the host system.
 
+pub mod compose;
 pub mod docker;
 pub mod mariadb;
 pub mod memory;
@@ -10,6 +11,7 @@ pub mod net_ports;
 pub mod postgres;
 pub mod systemd;
 pub mod tls;
+pub mod version_tags;
 pub mod versions;
 
 use anyhow::Result;
@@ -18,6 +20,8 @@ use std::time::Duration;
 
 /// Trait for metric collectors
 #[allow(dead_code)]
+// async_trait marks the boxed future `#[must_use]`, which newer clippy flags
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Collector: Send + Sync {
     /// Name of the collector

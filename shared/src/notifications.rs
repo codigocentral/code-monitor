@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 /// Notification channel trait
+// async_trait marks the boxed future `#[must_use]`, which newer clippy flags
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait NotificationChannel: Send + Sync {
     async fn send(&self, alert: &Alert) -> Result<()>;
@@ -286,6 +288,8 @@ mod campaign_transport_units {
 }
 
 // The transport boundary stays internal; public channel fields/API are unchanged.
+// async_trait marks the boxed future `#[must_use]`, which newer clippy flags
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 trait JsonPoster: Send + Sync {
     async fn post(

@@ -15,6 +15,7 @@ pub struct State {
     pub process_requests: Vec<(u32, Option<String>)>,
     pub starts: usize,
     pub tls_dirs: Vec<Vec<String>>,
+    pub image_versions: usize,
     pub stops: usize,
 }
 pub type SharedState = Arc<Mutex<State>>;
@@ -46,6 +47,10 @@ impl SystemMonitor {
     }
     pub fn with_tls_dirs(self, dirs: Vec<String>) -> Self {
         self.0.lock().unwrap().tls_dirs.push(dirs);
+        self
+    }
+    pub fn with_image_versions(self, _: crate::collectors::versions::VersionsCollector) -> Self {
+        self.0.lock().unwrap().image_versions += 1;
         self
     }
     pub fn start_background_monitoring(&self) {

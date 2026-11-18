@@ -274,6 +274,7 @@ async fn severity_styles_image_versions_and_database_origins_reach_the_buffer() 
             VersionStatus::UpToDate,
             VersionStatus::LocalBuild,
             VersionStatus::Unknown,
+            VersionStatus::NewerAvailable,
         ]
         .into_iter()
         .enumerate()
@@ -295,6 +296,7 @@ async fn severity_styles_image_versions_and_database_origins_reach_the_buffer() 
                 local_digest: None,
                 remote_digest: None,
                 status,
+                latest_tag: (status == VersionStatus::NewerAvailable).then(|| "tag-next".into()),
                 checked_at: None,
                 error: None,
             }),
@@ -307,6 +309,7 @@ async fn severity_styles_image_versions_and_database_origins_reach_the_buffer() 
     assert!(output.contains("unit-version-0"));
     assert!(output.contains("(local)"));
     assert!(output.contains(" ↑"));
+    assert!(output.contains("⇡ tag-next"));
     let mut healthy = base;
     healthy.name = "unit-healthy".into();
     healthy.restart_count = 0;

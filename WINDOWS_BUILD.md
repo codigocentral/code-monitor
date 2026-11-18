@@ -46,16 +46,16 @@ cargo build
 ### Manual Testing
 ```bash
 # Test server connectivity
-curl http://203.0.113.31:50051/health
+curl http://192.168.0.31:50051/health
 
 # Or use netcat
-nc -zv 203.0.113.31 50051
+nc -zv 192.168.0.31 50051
 ```
 
 ## Deployment Strategy
 
 1. **Development**: Use Linux server for development
-2. **Server**: Deploy to Linux server (203.0.113.31)
+2. **Server**: Deploy to Linux server (192.168.0.31)
 3. **Client**: Build Windows client separately or use cross-compilation
 
 Would you like me to create a simplified version without UI dependencies for easier Windows building?

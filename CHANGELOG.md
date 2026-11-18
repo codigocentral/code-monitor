@@ -7,8 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Product page in `site/` (English, with a Portuguese version in `site/pt/`),
+  deployed to GitHub Pages at codemonitor.codigocentral.com.br by
+  `.github/workflows/pages.yml`.
+
+### Changed
+
+- License: from MIT to AGPL-3.0-or-later, starting with this version. Code
+  published before (the GitHub snapshot of 2026-11-13) stays under MIT.
+  Contributions now require the CLA (`CLA.md`).
+
 ### Fixed
 
+- Compose drift: a variable the project's env files do not define makes its
+  field unknown even when the reference has a default (`${PORT:-8080}`,
+  `${IMAGE:-app:local}`). The default is only what compose uses when the
+  deploying shell does not set the variable; deployments driven from CI set
+  it in the job's environment, and comparing the default reported drift on
+  every such service.
 - Audit: `datastore_exposed` now reads the packet filter (`iptables-save` /
   `ip6tables-save`, which covers ufw) and is critical only when a public
   source would be accepted, including ports published by Docker through
@@ -54,6 +72,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Compose drift: `CODE_MONITOR_COMPOSE_SILENCE` (comma-separated
+  `project/service`, `project/*` or `service`) appends to
+  `[compose_drift] silence`, so a systemd drop-in can silence projects
+  whose compose files never reach the host (deployed from CI through a
+  remote `DOCKER_HOST`) without editing `config.toml`.
+- Versions collector: newer version on a pinned tag (#13). Digest drift never
+  fires for a pinned tag such as `26.1` or `1.27.3-alpine`, so the collector
+  now also lists the repository's tags (`GET /v2/<repo>/tags/list`, same
+  anonymous token, `Link` pagination) and reports
+  `VersionStatus::NewerAvailable` with `latest_tag` when a newer tag exists in
+  the same release line: the tag minus its last component (`26.1` → `26.x`,
+  `2.4.10` → `2.4.x`, so an LTS line is never left), same shape, same `v`
+  prefix and same variant suffix (`-alpine`, `-community`...). A new major is
+  never suggested and pre-releases (`-rc`, `-beta`, `-alpha`, `-dev`,
+  `nightly`...) are ignored unless `include_prereleases` is set. Floating and
+  non-semver tags (`latest`, `stable`, `16`, dates, hashes) keep the digest
+  drift behaviour and trigger no tag listing. A failed or rate-limited listing
+  turns an up-to-date pinned image into `Unknown` (drift still wins). The tag
+  list has its own per-repository cache, 7 days by default and never shorter
+  than the digest cache. New `[image_versions]` config section
+  (`digest_cache_ttl_hours`, `tag_cache_ttl_hours`, `include_prereleases`,
+  `skip_patterns`), so the digest TTL and the skip patterns are configurable
+  for the first time. New audit check `image_newer_available` (info, target
+  `repository:tag → latest`, with guidance); gRPC carries
+  `IMAGE_VERSION_STATUS_NEWER_AVAILABLE` and `latest_tag`; the Containers tab
+  shows `⇡ <tag>` next to the image, distinct from the `↑` of drift, and
+  counts such images in the risk summary.
+- Compose drift: an `.env` the agent may not read is treated like a missing
+  one. Interpolated fields stay uncompared instead of the whole project being
+  reported as `compose_unreadable`, so the agent can be given the compose
+  files without the secrets kept next to them.
+- Audit: compose drift (#15). Each running container is compared with the
+  docker-compose files named in its labels
+  (`com.docker.compose.project.config_files`, `project.working_dir`,
+  `service`), merged in label order with `${VAR}` / `${VAR:-default}`
+  resolved from the project's `.env` (or the `environment_file` label).
+  Compared: image tag, published ports including the bind address, mounts
+  (source, target, `:ro`), restart policy, networks / `network_mode`, and
+  environment by key presence only — values are never read from the
+  container, compared, logged or exported. New checks: `compose_drift`
+  (warning), `compose_downgrade_risk` (warning, the file declares an older
+  tag than the one running) and `compose_unreadable` (info, file missing,
+  unreadable or unsupported: indeterminate, not clean). A divergence is
+  reported only when two consecutive audit passes see the same one, so a
+  deploy caught between `stop` and `up` is not a finding. Containers without
+  compose labels are `undeclared`, not drift. `code_monitor_compose_services{state}`
+  counts containers per verdict. Intended divergences are silenced per
+  service with `[compose_drift] silence`. YAML is parsed with `yaml-rust`,
+  already in the dependency tree through `config`.
 - Findings carry a `detail` sentence and `guidance` (why it matters, how to
   fix it, pt-BR and English) for the refined checks; served as JSON on the
   health server's `/findings`. `/metrics` labels are unchanged.
@@ -65,18 +132,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   depend on an open dashboard. See `docs/prometheus-metrics.md`.
 - `--health-address` to bind the health/metrics server to a specific interface
 - `--version` on server and client, with the git revision embedded at build time
-- Audit collectors and predictive alerts:
-  - Postgres: `pg_settings` inspection revealing actual source file (`auto.conf` vs `.conf`)
-  - Docker: true `mem_limit` detection distinguishing unlimited containers from host-RAM allocations
-  - Docker: inspect-based real `restart_count` tracking crash-looping containers
-  - Docker: healthcheck failing streak count and last error output classification
-  - Memory: active swap throughput (`si`/`so` page rates) and Linux PSI pressure gauges instead of raw swap percentage
-  - Memory: per-process `VmSwap` tracking and pre-flight `would_exceed_limit_on_swapoff` prediction
-  - systemd: automatic detection and alerting for units in `failed` state
-  - TLS: automated certificate expiration tracking (21d warning / 7d critical) and certbot renewal service health
-  - Network: socket listening scan flagging sensitive datastores bound to `0.0.0.0`
-  - Predictive alerts: machine overcommitment detector comparing promised memory vs actual physical RAM
-  - Database lifecycle: orphan database detection for PostgreSQL and MariaDB tracking idle instances and lifetime transactions
+- GitLab CI: fmt, clippy (native and unit-doubles builds), tests with coverage,
+  static `x86_64-unknown-linux-musl` binaries, and upload to the generic
+  package registry from `main`
+
+- Fleet audit collectors and predictive alerts (#1–#11):
+  - Postgres: `pg_settings` inspection revealing actual source file (`auto.conf` vs `.conf`) (#1)
+  - Docker: true `mem_limit` detection distinguishing unlimited containers from host-RAM allocations (#2)
+  - Docker: inspect-based real `restart_count` tracking crash-looping containers (#3)
+  - Docker: healthcheck failing streak count and last error output classification (#4)
+  - Memory: active swap throughput (`si`/`so` page rates) and Linux PSI pressure gauges instead of raw swap percentage (#5)
+  - Memory: per-process `VmSwap` tracking and pre-flight `would_exceed_limit_on_swapoff` prediction (#6)
+  - systemd: automatic detection and alerting for units in `failed` state (#7)
+  - TLS: automated certificate expiration tracking (21d warning / 7d critical) and certbot renewal service health (#8)
+  - Network: socket listening scan flagging sensitive datastores bound to `0.0.0.0` (#9)
+  - Predictive alerts: machine overcommitment detector comparing promised memory vs actual physical RAM (#10)
+  - Database lifecycle: orphan database detection for PostgreSQL and MariaDB tracking idle instances and lifetime transactions (#11)
 - Versions collector: lightweight detection of container image drift (local digest vs remote registry digest) for floating tags (`latest`), with 24h TTL caching and TUI indicators (`·` up to date, `↑` drifted)
 - Static binary compilation using `rustls` throughout to remove glibc dynamic dependencies
 - Remote installation script (`scripts/install-remote.sh`) and database collector provisioning scripts
@@ -89,6 +160,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Headless monitoring mode: `monitor-client monitor --format json` emits one JSON document per sample
 - `.dockerignore` to keep images lean and free of local secrets
 - `CONTRIBUTING.md` with development and PR guidelines
+- gRPC API documentation (`docsx/05-TECNICO/API-GRPC.md`)
 - Third-party GitHub Actions inventory (`.github/THIRD_PARTY_ACTIONS.md`)
 
 ### Changed

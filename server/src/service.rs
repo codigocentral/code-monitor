@@ -379,7 +379,10 @@ impl MonitorService for MonitorServiceImpl {
 
         // Enforce max_clients on long-lived streaming connections
         let max_clients = self.max_clients().map_err(Status::from_error)?;
-        if self
+        // Newer Rust deprecates `fetch_update` for `try_update`, which the CI
+        // toolchain (1.91) does not have yet
+        #[allow(deprecated)]
+        let admitted = self
             .active_streams
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
                 if n < max_clients {
@@ -388,8 +391,8 @@ impl MonitorService for MonitorServiceImpl {
                     None
                 }
             })
-            .is_err()
-        {
+            .is_ok();
+        if !admitted {
             warn!(
                 "Rejecting stream: max_clients limit of {} reached",
                 max_clients
@@ -564,7 +567,11 @@ impl MonitorService for MonitorServiceImpl {
                         shared::types::VersionStatus::Unknown => {
                             ProtoImageVersionStatus::Unknown as i32
                         }
+                        shared::types::VersionStatus::NewerAvailable => {
+                            ProtoImageVersionStatus::NewerAvailable as i32
+                        }
                     },
+                    latest_tag: v.latest_tag.clone(),
                     checked_at: v.checked_at.map(datetime_to_timestamp),
                     error: v.error.clone(),
                 }),
@@ -848,6 +855,25 @@ mod tests {
     use super::*;
     use tokio_stream::wrappers::TcpListenerStream;
     use tonic::metadata::MetadataValue;
+
+    /// Upper bound for one round trip in the gRPC integration tests. A
+    /// collector that blocks on the host must fail the test with a clear
+    /// message instead of hanging the whole job until the CI timeout.
+    const RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+    macro_rules! rpc {
+        ($call:expr) => {
+            tokio::time::timeout(RPC_TIMEOUT, $call)
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "{} did not answer within {:?}",
+                        stringify!($call),
+                        RPC_TIMEOUT
+                    )
+                })
+        };
+    }
     use tonic::transport::Server;
 
     async fn create_test_service(auth_enabled: bool) -> MonitorServiceImpl {
@@ -987,7 +1013,7 @@ mod tests {
         .expect("Failed to connect");
 
         let mut client = MonitorServiceClient::new(channel);
-        let response = client.get_system_info(Request::new(())).await.unwrap();
+        let response = rpc!(client.get_system_info(Request::new(()))).unwrap();
         let info = response.into_inner();
 
         assert!(!info.hostname.is_empty());
@@ -1039,7 +1065,7 @@ mod tests {
         let mut client = MonitorServiceClient::new(channel);
 
         // No token → Unauthenticated
-        let result = client.get_system_info(Request::new(())).await;
+        let result = rpc!(client.get_system_info(Request::new(())));
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code(), tonic::Code::Unauthenticated);
 
@@ -1049,7 +1075,7 @@ mod tests {
             "x-access-token",
             tonic::metadata::MetadataValue::from_static("integration-token"),
         );
-        let result = client.get_system_info(request).await;
+        let result = rpc!(client.get_system_info(request));
         assert!(result.is_ok());
     }
 
@@ -1098,7 +1124,7 @@ mod tests {
             limit: 5,
             filter: String::new(),
         });
-        let response = client.get_processes(request).await.unwrap();
+        let response = rpc!(client.get_processes(request)).unwrap();
         let processes = response.into_inner().processes;
         assert!(!processes.is_empty());
     }
@@ -1154,7 +1180,7 @@ mod tests {
             .expect("Failed to connect");
 
         let mut client = MonitorServiceClient::new(channel);
-        let response = client.get_services(Request::new(())).await.unwrap();
+        let response = rpc!(client.get_services(Request::new(()))).unwrap();
         let services = response.into_inner().services;
         // Services may be empty on some platforms, but the call should succeed
         let _ = services;
@@ -1201,7 +1227,7 @@ mod tests {
             .expect("Failed to connect");
 
         let mut client = MonitorServiceClient::new(channel);
-        let response = client.get_network_info(Request::new(())).await.unwrap();
+        let response = rpc!(client.get_network_info(Request::new(()))).unwrap();
         let networks = response.into_inner().interfaces;
         assert!(!networks.is_empty());
     }
@@ -1250,7 +1276,7 @@ mod tests {
         let request = Request::new(ContainersRequest {
             filter: String::new(),
         });
-        let response = client.get_containers(request).await.unwrap();
+        let response = rpc!(client.get_containers(request)).unwrap();
         let containers = response.into_inner().containers;
         // Docker may not be available, but call should succeed
         let _ = containers;
@@ -1297,7 +1323,7 @@ mod tests {
             .expect("Failed to connect");
 
         let mut client = MonitorServiceClient::new(channel);
-        let response = client.get_systemd_info(Request::new(())).await.unwrap();
+        let response = rpc!(client.get_systemd_info(Request::new(()))).unwrap();
         let info = response.into_inner();
         // systemd may not be available, but call should succeed
         let _ = info.units;
@@ -1358,11 +1384,13 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{}", port))
-            .unwrap()
-            .connect()
-            .await
-            .expect("Failed to connect");
+        let channel = rpc!(tonic::transport::Endpoint::from_shared(format!(
+            "http://127.0.0.1:{}",
+            port
+        ))
+        .unwrap()
+        .connect())
+        .expect("Failed to connect");
 
         MonitorServiceClient::new(channel)
     }
@@ -1371,7 +1399,7 @@ mod tests {
     async fn test_integration_get_tls_info() {
         let mut client = spawn_test_service().await;
 
-        let response = client.get_tls_info(Request::new(())).await.unwrap();
+        let response = rpc!(client.get_tls_info(Request::new(()))).unwrap();
         let info = response.into_inner();
 
         // The collector is a passthrough for now, so the contract is what is
@@ -1384,7 +1412,7 @@ mod tests {
     async fn test_integration_get_listening_ports() {
         let mut client = spawn_test_service().await;
 
-        let response = client.get_listening_ports(Request::new(())).await.unwrap();
+        let response = rpc!(client.get_listening_ports(Request::new(()))).unwrap();
         let info = response.into_inner();
 
         assert!(info.timestamp.is_some());
@@ -1429,7 +1457,7 @@ mod tests {
     async fn test_system_info_carries_swap_and_pressure_fields() {
         let mut client = spawn_test_service().await;
 
-        let response = client.get_system_info(Request::new(())).await.unwrap();
+        let response = rpc!(client.get_system_info(Request::new(()))).unwrap();
         let info = response.into_inner();
 
         // Rates are not collected yet, but the fields must travel so the client
@@ -1483,7 +1511,7 @@ mod tests {
             .expect("Failed to connect");
 
         let mut client = MonitorServiceClient::new(channel);
-        let response = client.get_postgres_info(Request::new(())).await.unwrap();
+        let response = rpc!(client.get_postgres_info(Request::new(()))).unwrap();
         let clusters = response.into_inner().clusters;
         // Postgres may not be configured, but call should succeed
         let _ = clusters;
@@ -1530,7 +1558,7 @@ mod tests {
             .expect("Failed to connect");
 
         let mut client = MonitorServiceClient::new(channel);
-        let response = client.get_maria_db_info(Request::new(())).await.unwrap();
+        let response = rpc!(client.get_maria_db_info(Request::new(()))).unwrap();
         let clusters = response.into_inner().clusters;
         // MariaDB may not be configured, but call should succeed
         let _ = clusters;

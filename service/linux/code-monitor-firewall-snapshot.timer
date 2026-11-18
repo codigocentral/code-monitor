@@ -1,6 +1,6 @@
 [Unit]
 Description=Code Monitor firewall snapshot every minute
-Documentation=https://github.com/codigocentral/code-monitor
+Documentation=https://gitlab.didaticos.com/codigocentral/code-monitor
 
 [Timer]
 OnBootSec=15s

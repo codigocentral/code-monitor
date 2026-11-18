@@ -348,7 +348,7 @@ async fn system_process_service_and_network_payloads_are_converted() {
 #[tokio::test]
 async fn container_optional_health_and_image_status_are_preserved() {
     let (mut client, state) = fixture();
-    let containers = (0..5)
+    let containers = (0..6)
         .map(|status| wire::ContainerInfo {
             id: format!("id-{status}"),
             name: "unit-container".into(),
@@ -363,6 +363,7 @@ async fn container_optional_health_and_image_status_are_preserved() {
             last_health_exit_code: 2,
             image_version: Some(wire::ImageVersionInfo {
                 status,
+                latest_tag: (status == 4).then(|| "tag-next".into()),
                 checked_at: timestamp(),
                 ..Default::default()
             }),
@@ -378,7 +379,7 @@ async fn container_optional_health_and_image_status_are_preserved() {
         },
     );
     let result = client.get_containers(None).await.unwrap();
-    assert_eq!(result.len(), 6);
+    assert_eq!(result.len(), 7);
     assert_eq!(result[0].id, "id-0");
     assert!(result[0].health_detail.is_none());
     assert_eq!(result[1].health_detail.as_ref().unwrap().failing_streak, 1);
@@ -386,12 +387,22 @@ async fn container_optional_health_and_image_status_are_preserved() {
         result[2].health_detail.as_ref().unwrap().last_output,
         "probe"
     );
-    assert!(result[5].image_version.is_none());
+    assert!(result[6].image_version.is_none());
+    assert_eq!(
+        result[4]
+            .image_version
+            .as_ref()
+            .unwrap()
+            .latest_tag
+            .as_deref(),
+        Some("tag-next")
+    );
     for (index, expected) in [
         shared::types::VersionStatus::Unknown,
         shared::types::VersionStatus::UpToDate,
         shared::types::VersionStatus::Drifted,
         shared::types::VersionStatus::LocalBuild,
+        shared::types::VersionStatus::NewerAvailable,
         shared::types::VersionStatus::Unknown,
     ]
     .into_iter()

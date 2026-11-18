@@ -8,7 +8,7 @@
 #   sudo bash install-remote.sh <bind-ip> [port]
 #
 # The bind IP must be the host's VPN address. Binding to 0.0.0.0 would expose
-# the host metrics on a public interface — the exact problem the
+# the metrics of the whole fleet on a public interface — the exact problem the
 # network collector was built to catch — so this script refuses it.
 #
 # Idempotent: re-running upgrades the binary and restarts the service without
@@ -152,7 +152,7 @@ cat > "$SNAP_UNIT" <<'EOF'
 # treats a snapshot older than 5 minutes as unavailable.
 [Unit]
 Description=Code Monitor firewall snapshot (iptables-save for the audit)
-Documentation=https://github.com/codigocentral/code-monitor
+Documentation=https://gitlab.didaticos.com/codigocentral/code-monitor
 After=network.target
 
 [Service]
@@ -200,7 +200,7 @@ EOF
 cat > "$SNAP_TIMER" <<'EOF'
 [Unit]
 Description=Code Monitor firewall snapshot every minute
-Documentation=https://github.com/codigocentral/code-monitor
+Documentation=https://gitlab.didaticos.com/codigocentral/code-monitor
 
 [Timer]
 OnBootSec=15s

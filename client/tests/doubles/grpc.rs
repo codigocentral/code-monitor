@@ -1,4 +1,6 @@
 //! Fail-closed transport and generated gRPC SDK doubles. No socket is opened.
+// Mirrors tonic's signatures, which return the large `Status` by value.
+#![allow(clippy::result_large_err)]
 use shared::proto::monitoring::*;
 use std::{
     any::Any,

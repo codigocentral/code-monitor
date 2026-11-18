@@ -12,6 +12,15 @@ log_level = "warn"
 # key_path = "/etc/code-monitor/server.key"
 # ca_path = "/etc/code-monitor/ca.crt"
 
+# Container image version checks. Digest drift catches a floating tag
+# (`latest`) that moved; for a pinned version tag (`26.1`, `1.27.3-alpine`)
+# the registry's tag list is read to find a newer tag in the same line.
+# [image_versions]
+# digest_cache_ttl_hours = 24
+# tag_cache_ttl_hours = 168      # not below digest_cache_ttl_hours
+# include_prereleases = false    # -rc, -beta, -alpha, -dev, nightly
+# skip_patterns = ["registry.example.com/"]
+
 # Interactive setup:
 # monitor-server --config config.toml init
 
@@ -35,3 +44,13 @@ log_level = "warn"
 # Optional durable scalar Prometheus textfile; both fields must be set together.
 # status_file = "/var/lib/node_exporter/textfile_collector/backup.prom"
 # metric_prefix = "backup"
+
+# Running containers are compared with the docker-compose files named in their
+# labels (image tag, ports and bind address, volumes and :ro, restart,
+# networks, environment keys - never values). A divergence is reported only
+# after two consecutive audit passes. List here the services whose divergence
+# is intended: "project/service", "project/*" or a bare "service".
+# CODE_MONITOR_COMPOSE_SILENCE="a/*,b/web" in the environment appends to it.
+# [compose_drift]
+# enabled = true
+# silence = ["shop/worker", "legacy/*"]

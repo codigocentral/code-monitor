@@ -32,6 +32,8 @@ check_*.rs
 check_*.exe
 
 # Documentation (not needed in images)
+docsx/
+doc/
 *.md
 
 # IDE/OS noise

@@ -139,9 +139,15 @@ async fn system_process_service_network_mapping_and_filter_validation() {
 async fn containers_preserve_health_and_every_image_version_status() {
     let (service, state) = fixture();
     let mut containers = vec![];
-    for status in ["UpToDate", "Drifted", "LocalBuild", "Unknown"] {
+    for status in [
+        "UpToDate",
+        "Drifted",
+        "LocalBuild",
+        "Unknown",
+        "NewerAvailable",
+    ] {
         let value: ContainerInfo = dto(
-            json!({"id":status,"name":"unit","image":"unit:tag","status":"Up","state":"running","health":"healthy","cpu_percent":5.,"memory_usage_bytes":50,"memory_limit_bytes":100,"memory_percent":50.,"restart_count":3,"network_rx_bytes":4,"network_tx_bytes":5,"networks":["unit-net"],"memory_limit_set":true,"health_detail":{"failing_streak":6,"last_output":"check","last_exit_code":7,"last_checked_at":"2026-01-01T00:00:00Z"},"swap_bytes":8,"image_version":{"image_ref":"unit:tag","registry":"fixture.invalid","repository":"unit","tag":"tag","local_digest":"sha256:1","remote_digest":"sha256:2","status":status,"checked_at":"2026-01-01T00:00:00Z","error":"unit detail"}}),
+            json!({"id":status,"name":"unit","image":"unit:tag","status":"Up","state":"running","health":"healthy","cpu_percent":5.,"memory_usage_bytes":50,"memory_limit_bytes":100,"memory_percent":50.,"restart_count":3,"network_rx_bytes":4,"network_tx_bytes":5,"networks":["unit-net"],"memory_limit_set":true,"health_detail":{"failing_streak":6,"last_output":"check","last_exit_code":7,"last_checked_at":"2026-01-01T00:00:00Z"},"swap_bytes":8,"image_version":{"image_ref":"unit:tag","registry":"fixture.invalid","repository":"unit","tag":"tag","local_digest":"sha256:1","remote_digest":"sha256:2","status":status,"latest_tag":"tag-next","checked_at":"2026-01-01T00:00:00Z","error":"unit detail"}}),
         );
         containers.push(value);
     }
@@ -161,16 +167,21 @@ async fn containers_preserve_health_and_every_image_version_status() {
         ProtoImageVersionStatus::Drifted,
         ProtoImageVersionStatus::LocalBuild,
         ProtoImageVersionStatus::Unknown,
+        ProtoImageVersionStatus::NewerAvailable,
     ]) {
         assert_eq!(item.image_version.as_ref().unwrap().status, status as i32);
+        assert_eq!(
+            item.image_version.as_ref().unwrap().latest_tag.as_deref(),
+            Some("tag-next")
+        );
         assert_eq!(item.failing_streak, 6);
         assert_eq!(item.last_health_exit_code, 7);
         assert_eq!(item.last_health_output, "check");
         assert!(item.last_health_checked_at.is_some());
     }
-    assert!(values[4].image_version.is_none());
-    assert_eq!(values[4].failing_streak, 0);
-    assert!(values[4].last_health_output.is_empty());
+    assert!(values[5].image_version.is_none());
+    assert_eq!(values[5].failing_streak, 0);
+    assert!(values[5].last_health_output.is_empty());
 }
 #[tokio::test]
 async fn database_mapping_keeps_optional_metadata_and_nested_rows() {

@@ -13,6 +13,7 @@ pub mod proto {
 
 pub mod alerts;
 pub mod commitment;
+pub mod compose;
 pub mod findings;
 pub mod firewall;
 pub mod network;
@@ -403,7 +404,7 @@ pub mod types {
         ///
         /// At the usual 30s interval this is roughly a day of uninterrupted
         /// failure. Nothing genuinely sick survives that long untouched, while
-        /// a misconfigured check racks it up quietly — one production audit found
+        /// a misconfigured check racks it up quietly — the fleet audit found
         /// streaks from 1,344 to 162,460.
         pub const BROKEN_CHECK_STREAK: u32 = 2_500;
 
@@ -454,6 +455,9 @@ pub mod types {
         LocalBuild,
         /// Registry check failed, rate-limited, or unknown
         Unknown,
+        /// The tag did not move, but the registry has a newer version tag in
+        /// the same release line (see `ImageVersionInfo::latest_tag`)
+        NewerAvailable,
     }
 
     impl std::fmt::Display for VersionStatus {
@@ -463,6 +467,7 @@ pub mod types {
                 Self::Drifted => write!(f, "Drifted"),
                 Self::LocalBuild => write!(f, "LocalBuild"),
                 Self::Unknown => write!(f, "Unknown"),
+                Self::NewerAvailable => write!(f, "NewerAvailable"),
             }
         }
     }
@@ -477,6 +482,11 @@ pub mod types {
         pub local_digest: Option<String>,
         pub remote_digest: Option<String>,
         pub status: VersionStatus,
+        /// Newest tag in the release line of a pinned version tag, when it is
+        /// newer than `tag` (e.g. `26.4` for `26.1`). Set with
+        /// `NewerAvailable`, and also alongside `Drifted`.
+        #[serde(default)]
+        pub latest_tag: Option<String>,
         pub checked_at: Option<DateTime<Utc>>,
         pub error: Option<String>,
     }
@@ -660,7 +670,7 @@ pub mod types {
         /// Whether this instance carries no application schema at all.
         ///
         /// A mysqld holding nothing but system schemas,
-        /// costing 470MB of RAM on a memory-tight host.
+        /// costing 470MB of RAM on the fleet's tightest host.
         pub fn has_no_application_schemas(&self) -> bool {
             self.schemas.is_empty()
         }
@@ -1066,7 +1076,7 @@ mod tests {
 
     #[test]
     fn test_bind_scope_private_ranges() {
-        // RFC 1918 addresses, as used by VPN and LAN binds
+        // The VPN addresses the fleet binds to
         assert_eq!(BindScope::classify("10.0.0.9"), BindScope::Private);
         assert_eq!(BindScope::classify("192.168.1.10"), BindScope::Private);
         assert_eq!(BindScope::classify("172.17.0.1"), BindScope::Private);
@@ -1280,7 +1290,7 @@ mod tests {
 
     #[test]
     fn test_health_missing_probe_binary_is_a_broken_check() {
-        // The dominant cause in practice: the image has no curl
+        // The dominant cause across the fleet: the image has no curl
         assert_eq!(
             health(1, "curl: not found").assess(),
             HealthAssessment::BrokenCheck
@@ -1691,6 +1701,7 @@ mod campaign_version_units {
             (VersionStatus::Drifted, "Drifted"),
             (VersionStatus::LocalBuild, "LocalBuild"),
             (VersionStatus::Unknown, "Unknown"),
+            (VersionStatus::NewerAvailable, "NewerAvailable"),
         ] {
             assert_eq!(status.to_string(), text);
         }

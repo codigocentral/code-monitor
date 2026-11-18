@@ -12,6 +12,8 @@ fn fixture() -> (DockerCollector, sdk::SharedState) {
             connection_failed: AtomicBool::new(false),
             last_collect_ok: AtomicBool::new(false),
             versions_collector: Arc::new(VersionsCollector::default()),
+            compose_runtimes: Mutex::default(),
+            image_env_keys: Mutex::default(),
         },
         state,
     )
@@ -232,4 +234,47 @@ async fn container_inventory_joins_inspect_stats_swap_and_optional_fields() {
     assert!(result[4].id.is_empty());
     assert_eq!(result[4].name, "unknown");
     assert!(result[4].image_version.is_none());
+}
+#[tokio::test]
+async fn compose_runtimes_come_from_inspect_with_cached_image_env_keys() {
+    let (collector, state) = fixture();
+    {
+        let mut state = state.lock().unwrap();
+        state.lists.push_back(Ok(vec![serde_json::from_value(
+            json!({"Id":"web","Names":["/shop-web-1"],"State":"exited","Status":"Exited"}),
+        )
+        .unwrap()]));
+        state.inspections.push_back(("web".into(), Ok(serde_json::from_value(json!({
+            "Name":"/shop-web-1","Image":"sha256:img","State":{"Running":true},
+            "Config":{"Image":"shop/web:1","Env":["API_URL=secret-value","PATH=/bin"],
+                      "Labels":{"com.docker.compose.project":"shop","com.docker.compose.service":"web"}}
+        })).unwrap())));
+        state.images.push_back((
+            "sha256:img".into(),
+            Ok(serde_json::from_value(json!({"Config":{"Env":["PATH=/bin","LANG=C"]}})).unwrap()),
+        ));
+    }
+    collector.collect_containers(&HashMap::new()).await.unwrap();
+    for _ in 0..2 {
+        let runtimes = collector.compose_runtimes().await;
+        assert_eq!(runtimes.len(), 1);
+        assert_eq!(runtimes[0].compose.as_ref().unwrap().target(), "shop/web");
+        assert_eq!(
+            runtimes[0].env_keys.iter().collect::<Vec<_>>(),
+            ["API_URL", "PATH"]
+        );
+        assert_eq!(
+            runtimes[0]
+                .image_env_keys
+                .as_ref()
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>(),
+            ["LANG", "PATH"]
+        );
+        assert!(!format!("{runtimes:?}").contains("secret-value"));
+    }
+    // The image is inspected once: its ID is immutable
+    let calls = state.lock().unwrap().calls.clone();
+    assert_eq!(calls.iter().filter(|(kind, _)| kind == "image").count(), 1);
 }

@@ -1,6 +1,6 @@
 [Unit]
 Description=Code Monitor Server
-Documentation=https://github.com/codigocentral/code-monitor
+Documentation=https://gitlab.didaticos.com/codigocentral/code-monitor
 After=network.target
 
 [Service]

@@ -17,7 +17,7 @@ use std::sync::{Arc, RwLock};
 use sysinfo::{CpuExt, DiskExt, NetworkExt, NetworksExt, PidExt, ProcessExt, System, SystemExt};
 #[cfg(not(all(test, feature = "unit-doubles")))]
 use tokio::time::interval;
-use tokio::time::Duration;
+use tokio::time::{Duration, MissedTickBehavior};
 use tracing::{error, info};
 #[cfg(not(all(test, feature = "unit-doubles")))]
 const NOW: fn() -> DateTime<Utc> = Utc::now;
@@ -40,6 +40,7 @@ use crate::collectors::postgres::PostgresCollector;
 use crate::collectors::systemd::SystemdCollector;
 #[cfg(not(all(test, feature = "unit-doubles")))]
 use crate::collectors::tls::TlsCollector;
+use crate::collectors::versions::VersionsCollector;
 use crate::config::{MariaDBClusterConfig, PostgresClusterConfig};
 #[cfg(test)]
 #[cfg(feature = "unit-doubles")]
@@ -74,7 +75,7 @@ fn parse_ip_addr_output(stdout: &str) -> HashMap<String, String> {
             let iface = line.split(": ").nth(1).unwrap();
             current_iface = iface.split(':').next().unwrap_or(iface).to_string();
         }
-        // Line like "inet 198.51.100.31/24 brd 198.51.100.255 scope global eth0"
+        // Line like "inet 192.168.0.31/24 brd 192.168.0.255 scope global eth0"
         if line.starts_with("inet ") && !current_iface.is_empty() {
             // The prefix is guarded above, and split always yields a first
             // segment, including for an empty string.
@@ -204,6 +205,12 @@ impl SystemMonitor {
         self
     }
 
+    /// Check container images with the configured version collector.
+    pub fn with_image_versions(mut self, versions: VersionsCollector) -> Self {
+        self.docker_collector = self.docker_collector.with_versions_collector(versions);
+        self
+    }
+
     pub fn start_background_monitoring(&self) {
         let system = Arc::clone(&self.system);
         let update_interval = self.update_interval;
@@ -214,6 +221,10 @@ impl SystemMonitor {
 
         tokio::spawn(async move {
             let mut interval_timer = interval(update_interval);
+            // A refresh slower than the interval (busy host, instrumented
+            // build) must not be followed by a burst of catch-up refreshes
+            // that never hand the runtime back to the gRPC handlers.
+            interval_timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
             is_running.store(true, Ordering::SeqCst);
 
             info!("Starting background system monitoring");
@@ -496,6 +507,15 @@ impl SystemMonitor {
     #[cfg_attr(all(test, feature = "unit-doubles"), allow(dead_code))]
     pub fn docker_reachable(&self) -> bool {
         self.docker_collector.last_collect_succeeded()
+    }
+
+    /// Running containers of the last `get_containers`, for the compose
+    /// drift audit.
+    #[cfg(not(all(test, feature = "unit-doubles")))]
+    pub async fn compose_runtimes(
+        &self,
+    ) -> Vec<crate::collectors::compose::runtime::ContainerRuntime> {
+        self.docker_collector.compose_runtimes().await
     }
 
     fn map_process_status(status: sysinfo::ProcessStatus) -> ServiceStatus {
@@ -966,7 +986,7 @@ mod tests {
        valid_lft forever preferred_lft forever
 2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP group default qlen 1000
     link/ether 96:00:02:d1:1a:8c brd ff:ff:ff:ff:ff:ff
-    inet 198.51.100.31/24 brd 198.51.100.255 scope global eth0
+    inet 192.168.0.31/24 brd 192.168.0.255 scope global eth0
        valid_lft forever preferred_lft forever
     inet6 fe80::9400:2ff:fed1:1a8c/64 scope link
        valid_lft forever preferred_lft forever
@@ -982,7 +1002,7 @@ mod tests {
 
         assert_eq!(ips.len(), 3);
         assert_eq!(ips.get("lo").map(String::as_str), Some("127.0.0.1"));
-        assert_eq!(ips.get("eth0").map(String::as_str), Some("198.51.100.31"));
+        assert_eq!(ips.get("eth0").map(String::as_str), Some("192.168.0.31"));
         assert_eq!(ips.get("docker0").map(String::as_str), Some("172.17.0.1"));
     }
 
@@ -1030,7 +1050,7 @@ mod tests {
     fn test_parse_ip_addr_output_ignores_orphan_inet_line() {
         // An `inet` line before any interface header must be dropped, not
         // attributed to an empty interface name.
-        let sample = "    inet 198.51.100.1/24 scope global\n";
+        let sample = "    inet 192.168.1.1/24 scope global\n";
         assert!(parse_ip_addr_output(sample).is_empty());
     }
 
@@ -1066,6 +1086,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_new_with_systemd_units() {
+        // Needs a running systemd to answer for the unit: containers (CI) and
+        // macOS have none, and there the collector correctly reports nothing.
+        if !std::path::Path::new("/run/systemd/system").is_dir() {
+            eprintln!("skipping: systemd is not the init system here");
+            return;
+        }
         let monitor = SystemMonitor::new(1, vec![], vec![], vec!["nginx.service".to_string()])
             .await
             .expect("Failed to create monitor");

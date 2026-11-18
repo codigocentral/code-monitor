@@ -66,6 +66,17 @@ impl DockerCollector {
     pub fn last_collect_succeeded(&self) -> bool {
         true
     }
+    pub fn with_versions_collector(
+        self,
+        _: crate::collectors::versions::VersionsCollector,
+    ) -> Self {
+        self.0
+            .lock()
+            .unwrap()
+            .calls
+            .push("versions_collector".into());
+        self
+    }
 }
 pub struct PostgresCollector(SharedState);
 impl PostgresCollector {

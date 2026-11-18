@@ -192,6 +192,8 @@ enum ImageVersionStatus {
     IMAGE_VERSION_STATUS_UP_TO_DATE = 1;
     IMAGE_VERSION_STATUS_DRIFTED = 2;
     IMAGE_VERSION_STATUS_LOCAL_BUILD = 3;
+    // Tag unchanged, but a newer version tag exists in the same release line
+    IMAGE_VERSION_STATUS_NEWER_AVAILABLE = 4;
 }
 
 // Container image version check info
@@ -205,6 +207,8 @@ message ImageVersionInfo {
     ImageVersionStatus status = 7;
     google.protobuf.Timestamp checked_at = 8;
     optional string error = 9;
+    // Newest tag in the release line of a pinned version tag, when newer
+    optional string latest_tag = 10;
 }
 
 // Containers request

@@ -1478,7 +1478,7 @@ mod tests {
             ServerEndpoint {
                 id: uuid::Uuid::new_v4(),
                 name: "server-1".to_string(),
-                address: "203.0.113.1".to_string(),
+                address: "192.168.1.1".to_string(),
                 port: 50051,
                 description: None,
                 access_token: None,
@@ -1486,7 +1486,7 @@ mod tests {
             ServerEndpoint {
                 id: uuid::Uuid::new_v4(),
                 name: "server-2".to_string(),
-                address: "203.0.113.2".to_string(),
+                address: "192.168.1.2".to_string(),
                 port: 50051,
                 description: None,
                 access_token: None,
@@ -1968,7 +1968,7 @@ mod tests {
                 },
                 NetworkInfo {
                     interface: "eth1".to_string(),
-                    ip_address: "203.0.113.1".to_string(),
+                    ip_address: "192.168.1.1".to_string(),
                     mac_address: "00:00:00:00:00:01".to_string(),
                     is_up: true,
                     bytes_sent: 0,

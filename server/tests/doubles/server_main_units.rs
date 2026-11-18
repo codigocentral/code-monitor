@@ -46,6 +46,7 @@ fn main_log_levels_auth_tls_transport_settings_and_shutdown() {
         main().unwrap();
         assert_eq!(state.lock().unwrap().starts, 1);
         assert_eq!(state.lock().unwrap().tls_dirs, [Vec::<String>::new()]);
+        assert_eq!(state.lock().unwrap().image_versions, 1);
         sdk::STATE.with(|s| {
             let s = s.borrow();
             assert_eq!(s.addresses, ["127.0.0.1:50051".parse().unwrap()]);

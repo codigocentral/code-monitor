@@ -42,14 +42,72 @@ pub struct Config {
     pub disk_policy: shared::operations::DiskPolicy,
     #[serde(default)]
     pub scheduled_jobs: Vec<shared::operations::ScheduledJobConfig>,
+    /// Running containers against their docker-compose files
+    #[serde(default)]
+    pub compose_drift: crate::collectors::compose::ComposeDriftConfig,
     /// Directories holding TLS certificate lineages
     ///
     /// Empty means the Let's Encrypt default, `/etc/letsencrypt/live`.
     #[serde(default)]
     pub tls_certificate_dirs: Vec<String>,
+    /// Image version checks against the registries
+    #[serde(default)]
+    pub image_versions: ImageVersionsConfig,
     /// TLS configuration
     #[serde(default)]
     pub tls: Option<TlsConfig>,
+}
+
+/// `[image_versions]`: how container images are checked against registries
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ImageVersionsConfig {
+    /// How long a digest check (`HEAD` on the manifest) is reused, in hours
+    pub digest_cache_ttl_hours: u64,
+    /// How long a repository's tag list is reused, in hours. Listing tags is
+    /// costlier than a `HEAD`, so it must not be shorter than the digest TTL.
+    pub tag_cache_ttl_hours: u64,
+    /// Count pre-releases (`-rc`, `-beta`, `-alpha`, `-dev`, `nightly`) as
+    /// newer versions of a pinned tag
+    pub include_prereleases: bool,
+    /// Image references containing any of these strings are not checked
+    pub skip_patterns: Vec<String>,
+}
+
+impl Default for ImageVersionsConfig {
+    fn default() -> Self {
+        Self {
+            digest_cache_ttl_hours: 24,
+            tag_cache_ttl_hours: 7 * 24,
+            include_prereleases: false,
+            skip_patterns: Vec::new(),
+        }
+    }
+}
+
+impl ImageVersionsConfig {
+    /// Longest TTL accepted for either cache (90 days)
+    const MAX_TTL_HOURS: u64 = 90 * 24;
+
+    pub fn validate(&self) -> Result<()> {
+        if !(1..=Self::MAX_TTL_HOURS).contains(&self.digest_cache_ttl_hours) {
+            anyhow::bail!(
+                "image_versions.digest_cache_ttl_hours must be between 1 and {}",
+                Self::MAX_TTL_HOURS
+            );
+        }
+        if !(self.digest_cache_ttl_hours..=Self::MAX_TTL_HOURS).contains(&self.tag_cache_ttl_hours)
+        {
+            anyhow::bail!(
+                "image_versions.tag_cache_ttl_hours must be between digest_cache_ttl_hours and {}",
+                Self::MAX_TTL_HOURS
+            );
+        }
+        if self.skip_patterns.iter().any(|p| p.trim().is_empty()) {
+            anyhow::bail!("image_versions.skip_patterns must not contain empty patterns");
+        }
+        Ok(())
+    }
 }
 
 /// TLS configuration for the server
@@ -182,7 +240,9 @@ impl Default for Config {
             systemd_units: Vec::new(),
             disk_policy: Default::default(),
             scheduled_jobs: Vec::new(),
+            compose_drift: Default::default(),
             tls_certificate_dirs: Vec::new(),
+            image_versions: ImageVersionsConfig::default(),
             tls: None,
         }
     }
@@ -241,6 +301,22 @@ impl Config {
         if let Ok(v) = std::env::var("CODE_MONITOR_ENABLE_AUTH") {
             self.enable_authentication = v == "1" || v.eq_ignore_ascii_case("true");
         }
+        if let Ok(v) = std::env::var("CODE_MONITOR_COMPOSE_SILENCE") {
+            self.add_compose_silences(&v);
+        }
+    }
+
+    /// Append the comma-separated entries of `list` to `[compose_drift]
+    /// silence`, skipping blanks and entries already present.
+    ///
+    /// Appended, not replaced: a host's own `config.toml` silences survive a
+    /// drop-in that adds the ones its deployment manages.
+    fn add_compose_silences(&mut self, list: &str) {
+        for entry in list.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+            if !self.compose_drift.silence.iter().any(|s| s == entry) {
+                self.compose_drift.silence.push(entry.to_string());
+            }
+        }
     }
 
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
@@ -276,31 +352,8 @@ impl Config {
         {
             anyhow::bail!("invalid disk thresholds");
         }
-        if self.scheduled_jobs.len() > 25 {
-            anyhow::bail!("at most 25 scheduled jobs are supported");
-        }
-        let mut names = std::collections::BTreeSet::new();
-        for job in &self.scheduled_jobs {
-            let safe = |s: &str| {
-                !s.is_empty()
-                    && s.len() <= 128
-                    && s.bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"_.@:-".contains(&b))
-            };
-            if !safe(&job.name)
-                || !safe(&job.service)
-                || !safe(&job.timer)
-                || !job.service.ends_with(".service")
-                || !job.timer.ends_with(".timer")
-                || job.max_interval_seconds == 0
-                || job.max_interval_seconds > 31_536_000
-                || !names.insert(&job.name)
-                || job.status_file.is_some() != job.metric_prefix.is_some()
-                || job.metric_prefix.as_ref().is_some_and(|p| !safe(p))
-            {
-                anyhow::bail!("invalid scheduled job configuration");
-            }
-        }
+        self.image_versions.validate()?;
+        self.validate_scheduled_jobs()?;
         const VALID_LEVELS: [&str; 5] = ["trace", "debug", "info", "warn", "error"];
         if !VALID_LEVELS.contains(&self.log_level.as_str()) {
             anyhow::bail!(
@@ -308,23 +361,42 @@ impl Config {
                 self.log_level
             );
         }
-        for cluster in &self.postgres_clusters {
-            if cluster.port == 0 {
-                anyhow::bail!("postgres cluster '{}' has invalid port 0", cluster.name);
+        self.validate_clusters()?;
+        self.validate_tls()
+    }
+
+    fn validate_scheduled_jobs(&self) -> Result<()> {
+        if self.scheduled_jobs.len() > 25 {
+            anyhow::bail!("at most 25 scheduled jobs are supported");
+        }
+        let mut names = std::collections::BTreeSet::new();
+        for job in &self.scheduled_jobs {
+            if !scheduled_job_is_valid(job) || !names.insert(&job.name) {
+                anyhow::bail!("invalid scheduled job configuration");
             }
         }
-        for cluster in &self.mariadb_clusters {
-            if cluster.port == 0 {
-                anyhow::bail!("mariadb cluster '{}' has invalid port 0", cluster.name);
-            }
+        Ok(())
+    }
+
+    fn validate_clusters(&self) -> Result<()> {
+        if let Some(cluster) = self.postgres_clusters.iter().find(|c| c.port == 0) {
+            anyhow::bail!("postgres cluster '{}' has invalid port 0", cluster.name);
         }
-        if let Some(tls) = &self.tls {
-            if tls.cert_path.trim().is_empty() {
-                anyhow::bail!("tls.cert_path must not be empty when TLS is configured");
-            }
-            if tls.key_path.trim().is_empty() {
-                anyhow::bail!("tls.key_path must not be empty when TLS is configured");
-            }
+        if let Some(cluster) = self.mariadb_clusters.iter().find(|c| c.port == 0) {
+            anyhow::bail!("mariadb cluster '{}' has invalid port 0", cluster.name);
+        }
+        Ok(())
+    }
+
+    fn validate_tls(&self) -> Result<()> {
+        let Some(tls) = &self.tls else {
+            return Ok(());
+        };
+        if tls.cert_path.trim().is_empty() {
+            anyhow::bail!("tls.cert_path must not be empty when TLS is configured");
+        }
+        if tls.key_path.trim().is_empty() {
+            anyhow::bail!("tls.key_path must not be empty when TLS is configured");
         }
         Ok(())
     }
@@ -385,6 +457,28 @@ impl Config {
             .iter()
             .any(|c| c.public_key == public_key)
     }
+}
+
+/// Unit names, job names and metric prefixes end up in systemctl arguments and
+/// metric names, so only a conservative character set is accepted.
+fn is_safe_identifier(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 128
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.@:-".contains(&b))
+}
+
+fn scheduled_job_is_valid(job: &shared::operations::ScheduledJobConfig) -> bool {
+    let names_ok = is_safe_identifier(&job.name)
+        && is_safe_identifier(&job.service)
+        && is_safe_identifier(&job.timer)
+        && job.service.ends_with(".service")
+        && job.timer.ends_with(".timer");
+    let interval_ok = (1..=31_536_000).contains(&job.max_interval_seconds);
+    // A status file and its metric prefix only make sense together
+    let status_ok = job.status_file.is_some() == job.metric_prefix.is_some()
+        && job.metric_prefix.as_deref().is_none_or(is_safe_identifier);
+    names_ok && interval_ok && status_ok
 }
 
 #[cfg(test)]
@@ -450,7 +544,9 @@ mod tests {
             systemd_units: Vec::new(),
             disk_policy: Default::default(),
             scheduled_jobs: Vec::new(),
+            compose_drift: Default::default(),
             tls_certificate_dirs: Vec::new(),
+            image_versions: ImageVersionsConfig::default(),
             tls: None,
         };
 
@@ -677,11 +773,18 @@ mod tests {
             }],
             disk_policy: Default::default(),
             scheduled_jobs: vec![],
+            compose_drift: Default::default(),
             systemd_units: vec![
                 "nginx.service".to_string(),
                 "postgresql.service".to_string(),
             ],
             tls_certificate_dirs: vec!["/etc/letsencrypt/live".to_string()],
+            image_versions: ImageVersionsConfig {
+                tag_cache_ttl_hours: 72,
+                include_prereleases: true,
+                skip_patterns: vec!["registry.example.com/".to_string()],
+                ..Default::default()
+            },
             tls: Some(TlsConfig {
                 cert_path: "/etc/ssl/server.crt".to_string(),
                 key_path: "/etc/ssl/server.key".to_string(),
@@ -700,6 +803,13 @@ mod tests {
         assert_eq!(loaded.postgres_clusters.len(), 1);
         assert_eq!(loaded.mariadb_clusters.len(), 1);
         assert_eq!(loaded.systemd_units.len(), 2);
+        assert_eq!(loaded.image_versions.tag_cache_ttl_hours, 72);
+        assert_eq!(loaded.image_versions.digest_cache_ttl_hours, 24);
+        assert!(loaded.image_versions.include_prereleases);
+        assert_eq!(
+            loaded.image_versions.skip_patterns,
+            ["registry.example.com/"]
+        );
         assert!(loaded.tls.is_some());
 
         let tls = loaded.tls.unwrap();
@@ -777,7 +887,7 @@ mod tests {
         let config: PostgresClusterConfig = toml::from_str(
             r#"
             name = "custom"
-            host = "203.0.113.50"
+            host = "192.168.1.50"
             port = 5433
             database = "metrics"
             user = "admin"
@@ -786,7 +896,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.name, "custom");
-        assert_eq!(config.host, "203.0.113.50");
+        assert_eq!(config.host, "192.168.1.50");
         assert_eq!(config.port, 5433);
         assert_eq!(config.database, "metrics");
         assert_eq!(config.user, "admin");
@@ -798,7 +908,7 @@ mod tests {
         let config: MariaDBClusterConfig = toml::from_str(
             r#"
             name = "custom"
-            host = "203.0.113.60"
+            host = "192.168.1.60"
             port = 3307
             user = "admin"
             enabled = false
@@ -806,7 +916,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.name, "custom");
-        assert_eq!(config.host, "203.0.113.60");
+        assert_eq!(config.host, "192.168.1.60");
         assert_eq!(config.port, 3307);
         assert_eq!(config.user, "admin");
         assert!(!config.enabled);
@@ -865,8 +975,73 @@ mod tests {
     }
 
     #[test]
+    fn test_compose_silence_env_appends_to_the_configured_list() {
+        let _env = env_guard();
+        std::env::set_var(
+            "CODE_MONITOR_COMPOSE_SILENCE",
+            " ci-lab/* , shop/worker,,ci-lab/*",
+        );
+        let mut config = Config::default();
+        config.compose_drift.silence = vec!["shop/worker".into()];
+        config.apply_env_overrides();
+        std::env::remove_var("CODE_MONITOR_COMPOSE_SILENCE");
+
+        // Kept from config.toml, then the new entry once; blanks dropped
+        assert_eq!(
+            config.compose_drift.silence,
+            vec!["shop/worker", "ci-lab/*"]
+        );
+    }
+
+    #[test]
+    fn test_compose_silence_env_unset_or_blank_changes_nothing() {
+        let _env = env_guard();
+        std::env::remove_var("CODE_MONITOR_COMPOSE_SILENCE");
+        let mut config = Config::default();
+        config.apply_env_overrides();
+        assert!(config.compose_drift.silence.is_empty());
+
+        config.add_compose_silences(" , ");
+        assert!(config.compose_drift.silence.is_empty());
+    }
+
+    #[test]
     fn test_validate_default_config() {
         assert!(Config::default().validate().is_ok());
+    }
+
+    #[test]
+    fn test_image_versions_defaults_and_validation() {
+        let parsed: ImageVersionsConfig = toml::from_str("tag_cache_ttl_hours = 48").unwrap();
+        assert_eq!(parsed.digest_cache_ttl_hours, 24);
+        assert_eq!(parsed.tag_cache_ttl_hours, 48);
+        assert!(!parsed.include_prereleases);
+        assert!(parsed.validate().is_ok());
+
+        for bad in [
+            ImageVersionsConfig {
+                digest_cache_ttl_hours: 0,
+                ..Default::default()
+            },
+            ImageVersionsConfig {
+                tag_cache_ttl_hours: 12,
+                ..Default::default()
+            },
+            ImageVersionsConfig {
+                tag_cache_ttl_hours: 91 * 24,
+                ..Default::default()
+            },
+            ImageVersionsConfig {
+                skip_patterns: vec![" ".to_string()],
+                ..Default::default()
+            },
+        ] {
+            let config = Config {
+                image_versions: bad.clone(),
+                ..Default::default()
+            };
+            assert!(config.validate().is_err(), "{bad:?}");
+        }
     }
 
     #[test]
