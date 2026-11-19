@@ -139,13 +139,13 @@ build:linux-x86_64:
 # QUALITY — SonarQube (só aviso: allow_failure e fora de qualquer needs)
 # ==============================================
 sonarqube:
+  tags: [integracao]
+  interruptible: true
+  allow_failure: true
   stage: quality
   image: sonarsource/sonar-scanner-cli:12.2.0.4256_8.1.0
-  tags:
-    - docker
   needs:
     - { job: test, optional: true, artifacts: true }
-  allow_failure: true
   rules:
     - if: '$SONAR_TOKEN'
   variables:
