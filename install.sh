@@ -17,7 +17,7 @@ Code Monitor installer
 
 Usage:
   curl -sSL https://github.com/${GITHUB_REPO}/releases/latest/download/install.sh | sudo bash
-  ./install.sh [--version v0.1.0] [--component server|client|both] [--no-start]
+  ./install.sh [--version v0.2.0] [--component server|client|both] [--no-start]
 
 Environment:
   CODE_MONITOR_REPO       GitHub repo, default: ${GITHUB_REPO}

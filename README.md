@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/codigocentral/code-monitor/workflows/CI/badge.svg)]()
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/License-AGPL--3.0--or--later-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.1.0-green)]()
+[![Version](https://img.shields.io/badge/version-0.2.0-green)]()
 
 Code Monitor is a **high-performance, low-overhead system monitoring platform** that combines the immediacy and simplicity of `htop` with the multi-node visibility and alerting of modern observability stacks. Engineered from scratch in pure Rust for maximum efficiency, predictability, and memory safety.
 

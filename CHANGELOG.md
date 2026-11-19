@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-19
+
+First release under AGPL-3.0-or-later. Version 0.1.0 stays under MIT.
+
 ### Added
 
 - Product page in `site/` (English, with a Portuguese version in `site/pt/`),

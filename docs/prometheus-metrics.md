@@ -8,7 +8,7 @@ keeps history and decides, with its own rules, when a finding deserves a page.
 ```bash
 monitor-server --address <grpc-ip> --health-address 127.0.0.1 --health-port 9188 \
                --config /etc/code-monitor/config.toml
-monitor-server --version        # 0.1.0 (<git sha>)
+monitor-server --version        # 0.2.0 (<git sha>)
 ```
 
 `/metrics` reveals the host's weak spots (exposed ports, failed units, image

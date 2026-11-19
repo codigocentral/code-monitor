@@ -1886,7 +1886,7 @@ dependencies = [
 
 [[package]]
 name = "monitor-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1924,7 +1924,7 @@ dependencies = [
 
 [[package]]
 name = "monitor-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3176,7 +3176,7 @@ dependencies = [
 
 [[package]]
 name = "shared"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",

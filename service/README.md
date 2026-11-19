@@ -136,7 +136,7 @@ curl http://localhost:8080/health
 
 You should see a JSON response like:
 ```json
-{"status":"healthy","version":"0.1.0","timestamp":"..."}
+{"status":"healthy","version":"0.2.0","timestamp":"..."}
 ```
 
 ---
