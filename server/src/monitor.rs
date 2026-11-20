@@ -142,8 +142,15 @@ impl SystemMonitor {
         mariadb_configs: Vec<MariaDBClusterConfig>,
         systemd_units: Vec<String>,
     ) -> Result<Self> {
-        let mut system = System::new_all();
-        system.refresh_all();
+        // Reading every sensor can block for a long time (an idle NVMe answers
+        // its temperature in ~0.5 s); keep it off the async runtime.
+        let system = tokio::task::spawn_blocking(|| {
+            let mut system = System::new_all();
+            system.refresh_all();
+            system
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("System refresh task failed: {}", e))?;
 
         let postgres_collectors: Vec<PostgresCollector> = postgres_configs
             .into_iter()
@@ -236,8 +243,19 @@ impl SystemMonitor {
                     break;
                 }
 
-                if let Err(e) = Self::update_system_info(&system, &last_update) {
-                    error!("Failed to update system info: {}", e);
+                // refresh_all() is blocking I/O over /proc and /sys (slow
+                // sensors included). On the runtime thread it would stall the
+                // gRPC handlers for as long as the slowest sensor takes.
+                let refresh_system = Arc::clone(&system);
+                let refresh_last_update = Arc::clone(&last_update);
+                match tokio::task::spawn_blocking(move || {
+                    Self::update_system_info(&refresh_system, &refresh_last_update)
+                })
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => error!("Failed to update system info: {}", e),
+                    Err(e) => error!("System refresh task failed: {}", e),
                 }
 
                 // Paging is only meaningful as a rate, so it is sampled on the

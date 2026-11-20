@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Product page redesigned on the Código Central brand (graphite, lime, Sora,
+  Inter and JetBrains Mono), with real screenshots of the terminal dashboard
+  taken against demo servers, Open Graph images in English and Portuguese, and
+  a mobile layout without horizontal scroll.
+
 ## [0.2.0] - 2026-11-19
 
 First release under AGPL-3.0-or-later. Version 0.1.0 stays under MIT.

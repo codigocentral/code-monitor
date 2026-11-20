@@ -861,6 +861,30 @@ mod tests {
     /// message instead of hanging the whole job until the CI timeout.
     const RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+    /// Connects to the test server, retrying until it accepts or a deadline
+    /// passes. A fixed sleep before connecting raced the server task: on a busy
+    /// runner the first connect could land before the listener was served.
+    async fn connect_ready(port: u16) -> tonic::transport::Channel {
+        let endpoint =
+            tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{}", port))
+                .unwrap()
+                .connect_timeout(std::time::Duration::from_secs(2));
+        let deadline = tokio::time::Instant::now() + RPC_TIMEOUT;
+        let mut wait = std::time::Duration::from_millis(20);
+        loop {
+            match endpoint.connect().await {
+                Ok(channel) => return channel,
+                Err(e) if tokio::time::Instant::now() >= deadline => {
+                    panic!("test server on port {} never accepted: {}", port, e)
+                }
+                Err(_) => {
+                    tokio::time::sleep(wait).await;
+                    wait = (wait * 2).min(std::time::Duration::from_millis(500));
+                }
+            }
+        }
+    }
+
     macro_rules! rpc {
         ($call:expr) => {
             tokio::time::timeout(RPC_TIMEOUT, $call)
@@ -971,8 +995,6 @@ mod tests {
             monitor_service_client::MonitorServiceClient,
             monitor_service_server::MonitorServiceServer,
         };
-        use tokio::time::timeout;
-
         let monitor = SystemMonitor::new(1, vec![], vec![], vec![])
             .await
             .expect("Failed to create monitor");
@@ -999,18 +1021,7 @@ mod tests {
                 .await;
         });
 
-        // Wait for server to start
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        let channel = timeout(
-            std::time::Duration::from_secs(5),
-            tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{}", port))
-                .unwrap()
-                .connect(),
-        )
-        .await
-        .expect("Connection timeout")
-        .expect("Failed to connect");
+        let channel = connect_ready(port).await;
 
         let mut client = MonitorServiceClient::new(channel);
         let response = rpc!(client.get_system_info(Request::new(()))).unwrap();
@@ -1054,13 +1065,7 @@ mod tests {
                 .await;
         });
 
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{}", port))
-            .unwrap()
-            .connect()
-            .await
-            .expect("Failed to connect");
+        let channel = connect_ready(port).await;
 
         let mut client = MonitorServiceClient::new(channel);
 
@@ -1111,13 +1116,7 @@ mod tests {
                 .await;
         });
 
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{}", port))
-            .unwrap()
-            .connect()
-            .await
-            .expect("Failed to connect");
+        let channel = connect_ready(port).await;
 
         let mut client = MonitorServiceClient::new(channel);
         let request = Request::new(ProcessesRequest {
@@ -1171,13 +1170,7 @@ mod tests {
                 .await;
         });
 
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{}", port))
-            .unwrap()
-            .connect()
-            .await
-            .expect("Failed to connect");
+        let channel = connect_ready(port).await;
 
         let mut client = MonitorServiceClient::new(channel);
         let response = rpc!(client.get_services(Request::new(()))).unwrap();
@@ -1218,13 +1211,7 @@ mod tests {
                 .await;
         });
 
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{}", port))
-            .unwrap()
-            .connect()
-            .await
-            .expect("Failed to connect");
+        let channel = connect_ready(port).await;
 
         let mut client = MonitorServiceClient::new(channel);
         let response = rpc!(client.get_network_info(Request::new(()))).unwrap();
@@ -1264,13 +1251,7 @@ mod tests {
                 .await;
         });
 
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{}", port))
-            .unwrap()
-            .connect()
-            .await
-            .expect("Failed to connect");
+        let channel = connect_ready(port).await;
 
         let mut client = MonitorServiceClient::new(channel);
         let request = Request::new(ContainersRequest {
@@ -1314,13 +1295,7 @@ mod tests {
                 .await;
         });
 
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{}", port))
-            .unwrap()
-            .connect()
-            .await
-            .expect("Failed to connect");
+        let channel = connect_ready(port).await;
 
         let mut client = MonitorServiceClient::new(channel);
         let response = rpc!(client.get_systemd_info(Request::new(()))).unwrap();
@@ -1382,15 +1357,7 @@ mod tests {
                 .await;
         });
 
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        let channel = rpc!(tonic::transport::Endpoint::from_shared(format!(
-            "http://127.0.0.1:{}",
-            port
-        ))
-        .unwrap()
-        .connect())
-        .expect("Failed to connect");
+        let channel = connect_ready(port).await;
 
         MonitorServiceClient::new(channel)
     }
@@ -1502,13 +1469,7 @@ mod tests {
                 .await;
         });
 
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{}", port))
-            .unwrap()
-            .connect()
-            .await
-            .expect("Failed to connect");
+        let channel = connect_ready(port).await;
 
         let mut client = MonitorServiceClient::new(channel);
         let response = rpc!(client.get_postgres_info(Request::new(()))).unwrap();
@@ -1549,13 +1510,7 @@ mod tests {
                 .await;
         });
 
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{}", port))
-            .unwrap()
-            .connect()
-            .await
-            .expect("Failed to connect");
+        let channel = connect_ready(port).await;
 
         let mut client = MonitorServiceClient::new(channel);
         let response = rpc!(client.get_maria_db_info(Request::new(()))).unwrap();
