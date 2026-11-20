@@ -1,12 +1,30 @@
+<p align="center">
+  <a href="https://codemonitor.codigocentral.com.br/">
+    <img src="site/assets/og.png" alt="Code Monitor: know what is wrong with your servers before your users do" width="100%">
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://codemonitor.codigocentral.com.br/"><b>Website</b></a> ·
+  <a href="https://codemonitor.codigocentral.com.br/pt/">Português</a> ·
+  <a href="https://github.com/codigocentral/code-monitor/releases/latest">Download</a> ·
+  <a href="#-installation--quick-start">Quick start</a>
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0--or--later-blue.svg" alt="License: AGPL-3.0-or-later"></a>
+  <a href="https://github.com/codigocentral/code-monitor/releases/latest"><img src="https://img.shields.io/github/v/release/codigocentral/code-monitor" alt="Latest release"></a>
+</p>
+
 # Code Monitor
 
 > **Lightweight multi-server monitoring built in Rust**
 
-[![CI](https://github.com/codigocentral/code-monitor/workflows/CI/badge.svg)]()
-[![License: AGPL-3.0-or-later](https://img.shields.io/badge/License-AGPL--3.0--or--later-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.2.0-green)]()
-
 Code Monitor is a **high-performance, low-overhead system monitoring platform** that combines the immediacy and simplicity of `htop` with the multi-node visibility and alerting of modern observability stacks. Engineered from scratch in pure Rust for maximum efficiency, predictability, and memory safety.
+
+<p align="center">
+  <img src="site/assets/tui-processes.webp" alt="monitor-client: processes of the selected server, with CPU, memory and status" width="100%">
+</p>
 
 ---
 
@@ -31,6 +49,21 @@ Code Monitor is a **high-performance, low-overhead system monitoring platform** 
 - Multi-server switching from a single pane of glass.
 - 8 dedicated operational tabs: Overview, Services, Processes, Network, Containers, Postgres, MariaDB, Systemd.
 - Local historical metric caching using embedded SQLite.
+
+---
+
+## 📸 Screenshots
+
+<table>
+  <tr>
+    <td width="50%"><img src="site/assets/tui-processes.webp" alt="Processes tab: every process of the selected server with CPU, memory, swap and status"></td>
+    <td width="50%"><img src="site/assets/tui-network.webp" alt="Network tab: interfaces with traffic and listening ports flagged by scope"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Processes</b>: filter, sort and drill into any server</td>
+    <td align="center"><b>Network</b>: interfaces, traffic and ports open to the world</td>
+  </tr>
+</table>
 
 ---
 
