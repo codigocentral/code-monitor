@@ -12,6 +12,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/codigocentral/code-monitor/actions/workflows/ci.yml"><img src="https://github.com/codigocentral/code-monitor/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0--or--later-blue.svg" alt="License: AGPL-3.0-or-later"></a>
   <a href="https://github.com/codigocentral/code-monitor/releases/latest"><img src="https://img.shields.io/github/v/release/codigocentral/code-monitor" alt="Latest release"></a>
 </p>
