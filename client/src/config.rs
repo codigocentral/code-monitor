@@ -486,12 +486,12 @@ pub(crate) mod campaign_path_units {
         let server = endpoint();
         manager.add_server(server.clone()).unwrap();
         let config = manager.load_config().unwrap();
-        for stage in [
-            Fault::Serialize,
-            Fault::Write,
-            Fault::Metadata,
-            Fault::Permissions,
-        ] {
+        let mut stages = vec![Fault::Serialize, Fault::Write];
+        // Restricting the file to its owner is a Unix-only step of the save.
+        if cfg!(unix) {
+            stages.extend([Fault::Metadata, Fault::Permissions]);
+        }
+        for stage in stages {
             let _guard = FaultGuard::arm(stage);
             let error = manager.save_config(&config).unwrap_err().to_string();
             assert!(error.contains("unit"));

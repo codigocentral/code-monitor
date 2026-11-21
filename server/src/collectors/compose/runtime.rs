@@ -8,7 +8,6 @@ use bollard::models::{
     RestartPolicyNameEnum,
 };
 use std::collections::{BTreeSet, HashMap};
-use std::path::Path;
 
 pub const LABEL_PROJECT: &str = "com.docker.compose.project";
 pub const LABEL_SERVICE: &str = "com.docker.compose.service";
@@ -120,10 +119,7 @@ fn mount(point: &MountPoint) -> Option<Mount> {
     let (kind, source) = match point.typ? {
         MountPointTypeEnum::BIND => (
             MountKind::Bind,
-            point
-                .source
-                .as_deref()
-                .map(|s| resolve_path(Path::new("/"), s)),
+            point.source.as_deref().map(|s| resolve_path("/", s)),
         ),
         MountPointTypeEnum::VOLUME => match point.name.as_deref() {
             Some(name) if !is_anonymous_volume_name(name) => {

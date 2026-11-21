@@ -1,7 +1,5 @@
 //! Normalised published ports and mounts, as both sides are compared
 
-use std::path::{Component, Path, PathBuf};
-
 /// One published port: `host_ip:host_port -> container`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Port {
@@ -94,23 +92,41 @@ pub fn is_anonymous_volume_name(name: &str) -> bool {
 
 /// Resolve `path` against `base` and clean `.` and `..` lexically, as
 /// compose does before handing a bind to Docker.
-pub fn resolve_path(base: &Path, path: &str) -> String {
-    let joined: PathBuf = if Path::new(path).is_absolute() {
-        PathBuf::from(path)
+///
+/// Compose paths describe Linux containers, so this is POSIX path logic on
+/// strings, never `std::path`: the result is the same on any host OS.
+pub fn resolve_path(base: &str, path: &str) -> String {
+    let joined = if path.starts_with('/') {
+        path.to_string()
     } else {
-        base.join(path)
+        format!("{base}/{path}")
     };
-    let mut clean = PathBuf::new();
-    for component in joined.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
+    let mut clean: Vec<&str> = Vec::new();
+    for part in joined.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
                 clean.pop();
             }
-            other => clean.push(other.as_os_str()),
+            other => clean.push(other),
         }
     }
-    clean.to_string_lossy().into_owned()
+    let rest = clean.join("/");
+    if joined.starts_with('/') {
+        format!("/{rest}")
+    } else {
+        rest
+    }
+}
+
+/// The directory part of a POSIX `path`: `/srv/shop` for
+/// `/srv/shop/compose.yml`, `/` at the root and empty for a bare file name.
+pub fn posix_parent(path: &str) -> &str {
+    match path.trim_end_matches('/').rfind('/') {
+        Some(0) => "/",
+        Some(i) => &path[..i],
+        None => "",
+    }
 }
 
 /// `no`, `always`, `unless-stopped`, `on-failure` or `on-failure:N`.
@@ -138,10 +154,32 @@ mod tests {
 
     #[test]
     fn test_resolve_path_cleans_relative_parts() {
-        let base = Path::new("/srv/shop");
+        let base = "/srv/shop";
         assert_eq!(resolve_path(base, "./data"), "/srv/shop/data");
         assert_eq!(resolve_path(base, "../shared/conf/"), "/srv/shared/conf");
         assert_eq!(resolve_path(base, "/etc/app"), "/etc/app");
+        assert_eq!(
+            resolve_path("/srv/shop/", "data//sub/./x"),
+            "/srv/shop/data/sub/x"
+        );
+        assert_eq!(resolve_path("/", "../../etc"), "/etc");
+        assert_eq!(resolve_path("/", "/"), "/");
+    }
+
+    #[test]
+    fn test_resolve_path_is_posix_on_every_host() {
+        // A backslash is an ordinary file name character in POSIX, not a
+        // separator, whatever OS the agent was built for.
+        assert_eq!(resolve_path("/srv", "a\\b"), "/srv/a\\b");
+        assert_eq!(resolve_path("relative", "./data"), "relative/data");
+    }
+
+    #[test]
+    fn test_posix_parent() {
+        assert_eq!(posix_parent("/srv/shop/compose.yml"), "/srv/shop");
+        assert_eq!(posix_parent("/compose.yml"), "/");
+        assert_eq!(posix_parent("compose.yml"), "");
+        assert_eq!(posix_parent("/srv/shop/"), "/srv");
     }
 
     #[test]

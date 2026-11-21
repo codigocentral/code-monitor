@@ -11,7 +11,6 @@ use super::interpolate::Variables;
 use super::model::{normalize_restart, resolve_path, Mount, MountKind, Port};
 use shared::compose::ComposeField;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 use yaml_rust2::yaml::Hash;
 use yaml_rust2::{Yaml, YamlLoader};
 
@@ -23,8 +22,8 @@ const MAX_PORT_RANGE: u32 = 1024;
 pub struct ProjectContext<'a> {
     /// Compose project name, which prefixes volume and network names
     pub name: &'a str,
-    /// Where relative bind paths are resolved from
-    pub working_dir: &'a Path,
+    /// Where relative bind paths are resolved from (a POSIX path)
+    pub working_dir: &'a str,
     pub vars: &'a Variables,
 }
 
@@ -595,7 +594,7 @@ mod tests {
             .collect();
         let ctx = ProjectContext {
             name: "shop",
-            working_dir: Path::new("/srv/shop"),
+            working_dir: "/srv/shop",
             vars,
         };
         parse_project(&files, &ctx)

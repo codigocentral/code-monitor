@@ -134,7 +134,14 @@ pub fn load_project(labels: &ComposeLabels) -> Result<DeclaredProject, String> {
     if labels.config_files.is_empty() {
         return Err("the container's labels do not name its compose files".into());
     }
+    // As compose resolves it, a POSIX path: the base for relative binds.
     let working_dir = if labels.working_dir.is_empty() {
+        model::posix_parent(&labels.config_files[0]).to_string()
+    } else {
+        labels.working_dir.clone()
+    };
+    // The same directory on the agent's own filesystem, to read the files.
+    let host_dir = if labels.working_dir.is_empty() {
         Path::new(&labels.config_files[0])
             .parent()
             .unwrap_or(Path::new("/"))
@@ -142,10 +149,10 @@ pub fn load_project(labels: &ComposeLabels) -> Result<DeclaredProject, String> {
     } else {
         PathBuf::from(&labels.working_dir)
     };
-    let vars = read_variables(labels, &working_dir)?;
+    let vars = read_variables(labels, &host_dir)?;
     let mut files = Vec::with_capacity(labels.config_files.len());
     for file in &labels.config_files {
-        let path = absolute(&working_dir, file);
+        let path = absolute(&host_dir, file);
         let text =
             read_capped(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
         files.push((path.display().to_string(), text));
