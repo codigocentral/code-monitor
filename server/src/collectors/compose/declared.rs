@@ -12,8 +12,8 @@ use super::model::{normalize_restart, resolve_path, Mount, MountKind, Port};
 use shared::compose::ComposeField;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use yaml_rust::yaml::Hash;
-use yaml_rust::{Yaml, YamlLoader};
+use yaml_rust2::yaml::Hash;
+use yaml_rust2::{Yaml, YamlLoader};
 
 /// More ports than this in one range is not a real deployment; the field
 /// becomes unknown rather than allocating for it.

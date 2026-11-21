@@ -1,5 +1,5 @@
 //! In-memory HTTP/TLS providers. Polling never reaches a socket or terminal.
-use hyper::client::connect::Connection;
+use hyper_util::rt::TokioIo;
 use std::{
     cell::RefCell,
     collections::VecDeque,
@@ -9,7 +9,7 @@ use std::{
     task::{Context, Poll},
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio_rustls::rustls::{ClientConfig, ServerName};
+use tokio_rustls::rustls::{pki_types::ServerName, ClientConfig};
 use tower::Service;
 #[derive(Default)]
 pub struct State {
@@ -54,9 +54,9 @@ impl HttpConnector {
 }
 pub struct TcpStream(SharedState);
 impl Service<http::Uri> for HttpConnector {
-    type Response = TcpStream;
+    type Response = TokioIo<TcpStream>;
     type Error = io::Error;
-    type Future = std::future::Ready<Result<TcpStream, io::Error>>;
+    type Future = std::future::Ready<Result<TokioIo<TcpStream>, io::Error>>;
     fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<io::Result<()>> {
         Poll::Ready(if self.0.lock().unwrap().ready_error {
             Err(fail())
@@ -70,7 +70,7 @@ impl Service<http::Uri> for HttpConnector {
         std::future::ready(if s.http_error {
             Err(fail())
         } else {
-            Ok(TcpStream(self.0.clone()))
+            Ok(TokioIo::new(TcpStream(self.0.clone())))
         })
     }
 }
@@ -82,7 +82,11 @@ impl From<Arc<ClientConfig>> for TokioTlsConnector {
     }
 }
 impl TokioTlsConnector {
-    pub async fn connect(&self, domain: ServerName, tcp: TcpStream) -> io::Result<TlsStream> {
+    pub async fn connect(
+        &self,
+        domain: ServerName<'static>,
+        tcp: TcpStream,
+    ) -> io::Result<TlsStream> {
         let mut state = tcp.0.lock().unwrap();
         state.domain = Some(format!("{domain:?}"));
         state.alpn = self.0.alpn_protocols.clone();
@@ -144,10 +148,5 @@ impl AsyncWrite for TlsStream {
         } else {
             Ok(())
         })
-    }
-}
-impl Connection for TlsStream {
-    fn connected(&self) -> hyper::client::connect::Connected {
-        hyper::client::connect::Connected::new()
     }
 }

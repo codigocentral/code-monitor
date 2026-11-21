@@ -1,7 +1,7 @@
 # ==============================================
 # GITLAB CI/CD - code-monitor
 # ==============================================
-# MR e main:  lint (fmt + clippy) -> test (cargo test, lcov) -> build (binários
+# MR e main:  lint (fmt + clippy; cargo audit só avisa) -> test (cargo test, lcov) -> build (binários
 #             Linux x86_64 estáticos, musl, versionados) -> sonar (só aviso)
 # main e development: os binários vão também para o Package Registry genérico do projeto,
 #             em code-monitor/<versão>-<sha>/, para o playbook do code-monitor-ops
@@ -29,6 +29,7 @@ stages:
 variables:
   RUST_VERSION: "1.91"
   CARGO_LLVM_COV_VERSION: "0.9.1"
+  CARGO_AUDIT_VERSION: "0.23.0"
   CARGO_HOME: "$CI_PROJECT_DIR/.cargo-home"
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
@@ -60,6 +61,23 @@ lint:
     # The unit-doubles feature swaps the external SDKs for in-memory doubles;
     # lint that configuration too so neither build rots.
     - cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+# Mesmo cargo audit do CI do GitHub (binário fixo, ignores justificados em
+# .cargo/audit.toml): uma vulnerabilidade nova aparece aqui antes da publicação.
+# Não barra o pipeline porque o banco de avisos muda sem commit nosso; o GitHub
+# barra na publicação.
+audit:
+  stage: lint
+  image: rust:$RUST_VERSION-slim-bookworm
+  tags:
+    - docker
+  needs: []
+  allow_failure: true
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates >/dev/null
+  script:
+    - curl -fsSL "https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv${CARGO_AUDIT_VERSION}/cargo-audit-x86_64-unknown-linux-musl-v${CARGO_AUDIT_VERSION}.tgz" | tar xz --strip-components=1 -C /usr/local/cargo/bin "cargo-audit-x86_64-unknown-linux-musl-v${CARGO_AUDIT_VERSION}/cargo-audit"
+    - cargo audit
 
 # As units systemd do produto (agente e timer do firewall) passam pelo
 # systemd-analyze verify: erro de sintaxe ou diretiva desconhecida quebra aqui,

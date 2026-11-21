@@ -203,6 +203,8 @@ fn test_unresolved_variable_is_not_a_false_drift() {
     assert_eq!(confirmed(&runtime), ComposeStatus::InSync);
 }
 
+// Unix permission bits; Windows has no 0o000 equivalent to deny the read.
+#[cfg(unix)]
 #[test]
 fn test_dot_env_without_permission_is_treated_as_absent() {
     use std::os::unix::fs::PermissionsExt;
@@ -274,6 +276,8 @@ fn test_invalid_yaml_is_indeterminate() {
     );
 }
 
+// Unix permission bits; Windows has no 0o000 equivalent to deny the read.
+#[cfg(unix)]
 #[test]
 fn test_unreadable_file_is_indeterminate() {
     use std::os::unix::fs::PermissionsExt;

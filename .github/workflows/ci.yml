@@ -27,6 +27,12 @@ jobs:
       - name: Cache cargo dependencies
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       
+      # shared/build.rs compiles the gRPC protocol, so clippy needs protoc too
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+      
       - name: Check formatting
         run: cargo fmt --all -- --check
       
@@ -105,7 +111,15 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       
+      # Same binary and command as the GitLab `audit` job; ignores, with their
+      # reasons, live in .cargo/audit.toml.
+      - name: Install cargo-audit
+        env:
+          CARGO_AUDIT_VERSION: "0.23.0"
+        run: |
+          mkdir -p "$HOME/.cargo/bin"
+          curl -fsSL "https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv${CARGO_AUDIT_VERSION}/cargo-audit-x86_64-unknown-linux-musl-v${CARGO_AUDIT_VERSION}.tgz" \
+            | tar xz --strip-components=1 -C "$HOME/.cargo/bin" "cargo-audit-x86_64-unknown-linux-musl-v${CARGO_AUDIT_VERSION}/cargo-audit"
+      
       - name: Run cargo audit
-        uses: rustsec/audit-check@e9159ac5f7d7d873ce074ca134da2f445c0a4a61 # v1
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+        run: cargo audit

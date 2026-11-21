@@ -15,10 +15,10 @@ sysinfo = "0.29"
 nix = { version = "0.27", features = ["net"] }
 libc = "0.2"
 tokio = { version = "1.0", features = ["full"] }
-tonic = { version = "0.10", features = ["tls", "gzip"] }
-prost = "0.12"
+tonic = { version = "0.14", features = ["tls-ring", "gzip"] }
+prost = "0.14"
 base64 = "0.21"
-prost-types = "0.12"
+prost-types = "0.14"
 anyhow = "1.0"
 thiserror = "1.0"
 chrono = "0.4"
@@ -26,19 +26,18 @@ rand = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }
 clap = { version = "4.0", features = ["derive"] }
-config = "0.13"
+config = "0.15"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.8"
 tempfile = "3.0"
 tokio-stream = "0.1"
-axum = "0.7"
-tower = "0.4"
-tower-http = { version = "0.5", features = ["trace"] }
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }
 
 # TLS
-rustls = "0.22"
-tonic-rustls = "0.1"
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 # Certificate inventory: pure Rust, so the agent does not depend on a system
 # OpenSSL being present on the monitored host
 x509-parser = "0.16"
@@ -47,12 +46,12 @@ x509-parser = "0.16"
 bollard = "0.16"
 # Compose files, for the drift between declared and running containers.
 # Already in the tree through `config`, so it adds no crate to the build.
-yaml-rust = "0.4"
+yaml-rust2 = "0.11"
 async-trait = "0.1"
 futures-util = "0.3"
 
 # HTTP client for registry manifest checks
-reqwest = { version = "0.11", default-features = false, features = [
+reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls",
 ] }
@@ -64,11 +63,9 @@ tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
 # depend on a system OpenSSL. This matches the rest of the project (rustls
 # everywhere) and lets the server link statically against musl for a binary
 # that runs on any Linux distribution regardless of its glibc.
-mysql_async = { version = "0.36", default-features = false, features = [
-    "default-rustls",
+mysql_async = { version = "0.37", default-features = false, features = [
+    "default-rustls-ring",
 ] }
 
-[build-dependencies]
-tonic-build = "0.10"
 [dev-dependencies]
 log = "=0.4.29"

@@ -26,7 +26,7 @@ The project originated from a Portuguese requirements document (`necessidade.md`
 - **Language**: Rust (Edition 2021)
 - **Workspace**: Cargo workspace with 3 crates (`shared`, `server`, `client`)
 - **Async Runtime**: Tokio
-- **RPC Framework**: gRPC via `tonic` (protobuf compiled with `prost` / `tonic-build`)
+- **RPC Framework**: gRPC via `tonic` (protobuf compiled with `prost` / `tonic-prost-build`)
 - **TUI Framework**: `tui-rs` + `crossterm`
 - **System Info**: `sysinfo` crate
 - **HTTP Health Server**: `axum` (server health checks on port 8080)
@@ -35,7 +35,7 @@ The project originated from a Portuguese requirements document (`necessidade.md`
 - **MariaDB**: `mysql_async`
 - **systemd**: `systemctl` parsing (Linux only)
 - **Authentication**: Simple random base64 access tokens passed in gRPC metadata (`x-access-token` or `Authorization: Bearer`)
-- **TLS**: `rustls` 0.21/0.22, `tokio-rustls` 0.24 — optional server-side TLS and mTLS
+- **TLS**: `rustls` 0.23 (ring provider), `tokio-rustls` 0.26 — optional server-side TLS and mTLS
 - **Client Storage**: `rusqlite` (bundled) for historical metrics
 - **Serialization**: `serde`, `toml`, `bincode`
 - **Error Handling**: `anyhow` for application errors, `thiserror` for structured errors in `shared`
@@ -187,7 +187,7 @@ Interactive setup: `monitor-client --config client-config.toml init`
 | `src/proto/monitoring.proto` | gRPC service definition and Protocol Buffer messages |
 | `src/alerts.rs` | Alert system: `AlertManager`, `AlertRule`, `AlertType`, `AlertSeverity` — threshold-based detection with cooldown and history |
 | `src/notifications.rs` | Notification channels: `WebhookChannel`, `SlackChannel`, `DiscordChannel`, `EmailChannel` — async trait-based delivery |
-| `build.rs` | Compiles `.proto` files using `tonic-build` |
+| `build.rs` | Compiles `.proto` files using `tonic-prost-build` |
 
 ### Server (`server/`)
 
@@ -335,7 +335,7 @@ make release-check   # runs fmt --check, clippy -D warnings, and test --all
   - **Lint job**: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`
   - **Test job**: Builds and tests on `ubuntu-latest` and `windows-latest` with `protoc` installed
   - **Coverage job**: Uses `cargo-tarpaulin` to generate XML coverage and uploads to Codecov
-  - **Security audit job**: Runs `cargo audit` via `rustsec/audit-check`
+  - **Security audit job**: Runs `cargo audit` (pinned cargo-audit release; justified ignores in `.cargo/audit.toml`). The GitLab pipeline runs the same command in a non-blocking `audit` job
 
 - **`.github/workflows/release.yml`** (triggers on `v*` tags):
   - Cross-platform release builds for:

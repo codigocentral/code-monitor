@@ -672,7 +672,12 @@ pub fn served_certificate(
     use std::sync::Arc;
 
     let server_name = rustls::pki_types::ServerName::try_from(name.to_string()).ok()?;
-    let config = rustls::ClientConfig::builder()
+    // Explicit provider: never depend on which crypto backend another crate
+    // in the tree happened to enable as the process default.
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .ok()?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(ReadAnyCertificate))
         .with_no_client_auth();

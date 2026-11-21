@@ -59,7 +59,7 @@ async fn custom_connector_preserves_http_tls_and_invalid_domain_failures() {
     assert!(state.domain.as_ref().unwrap().contains("unit.invalid"));
 }
 #[test]
-fn stream_delegates_reads_writes_flush_shutdown_and_connection_metadata() {
+fn stream_delegates_reads_writes_flush_and_shutdown() {
     let state = Arc::new(Mutex::new(State {
         reads: std::collections::VecDeque::from(b"reply".to_vec()),
         ..Default::default()
@@ -85,7 +85,6 @@ fn stream_delegates_reads_writes_flush_shutdown_and_connection_metadata() {
         Pin::new(&mut stream).poll_shutdown(&mut cx),
         Poll::Ready(Ok(()))
     ));
-    let _metadata = stream.connected();
     {
         let state = state.lock().unwrap();
         assert_eq!(state.writes, b"request");

@@ -47,7 +47,7 @@ impl Parameters for &[&dyn ToSql] {
         self.iter()
             .map(|p| match p.to_sql().unwrap() {
                 ToSqlOutput::Owned(v) => v,
-                ToSqlOutput::Borrowed(v) => v.into(),
+                ToSqlOutput::Borrowed(v) => Value::column_result(v).unwrap(),
                 _ => panic!("unsupported fixture parameter"),
             })
             .collect()

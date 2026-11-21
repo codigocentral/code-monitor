@@ -12,8 +12,8 @@ use crate::unit_grpc::Endpoint;
 use crate::unit_tls::{HttpConnector, TokioTlsConnector};
 use anyhow::{Context, Result};
 #[cfg(any(not(test), not(feature = "unit-doubles")))]
-use hyper::client::connect::HttpConnector;
-use hyper::client::connect::{Connected, Connection};
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::rt::TokioIo;
 use std::{
     future::Future,
     pin::Pin,
@@ -21,7 +21,13 @@ use std::{
     task::{Context as TaskContext, Poll},
 };
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_rustls::rustls::{ClientConfig, ServerName};
+use tokio_rustls::rustls::{
+    self,
+    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+    crypto::CryptoProvider,
+    pki_types::{CertificateDer, ServerName, UnixTime},
+    ClientConfig, DigitallySignedStruct, SignatureScheme,
+};
 #[cfg(any(not(test), not(feature = "unit-doubles")))]
 use tokio_rustls::TlsConnector as TokioTlsConnector;
 #[cfg(any(not(test), not(feature = "unit-doubles")))]
@@ -37,7 +43,8 @@ use tracing::{info, warn};
 
 use shared::types::ClientTlsConfig as TlsConfig;
 
-/// Custom TLS stream that implements hyper's `Connection`.
+/// TLS stream produced by [`SkipVerifyConnector`]; wrapped in [`TokioIo`]
+/// so hyper (and therefore tonic) can drive it.
 pub struct SkipVerifyStream(TransportStream);
 
 impl AsyncRead for SkipVerifyStream {
@@ -71,12 +78,6 @@ impl AsyncWrite for SkipVerifyStream {
     }
 }
 
-impl Connection for SkipVerifyStream {
-    fn connected(&self) -> Connected {
-        Connected::new()
-    }
-}
-
 /// Connector that skips TLS certificate verification.
 #[derive(Clone)]
 pub struct SkipVerifyConnector {
@@ -94,7 +95,7 @@ impl std::fmt::Debug for SkipVerifyConnector {
 }
 
 impl Service<http::Uri> for SkipVerifyConnector {
-    type Response = SkipVerifyStream;
+    type Response = TokioIo<SkipVerifyStream>;
     type Error = std::io::Error;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
@@ -109,14 +110,15 @@ impl Service<http::Uri> for SkipVerifyConnector {
         Box::pin(async move {
             let tcp = Service::call(&mut http, uri)
                 .await
-                .map_err(std::io::Error::other)?;
-            let server_name = ServerName::try_from(domain.as_str())
+                .map_err(std::io::Error::other)?
+                .into_inner();
+            let server_name = ServerName::try_from(domain)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
             let tls_stream = tls
                 .connect(server_name, tcp)
                 .await
                 .map_err(std::io::Error::other)?;
-            Ok(SkipVerifyStream(tls_stream))
+            Ok(TokioIo::new(SkipVerifyStream(tls_stream)))
         })
     }
 }
@@ -137,11 +139,13 @@ pub fn configure_tls(endpoint: Endpoint, tls_config: &TlsConfig) -> Result<TlsSe
     if tls_config.danger_skip_verify {
         warn!("TLS certificate verification disabled (danger_skip_verify=true)");
 
-        let builder = ClientConfig::builder()
-            .with_safe_defaults()
-            .with_custom_certificate_verifier(Arc::new(SkipServerVerification));
-
-        let mut config = builder.with_no_client_auth();
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let mut config = ClientConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .context("Failed to select TLS protocol versions")?
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(SkipServerVerification { provider }))
+            .with_no_client_auth();
         config.alpn_protocols.push(b"h2".to_vec());
 
         let tls = TokioTlsConnector::from(Arc::new(config));
@@ -191,19 +195,57 @@ pub fn configure_tls(endpoint: Endpoint, tls_config: &TlsConfig) -> Result<TlsSe
     })
 }
 
-struct SkipServerVerification;
+/// Accepts any server certificate chain, but still checks that the server
+/// holds the key of the certificate it presented (handshake signatures).
+#[derive(Debug)]
+struct SkipServerVerification {
+    provider: Arc<CryptoProvider>,
+}
 
-impl tokio_rustls::rustls::client::ServerCertVerifier for SkipServerVerification {
+impl ServerCertVerifier for SkipServerVerification {
     fn verify_server_cert(
         &self,
-        _end_entity: &tokio_rustls::rustls::Certificate,
-        _intermediates: &[tokio_rustls::rustls::Certificate],
-        _server_name: &ServerName,
-        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
         _ocsp_response: &[u8],
-        _now: std::time::SystemTime,
-    ) -> Result<tokio_rustls::rustls::client::ServerCertVerified, tokio_rustls::rustls::Error> {
-        Ok(tokio_rustls::rustls::client::ServerCertVerified::assertion())
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 
@@ -355,19 +397,39 @@ mod tests {
         assert!(matches!(result, Poll::Ready(Ok(()))));
     }
 
+    fn skip_verifier() -> SkipServerVerification {
+        SkipServerVerification {
+            provider: Arc::new(rustls::crypto::ring::default_provider()),
+        }
+    }
+
     #[test]
     fn test_skip_server_verification() {
-        use tokio_rustls::rustls::client::ServerCertVerifier;
-        let verifier = SkipServerVerification;
+        let verifier = skip_verifier();
         let result = verifier.verify_server_cert(
-            &tokio_rustls::rustls::Certificate(vec![]),
+            &CertificateDer::from(vec![]),
             &[],
             &ServerName::try_from("localhost").unwrap(),
-            &mut std::iter::empty(),
             &[],
-            std::time::SystemTime::now(),
+            UnixTime::now(),
         );
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_skip_server_verification_advertises_the_provider_schemes() {
+        // Handshake signatures are still verified with the provider's
+        // algorithms, so the verifier must offer exactly those schemes.
+        let verifier = skip_verifier();
+        let schemes = verifier.supported_verify_schemes();
+        assert!(schemes.contains(&SignatureScheme::ED25519));
+        assert!(schemes.contains(&SignatureScheme::ECDSA_NISTP256_SHA256));
+        assert_eq!(
+            schemes,
+            rustls::crypto::ring::default_provider()
+                .signature_verification_algorithms
+                .supported_schemes()
+        );
     }
 }
 

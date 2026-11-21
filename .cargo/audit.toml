@@ -1,0 +1,19 @@
+# cargo-audit configuration, read by `cargo audit` in both CIs (GitHub and GitLab).
+#
+# Only "unmaintained" informational advisories are listed here, never a
+# vulnerability. Each entry says why it is still in the tree and what removes
+# it; delete the entry in the same change that drops the crate.
+
+[advisories]
+ignore = [
+    # `tui` is unmaintained; its successor is `ratatui`. The client dashboard is
+    # built on tui 0.19 (render functions, terminal setup and the test backend),
+    # so the swap is a migration of its own, tracked separately. tui has no
+    # known vulnerability.
+    "RUSTSEC-2023-0049",
+    # `chrono` is flagged unmaintained with no fixed release. It is the date
+    # type across the protocol, storage and collectors; replacing it (jiff or
+    # time) is a cross-crate change, tracked with the tui migration. chrono has
+    # no known vulnerability.
+    "RUSTSEC-2026-0543",
+]

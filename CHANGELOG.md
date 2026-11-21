@@ -13,6 +13,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Inter and JetBrains Mono), with real screenshots of the terminal dashboard
   taken against demo servers, Open Graph images in English and Portuguese, and
   a mobile layout without horizontal scroll.
+- Dependencies: tonic 0.14 and prost 0.14 (hyper 1, h2 0.4), reqwest 0.12,
+  rustls 0.23 everywhere with the ring provider, mysql_async 0.37, rusqlite
+  0.43, config 0.15, indicatif 0.18, axum 0.8, and `yaml-rust2` in place of
+  the unmaintained `yaml-rust` for compose files.
+
+### Security
+
+- `cargo audit` is clean: the update removes the advisories against
+  rustls-webpki (certificate name constraints, CRL handling, distrusted
+  intermediates), rustls, h2, lru, libsqlite3-sys, webpki-roots,
+  tokio-postgres, postgres-protocol, tokio and others. The two remaining
+  "unmaintained" notices with no vulnerability, `tui` and `chrono`, are
+  ignored with their reasons in `.cargo/audit.toml`.
+- The client's `danger_skip_verify` mode still skips the certificate chain
+  only: handshake signatures are verified against the presented certificate.
+
+### Fixed
+
+- CI: the lint job installs `protoc`, tests that rely on Unix permission
+  bits are Unix-only, and `cargo audit` also runs on every GitLab pipeline.
 
 ## [0.2.0] - 2026-11-19
 
